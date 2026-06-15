@@ -129,7 +129,8 @@ nunca se llama dos veces (xterm no lo soporta).
   a su borrar-línea (0x15) y restaurar (0x19 = Ctrl+Y).
 - **Ctrl+Enter / Shift+Enter**: nueva línea (LF 0x0a) sin enviar.
 - **Cabecera** (`buildHeader`): estado (verde/rojo), selector de modelo (menú
-  Haiku 4.5 / Sonnet 4.6 / Opus 4.8 -> envía `/model <id>`), botón @ (enviar nota
+  Haiku 4.5 / Sonnet 4.6 / Opus 4.8 -> envía `/model <id>`), selector de prompt
+  inicial (menú con los `.md` de `Initial Prompts/`), botón @ (enviar nota
   activa), zoom, reiniciar (`restart()`).
 - **Selector de modelo** (`selectModel`): envía `\x15/model <id>\r` (el Ctrl+U
   inicial limpia cualquier borrador para que el comando vaya en su propia línea;
@@ -144,6 +145,17 @@ nunca se llama dos veces (xterm no lo soporta).
   texto al pty con `pasteToPty()` (entrada IPC directa, con marcadores de
   bracketed-paste si el modo está activo) en vez de `term.paste()`, que requería
   la vista montada — por eso antes fallaba si nunca se abría la ventana.
+- **Prompts iniciales en archivos** (carpeta `Initial Prompts/` dentro del
+  plugin, versionada en git): cada `.md` es un prompt inicial seleccionable. El
+  ajuste `initialPromptFile` guarda el nombre del archivo activo; su contenido se
+  lee en tiempo de ejecución (`readActivePrompt()`), no se copia a `data.json`. La
+  cabecera tiene un botón (icono `file-text`) que abre un menú con los `.md`
+  disponibles (`listPromptFiles()`); al elegir uno, `selectInitialPrompt()`
+  persiste la elección y, si hay sesión viva, lo envía al instante. `onload`
+  llama a `ensurePromptsDir()`: crea la carpeta y migra un `initialPrompt` inline
+  antiguo a un archivo la primera vez. El ajuste "Initial prompt" es ahora un
+  desplegable con los archivos de la carpeta. El usuario edita/añade prompts
+  directamente en los `.md`.
 - **Limpieza**: los PNG temporales del pegado se registran y se borran en
   `onunload`; al cargar se barren los `cch-paste-*.png` viejos (`sweepTempImages`).
 - Todos los atajos hacen `stopPropagation` para que Obsidian no se los quede.
@@ -170,5 +182,6 @@ main.js              artefacto compilado (cargado por Obsidian)
 pty-host.js          proceso ayudante: corre node-pty fuera del renderer (NO se
                      empaqueta; se forkea con ELECTRON_RUN_AS_NODE)
 styles.css           xterm.css + layout del panel
+Initial Prompts/     prompts iniciales seleccionables (.md, versionados en git)
 node_modules/        incluye node-pty con su prebuild win32-x64
 ```

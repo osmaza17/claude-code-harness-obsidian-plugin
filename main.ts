@@ -39,9 +39,13 @@ interface HarnessSettings {
   // Extra arguments appended to the claude command (e.g.
   // --append-system-prompt "Be concise" --model opus).
   args: string;
-  // Optional text inserted into the prompt once claude has started, then
-  // submitted — "predefined instructions".
+  // Legacy: inline initial prompt text. Migrated to a file in the "Initial
+  // Prompts" folder on first run; kept only as a fallback / migration source.
   initialPrompt: string;
+  // Active initial prompt: the file name (e.g. "Second Brain.md") inside the
+  // plugin's "Initial Prompts" folder whose content is submitted to claude when
+  // the session starts. Selectable from the panel header. Empty = none.
+  initialPromptFile: string;
   // Slash commands (one per line) run at session start, BEFORE the initial
   // prompt. E.g. /remote-control.
   startupCommands: string;
@@ -58,6 +62,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   fontSize: 14,
   args: "",
   initialPrompt: "",
+  initialPromptFile: "",
   startupCommands: "",
   model: "opus",
 };
@@ -110,6 +115,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private zoomLabel: HTMLElement | null = null;
   private statusDot: HTMLElement | null = null;
   private modelBtn: HTMLElement | null = null;
+  private promptBtn: HTMLElement | null = null;
   private webgl: any = null; // WebglAddon, kept so we can clear its glyph atlas on zoom
   // After a /model switch, Claude may show a "Switch model?" confirmation. We
   // watch the stream and auto-confirm (option 1 is pre-selected).
@@ -121,6 +127,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    this.ensurePromptsDir(); // create "Initial Prompts" + migrate legacy prompt
     this.injectFont();
 
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
@@ -574,8 +581,90 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.send({ t: "input", d });
   }
 
-  /** Once claude is up, run the startup slash commands (e.g. /remote-control),
-   *  then submit the predefined initial prompt — in order, with small gaps. */
+  /** Folder where the selectable initial-prompt .md files live (committed to
+   *  git so they sync). The user edits these files directly. */
+  promptsDir(): string {
+    return path.join(this.pluginDir(), "Initial Prompts");
+  }
+
+  /** The .md files available as initial prompts, sorted by name. */
+  listPromptFiles(): string[] {
+    try {
+      const fs = nodeRequire("fs");
+      return fs
+        .readdirSync(this.promptsDir())
+        .filter((f: string) => f.toLowerCase().endsWith(".md"))
+        .sort((a: string, b: string) => a.localeCompare(b));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Content (trimmed) of the currently selected initial-prompt file, or "". */
+  private readActivePrompt(): string {
+    const file = this.settings.initialPromptFile;
+    if (!file) return "";
+    try {
+      const fs = nodeRequire("fs");
+      const full = path.join(this.promptsDir(), file);
+      return fs.existsSync(full) ? String(fs.readFileSync(full, "utf8")).trim() : "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** Create the "Initial Prompts" folder and migrate any legacy inline prompt
+   *  into a file on first run, so existing setups keep their prompt. */
+  ensurePromptsDir() {
+    try {
+      const fs = nodeRequire("fs");
+      const dir = this.promptsDir();
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      if (!this.listPromptFiles().length && this.settings.initialPrompt?.trim()) {
+        const name = "Initial Prompt.md";
+        fs.writeFileSync(
+          path.join(dir, name),
+          this.settings.initialPrompt.trim() + "\n",
+          "utf8"
+        );
+        if (!this.settings.initialPromptFile) {
+          this.settings.initialPromptFile = name;
+          void this.saveSettings();
+        }
+      }
+    } catch (e) {
+      console.warn("[claude-code-harness] ensurePromptsDir:", e);
+    }
+  }
+
+  /** Paste a prompt into the running session and submit it (Enter after a beat
+   *  so the bracketed paste lands first). No-op if claude isn't running. */
+  private sendPrompt(text: string) {
+    const t = text.trim();
+    if (!t || !this.child) return;
+    this.pasteToPty(t);
+    window.setTimeout(() => this.send({ t: "input", d: "\r" }), 350);
+  }
+
+  /** Choose the active initial prompt from the header. Persists the choice (so
+   *  future sessions use it) and, if a session is running, sends it now. */
+  selectInitialPrompt(file: string) {
+    this.settings.initialPromptFile = file;
+    void this.saveSettings();
+    const label = file ? file.replace(/\.md$/i, "") : "none";
+    if (this.promptBtn) this.promptBtn.title = "Initial prompt: " + label;
+    const text = this.readActivePrompt();
+    if (text && this.child) {
+      this.sendPrompt(text);
+      new Notice("Initial prompt sent: " + label);
+    } else {
+      new Notice("Initial prompt set: " + label + " (runs on next session)");
+    }
+    this.term?.focus();
+  }
+
+  /** Once claude is up, run the startup slash commands, then submit the active
+   *  initial prompt (read from its .md file) — in order, with small gaps. */
   private maybeSendInitial() {
     if (this.initialSent) return;
     this.initialSent = true;
@@ -585,7 +674,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     for (const line of startup.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
       steps.push(line);
     }
-    const prompt = this.settings.initialPrompt?.trim();
+    const prompt = this.readActivePrompt();
     if (prompt) steps.push(prompt);
     if (!steps.length) return;
 
@@ -676,6 +765,36 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         );
       }
       const r = modelBtn.getBoundingClientRect();
+      menu.showAtPosition({ x: r.left, y: r.bottom });
+    };
+
+    // Initial-prompt selector: pick which .md from the "Initial Prompts" folder
+    // is used as the initial prompt (and send it to the running session now).
+    const promptBtn = header.createEl("button", { cls: "cch-btn" });
+    setIcon(promptBtn, "file-text");
+    const cur = this.settings.initialPromptFile;
+    promptBtn.setAttr("aria-label", "Initial prompt");
+    promptBtn.title = "Initial prompt: " + (cur ? cur.replace(/\.md$/i, "") : "none");
+    this.promptBtn = promptBtn;
+    promptBtn.onclick = (e) => {
+      e.preventDefault();
+      const menu = new Menu();
+      const files = this.listPromptFiles();
+      if (!files.length) {
+        menu.addItem((item) =>
+          item.setTitle("No .md in 'Initial Prompts' folder").setDisabled(true)
+        );
+      } else {
+        for (const f of files) {
+          menu.addItem((item) =>
+            item
+              .setTitle(f.replace(/\.md$/i, ""))
+              .setChecked(this.settings.initialPromptFile === f)
+              .onClick(() => this.selectInitialPrompt(f))
+          );
+        }
+      }
+      const r = promptBtn.getBoundingClientRect();
       menu.showAtPosition({ x: r.left, y: r.bottom });
     };
 
@@ -1073,15 +1192,18 @@ class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Initial prompt")
       .setDesc(
-        "Optional text submitted to Claude when the session starts (after the startup commands). Your predefined instructions."
+        "Markdown file submitted to Claude when the session starts (after the startup commands). The files live in the plugin's 'Initial Prompts' folder — edit them there, add your own, or pick one from the panel header."
       )
-      .addTextArea((ta) => {
-        ta.setValue(this.plugin.settings.initialPrompt).onChange(async (value) => {
-          this.plugin.settings.initialPrompt = value;
+      .addDropdown((d) => {
+        d.addOption("", "(none)");
+        for (const f of this.plugin.listPromptFiles()) {
+          d.addOption(f, f.replace(/\.md$/i, ""));
+        }
+        d.setValue(this.plugin.settings.initialPromptFile || "");
+        d.onChange(async (value) => {
+          this.plugin.settings.initialPromptFile = value;
           await this.plugin.saveSettings();
         });
-        ta.inputEl.rows = 3;
-        ta.inputEl.style.width = "100%";
       });
 
     new Setting(containerEl)

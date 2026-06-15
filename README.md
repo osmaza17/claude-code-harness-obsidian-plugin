@@ -19,6 +19,9 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - **Comandos de inicio + prompt inicial** configurables: comandos slash que se
   ejecutan al arrancar (vacío por defecto) y un prompt inicial que se inserta
   después. Se envían se abra o no el panel.
+- **Prompts iniciales en archivos**: los prompts iniciales son archivos `.md` en
+  la carpeta `Initial Prompts/` del plugin (versionados en git). Edítalos ahí o
+  añade los tuyos, y cambia entre ellos desde un botón en la cabecera del panel.
 - **Selector de modelo** en la cabecera (Haiku 4.5 / Sonnet 4.6 / Opus 4.8):
   ejecuta `/model <id>` y auto-confirma el diálogo "Switch model?".
 - **Enviar nota activa**: botón `@` que inserta `@<ruta>` de la nota abierta.
@@ -56,7 +59,7 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Command | Comando a ejecutar (por defecto `claude`). |
 | Extra arguments | Argumentos extra (p. ej. `--append-system-prompt "..."`). |
 | Startup commands | Comandos slash al iniciar, uno por línea (vacío por defecto). |
-| Initial prompt | Prompt que se inserta y envía tras arrancar la sesión. |
+| Initial prompt | Archivo `.md` de `Initial Prompts/` que se envía tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Node.js path | Ruta a `node.exe` real (autodetectada si se deja vacía). |
 
