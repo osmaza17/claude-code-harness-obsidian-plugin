@@ -663,6 +663,23 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.term?.focus();
   }
 
+  /** Open the "Initial Prompts" folder in the OS file manager so the user can
+   *  add or edit prompt files. */
+  openPromptsFolder() {
+    try {
+      this.ensurePromptsDir();
+      const shell = nodeRequire("electron")?.shell;
+      if (shell?.openPath) {
+        void shell.openPath(this.promptsDir());
+      } else {
+        new Notice("Could not open the folder (shell unavailable).");
+      }
+    } catch (e) {
+      new Notice("Could not open the Initial Prompts folder.");
+      console.warn("[claude-code-harness] openPromptsFolder:", e);
+    }
+  }
+
   /** Once claude is up, run the startup slash commands, then submit the active
    *  initial prompt (read from its .md file) — in order, with small gaps. */
   private maybeSendInitial() {
@@ -798,6 +815,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       menu.showAtPosition({ x: r.left, y: r.bottom });
     };
 
+    iconBtn("folder-open", "Edit initial prompts (open folder)", () =>
+      this.openPromptsFolder()
+    );
     iconBtn("at-sign", "Send active note to Claude", () => void this.sendActiveNote());
     iconBtn("minus", "Zoom out (Ctrl -)", () => this.zoomBy(-1));
     const zl = header.createEl("button", {
