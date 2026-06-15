@@ -1,0 +1,9 @@
+{
+  "id": "claude-code-harness",
+  "name": "Claude Code Harness",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Opens a real Claude Code terminal in a dedicated Obsidian side panel, running in your vault.",
+  "author": "osmaza17",
+  "isDesktopOnly": true
+}
