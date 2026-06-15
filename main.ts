@@ -58,7 +58,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   fontSize: 14,
   args: "",
   initialPrompt: "",
-  startupCommands: "/remote-control",
+  startupCommands: "",
   model: "opus",
 };
 

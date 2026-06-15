@@ -16,9 +16,9 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - **Sesión persistente**: arranca al abrir Obsidian aunque no abras el panel, y
   no se cierra al cerrar el panel — solo al cerrar Obsidian o desactivar el
   plugin.
-- **Comandos de inicio + prompt inicial** configurables (por defecto ejecuta
-  `/remote-control` y luego inserta un prompt inicial). Se envían se abra o no
-  el panel.
+- **Comandos de inicio + prompt inicial** configurables: comandos slash que se
+  ejecutan al arrancar (vacío por defecto) y un prompt inicial que se inserta
+  después. Se envían se abra o no el panel.
 - **Selector de modelo** en la cabecera (Haiku 4.5 / Sonnet 4.6 / Opus 4.8):
   ejecuta `/model <id>` y auto-confirma el diálogo "Switch model?".
 - **Enviar nota activa**: botón `@` que inserta `@<ruta>` de la nota abierta.
@@ -55,7 +55,7 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 |---|---|
 | Command | Comando a ejecutar (por defecto `claude`). |
 | Extra arguments | Argumentos extra (p. ej. `--append-system-prompt "..."`). |
-| Startup commands | Comandos slash al iniciar (por defecto `/remote-control`). |
+| Startup commands | Comandos slash al iniciar, uno por línea (vacío por defecto). |
 | Initial prompt | Prompt que se inserta y envía tras arrancar la sesión. |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Node.js path | Ruta a `node.exe` real (autodetectada si se deja vacía). |
