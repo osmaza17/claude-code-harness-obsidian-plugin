@@ -241,14 +241,6 @@
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
 }
-.claude-code-harness .cch-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #4ade80;
-  flex: 0 0 auto;
-}
-.claude-code-harness .cch-title { letter-spacing: 0.2px; }
 .claude-code-harness .cch-spacer { flex: 1 1 auto; }
 .claude-code-harness .cch-btn {
   display: inline-flex;

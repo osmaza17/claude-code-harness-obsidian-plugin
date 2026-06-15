@@ -128,10 +128,12 @@ nunca se llama dos veces (xterm no lo soporta).
 - **Ctrl+Z / Ctrl+Shift+Z**: Claude no tiene undo por carácter, asi que se mapean
   a su borrar-línea (0x15) y restaurar (0x19 = Ctrl+Y).
 - **Ctrl+Enter / Shift+Enter**: nueva línea (LF 0x0a) sin enviar.
-- **Cabecera** (`buildHeader`): estado (verde/rojo), selector de modelo (menú
-  Haiku 4.5 / Sonnet 4.6 / Opus 4.8 -> envía `/model <id>`), selector de prompt
-  inicial (menú con los `.md` de `Initial Prompts/`), botón @ (enviar nota
-  activa), zoom, reiniciar (`restart()`).
+- **Cabecera** (`buildHeader`): botón @ en la esquina izquierda (enviar nota
+  activa), luego a la derecha: selector de modelo (menú Haiku 4.5 / Sonnet 4.6 /
+  Opus 4.8 -> envía `/model <id>`), selector de prompt inicial (menú con los
+  `.md` de `Initial Prompts/`), botón para abrir la carpeta de prompts
+  (`openPromptsFolder()`), zoom, reiniciar (`restart()`). No hay indicador de
+  estado.
 - **Selector de modelo** (`selectModel`): envía `\x15/model <id>\r` (el Ctrl+U
   inicial limpia cualquier borrador para que el comando vaya en su propia línea;
   restaurable con Ctrl+Y). Argumentos válidos comprobados: `haiku`, `sonnet`,

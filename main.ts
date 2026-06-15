@@ -113,7 +113,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private resizeTimer: number | null = null;
   private rafFit: number | null = null; // pending per-frame display fit during a drag
   private zoomLabel: HTMLElement | null = null;
-  private statusDot: HTMLElement | null = null;
   private modelBtn: HTMLElement | null = null;
   private promptBtn: HTMLElement | null = null;
   private webgl: any = null; // WebglAddon, kept so we can clear its glyph atlas on zoom
@@ -562,12 +561,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  private updateStatus() {
-    if (!this.statusDot) return;
-    const running = !!this.child;
-    this.statusDot.style.background = running ? "#4ade80" : "#ef4444";
-    this.statusDot.title = running ? "claude code · running" : "claude code · exited";
-  }
 
   /** Send text to the pty as if pasted, WITHOUT going through xterm's paste()
    *  (which needs the view attached). This is why the startup commands and the
@@ -743,14 +736,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.scheduleFit();
   }
 
-  /** Build the panel header (status · model selector · send note · zoom ·
-   *  restart). Rebuilt each time a panel opens; the persistent terminal host is
-   *  appended after it. */
+  /** Build the panel header (@ send note · model selector · prompt selector ·
+   *  open prompts folder · zoom · restart). Rebuilt each time a panel opens; the
+   *  persistent terminal host is appended after it. */
   private buildHeader(container: HTMLElement) {
     const header = container.createDiv({ cls: "cch-header" });
-    this.statusDot = header.createSpan({ cls: "cch-dot" });
-    header.createSpan({ cls: "cch-title", text: "claude code" });
-    header.createDiv({ cls: "cch-spacer" });
 
     const iconBtn = (icon: string, title: string, onClick: () => void) => {
       const b = header.createEl("button", { cls: "cch-btn" });
@@ -762,6 +752,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         onClick();
       };
     };
+
+    // Left corner: mention the active note with @.
+    iconBtn("at-sign", "Send active note to Claude", () => void this.sendActiveNote());
+    header.createDiv({ cls: "cch-spacer" });
 
     // Model selector.
     const modelBtn = header.createEl("button", {
@@ -818,7 +812,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     iconBtn("folder-open", "Edit initial prompts (open folder)", () =>
       this.openPromptsFolder()
     );
-    iconBtn("at-sign", "Send active note to Claude", () => void this.sendActiveNote());
     iconBtn("minus", "Zoom out (Ctrl -)", () => this.zoomBy(-1));
     const zl = header.createEl("button", {
       cls: "cch-btn cch-zoom",
@@ -829,8 +822,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.zoomLabel = zl;
     iconBtn("plus", "Zoom in (Ctrl +)", () => this.zoomBy(1));
     iconBtn("rotate-ccw", "Restart session", () => this.restart());
-
-    this.updateStatus();
   }
 
   /** Detach the terminal from a closing panel WITHOUT killing the session. */
@@ -1010,7 +1001,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
     this.child = child;
     this.initialSent = false;
-    this.updateStatus();
 
     const isWin = process.platform === "win32";
     const shell = isWin
@@ -1046,7 +1036,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           this.term.writeln(
             "\r\n\x1b[2m[claude exited — run 'Restart Claude Code session' to start a new one]\x1b[0m"
           );
-          this.updateStatus();
           break;
         case "error":
           this.term.writeln("\r\n\x1b[2m[pty-host error] " + msg.message + "\x1b[0m");
@@ -1057,7 +1046,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     child.on("exit", () => {
       if (this.child === child) {
         this.child = null;
-        this.updateStatus();
       }
     });
 
