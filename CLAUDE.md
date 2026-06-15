@@ -77,21 +77,25 @@ nunca se llama dos veces (xterm no lo soporta).
 - **Renderizado de la TUI de Claude (no regresar).** Tres cosas son necesarias
   para que se vea bien (aprendido del harness de ejemplo `terminalPool.ts` /
   `PtyTerminalView.tsx`):
-  1. **Resize: dedup + dos modos + tamaño recordado**. Cada resize hace que la
-     TUI de Claude repinte y empuje el frame anterior al scrollback, apilando el
-     banner. A diferencia del harness de escritorio (panel ya a tamaño completo),
-     el panel lateral de Obsidian **se anima al abrirse** (ancho 0 -> completo) y
-     dispara una ráfaga de resizes. Defensas: (a) `fitNow()` solo manda `resize`
-     cuando cols/rows cambian de verdad; (b) el `ResizeObserver` llama a
-     `onContainerResize()`, que distingue dos fuentes: durante la **ventana de
-     asentamiento** de la animación de apertura (`settleUntil`, ~500ms tras
-     `attachTo`) hace **debounce** (`scheduleFit`, ~120ms) para colapsar la ráfaga
-     en un solo fit; pasada esa ventana, los eventos son **arrastres del usuario**
-     en el divisor y refita **una vez por frame** (`requestAnimationFrame`, campo
-     `rafFit`) para que la rejilla siga al contenedor en vivo en vez de quedarse
-     desfasada y dar un salto al soltar; (c) el tamaño se **persiste**
-     (`settings.cols/rows`) y claude se spawnea a ese tamaño, así el primer fit al
-     abrir el panel es un no-op (sin repintado) en sesiones posteriores.
+  1. **Resize: fit de display por frame + sync al pty con debounce + tamaño
+     recordado**. CLAVE: la TUI de Claude repinta **toda** su pantalla en cada
+     cambio de ancho (SIGWINCH) y, como corre en el buffer principal (no el
+     alternativo, para conservar el historial al salir), cada repintado deja el
+     frame anterior como scrollback. O sea, **cada resize enviado al pty cuesta un
+     banner duplicado**. Por eso `fitNow(syncPty)` separa las dos mitades y
+     `onContainerResize()` (que llama el `ResizeObserver`) hace: (a) **cada frame**
+     un `fitNow(false)` (`requestAnimationFrame`, campo `rafFit`) que solo
+     reajusta xterm al contenedor (re-wrappea el buffer existente, sin gap visual
+     y SIN avisar a claude -> sin repintado -> sin líneas nuevas); (b) **al
+     asentarse** la ráfaga, `scheduleFit()` (debounce ~120ms) hace `fitNow(true)`
+     que sí manda el tamaño real a claude UNA vez -> un solo repintado por gesto
+     de arrastre, en vez de uno por cada columna cruzada. Además `fitNow` solo
+     manda `resize` si cols/rows cambian de verdad, y el tamaño se **persiste**
+     (`settings.cols/rows`) para spawnear claude a ese tamaño (primer fit = no-op).
+     LÍMITE conocido: queda **un** banner duplicado por gesto de resize; es
+     intrínseco a la TUI inline de Claude (cualquier terminal lo hace al
+     redimensionar claude). Para cero duplicados habría que fijar el ancho de
+     claude y no reflowear, a costa de no usar todo el ancho del panel.
   2. **Unicode11Addon** + `term.unicode.activeVersion = "11"`: Claude usa anchos
      de emoji modernos (2 celdas); sin esto los glifos se solapan.
   3. **WebglAddon** cargado tras `term.open()` (con fallback a DOM): mantiene la

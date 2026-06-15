@@ -106,11 +106,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private lastRows = 0;
   private fontLink: HTMLLinkElement | null = null;
   private resizeTimer: number | null = null;
-  private rafFit: number | null = null; // pending per-frame fit during a drag
-  // While the side panel ANIMATES open (width 0 -> full) it fires a burst of
-  // resize events; until this timestamp we debounce them into a single fit.
-  // After it, resize events are real user splitter drags and we refit per frame.
-  private settleUntil = 0;
+  private rafFit: number | null = null; // pending per-frame display fit during a drag
   private zoomLabel: HTMLElement | null = null;
   private statusDot: HTMLElement | null = null;
   private modelBtn: HTMLElement | null = null;
@@ -473,7 +469,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // The side panel ANIMATES open (width 0 -> full), firing a burst of resize
     // events. We debounce so claude is resized once, after the animation
     // settles, instead of repainting (and stacking its banner) on every frame.
-    this.settleUntil = Date.now() + 500;
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         this.scheduleFit();
@@ -623,23 +618,23 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }, 120);
   }
 
-  /** Container ResizeObserver entry point. Two very different sources fire it:
-   *   - the panel's OPEN animation (a burst of growing widths) -> debounce into
-   *     one fit at the end, so claude isn't resized+repainted every frame
-   *     (which stacks its banner);
-   *   - the user dragging the splitter -> refit once PER FRAME (rAF), so the
-   *     grid tracks the container live instead of staying stale until the drag
-   *     stops and snapping. dedup in fitNow() keeps sub-column moves cheap. */
+  /** Container ResizeObserver entry point (panel open animation + splitter drag).
+   *  Both are bursts of width changes. We split the work:
+   *   - every frame: rewrap xterm to the container WITHOUT touching the pty
+   *     (`fitNow(false)`), so the panel tracks the drag live with no gap and,
+   *     crucially, without making claude reprint (which is what stacked the
+   *     duplicate banners);
+   *   - once the burst settles: tell claude the final size ONCE
+   *     (`scheduleFit()` -> `fitNow(true)`), so a whole drag costs a single
+   *     reprint instead of one per column crossed. */
   onContainerResize() {
-    if (Date.now() < this.settleUntil) {
-      this.scheduleFit();
-      return;
+    if (this.rafFit == null) {
+      this.rafFit = requestAnimationFrame(() => {
+        this.rafFit = null;
+        this.fitNow(false);
+      });
     }
-    if (this.rafFit != null) return;
-    this.rafFit = requestAnimationFrame(() => {
-      this.rafFit = null;
-      this.fitNow();
-    });
+    this.scheduleFit();
   }
 
   /** Build the panel header (status · model selector · send note · zoom ·
@@ -708,14 +703,27 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.host?.remove();
   }
 
-  fitNow() {
+  /** Resize xterm to fill its container.
+   *
+   *  `syncPty` controls the expensive half. The Claude TUI redraws its WHOLE
+   *  screen on every width change (SIGWINCH), and because it runs on the main
+   *  buffer — not the alternate screen — each redraw leaves the previous frame
+   *  behind as scrollback. So every pty resize costs one stacked banner.
+   *
+   *  - `syncPty=false` (live drag): only `fit.fit()` — rewrap the EXISTING buffer
+   *    to the new width so the panel tracks the splitter with no visual gap, but
+   *    DON'T tell claude, so it doesn't reprint. No new duplicate lines.
+   *  - `syncPty=true` (drag settled / zoom / open): also send the real size to
+   *    claude. Debounced via scheduleFit so a whole drag = ONE reprint, not one
+   *    per column crossed. */
+  fitNow(syncPty = true) {
     if (!this.fit || !this.term || !this.host?.isConnected) return;
     try {
       this.fit.fit();
       const { cols, rows } = this.term;
       // Only poke the pty when the grid actually changed — otherwise the Claude
       // TUI repaints and stacks its banner in scrollback on every spurious fit.
-      if (cols !== this.lastCols || rows !== this.lastRows) {
+      if (syncPty && (cols !== this.lastCols || rows !== this.lastRows)) {
         this.lastCols = cols;
         this.lastRows = rows;
         this.send({ t: "resize", cols, rows });
