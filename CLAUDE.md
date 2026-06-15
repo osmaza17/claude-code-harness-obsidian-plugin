@@ -77,16 +77,21 @@ nunca se llama dos veces (xterm no lo soporta).
 - **Renderizado de la TUI de Claude (no regresar).** Tres cosas son necesarias
   para que se vea bien (aprendido del harness de ejemplo `terminalPool.ts` /
   `PtyTerminalView.tsx`):
-  1. **Resize: dedup + debounce + tamaño recordado**. Cada resize hace que la
+  1. **Resize: dedup + dos modos + tamaño recordado**. Cada resize hace que la
      TUI de Claude repinte y empuje el frame anterior al scrollback, apilando el
      banner. A diferencia del harness de escritorio (panel ya a tamaño completo),
      el panel lateral de Obsidian **se anima al abrirse** (ancho 0 -> completo) y
-     dispara una ráfaga de ~15 resizes. Tres defensas: (a) `fitNow()` solo manda
-     `resize` cuando cols/rows cambian de verdad; (b) `scheduleFit()` hace
-     **debounce** (~120ms) para colapsar la ráfaga de la animación en un solo
-     fit; (c) el tamaño se **persiste** (`settings.cols/rows`) y claude se spawnea
-     a ese tamaño, así el primer fit al abrir el panel es un no-op (sin repintado)
-     en sesiones posteriores.
+     dispara una ráfaga de resizes. Defensas: (a) `fitNow()` solo manda `resize`
+     cuando cols/rows cambian de verdad; (b) el `ResizeObserver` llama a
+     `onContainerResize()`, que distingue dos fuentes: durante la **ventana de
+     asentamiento** de la animación de apertura (`settleUntil`, ~500ms tras
+     `attachTo`) hace **debounce** (`scheduleFit`, ~120ms) para colapsar la ráfaga
+     en un solo fit; pasada esa ventana, los eventos son **arrastres del usuario**
+     en el divisor y refita **una vez por frame** (`requestAnimationFrame`, campo
+     `rafFit`) para que la rejilla siga al contenedor en vivo en vez de quedarse
+     desfasada y dar un salto al soltar; (c) el tamaño se **persiste**
+     (`settings.cols/rows`) y claude se spawnea a ese tamaño, así el primer fit al
+     abrir el panel es un no-op (sin repintado) en sesiones posteriores.
   2. **Unicode11Addon** + `term.unicode.activeVersion = "11"`: Claude usa anchos
      de emoji modernos (2 celdas); sin esto los glifos se solapan.
   3. **WebglAddon** cargado tras `term.open()` (con fallback a DOM): mantiene la

@@ -106,6 +106,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private lastRows = 0;
   private fontLink: HTMLLinkElement | null = null;
   private resizeTimer: number | null = null;
+  private rafFit: number | null = null; // pending per-frame fit during a drag
+  // While the side panel ANIMATES open (width 0 -> full) it fires a burst of
+  // resize events; until this timestamp we debounce them into a single fit.
+  // After it, resize events are real user splitter drags and we refit per frame.
+  private settleUntil = 0;
   private zoomLabel: HTMLElement | null = null;
   private statusDot: HTMLElement | null = null;
   private modelBtn: HTMLElement | null = null;
@@ -157,6 +162,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (this.resizeTimer != null) {
       window.clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
+    }
+    if (this.rafFit != null) {
+      cancelAnimationFrame(this.rafFit);
+      this.rafFit = null;
     }
     this.killChild();
     this.term?.dispose();
@@ -464,6 +473,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // The side panel ANIMATES open (width 0 -> full), firing a burst of resize
     // events. We debounce so claude is resized once, after the animation
     // settles, instead of repainting (and stacking its banner) on every frame.
+    this.settleUntil = Date.now() + 500;
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         this.scheduleFit();
@@ -613,6 +623,25 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }, 120);
   }
 
+  /** Container ResizeObserver entry point. Two very different sources fire it:
+   *   - the panel's OPEN animation (a burst of growing widths) -> debounce into
+   *     one fit at the end, so claude isn't resized+repainted every frame
+   *     (which stacks its banner);
+   *   - the user dragging the splitter -> refit once PER FRAME (rAF), so the
+   *     grid tracks the container live instead of staying stale until the drag
+   *     stops and snapping. dedup in fitNow() keeps sub-column moves cheap. */
+  onContainerResize() {
+    if (Date.now() < this.settleUntil) {
+      this.scheduleFit();
+      return;
+    }
+    if (this.rafFit != null) return;
+    this.rafFit = requestAnimationFrame(() => {
+      this.rafFit = null;
+      this.fitNow();
+    });
+  }
+
   /** Build the panel header (status · model selector · send note · zoom ·
    *  restart). Rebuilt each time a panel opens; the persistent terminal host is
    *  appended after it. */
@@ -672,6 +701,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Detach the terminal from a closing panel WITHOUT killing the session. */
   detach() {
+    if (this.rafFit != null) {
+      cancelAnimationFrame(this.rafFit);
+      this.rafFit = null;
+    }
     this.host?.remove();
   }
 
@@ -959,7 +992,7 @@ class ClaudeCodeView extends ItemView {
     root.empty();
     root.addClass("claude-code-harness");
     this.plugin.attachTo(root);
-    this.resizeObserver = new ResizeObserver(() => this.plugin.scheduleFit());
+    this.resizeObserver = new ResizeObserver(() => this.plugin.onContainerResize());
     this.resizeObserver.observe(root);
   }
 
