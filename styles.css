@@ -261,6 +261,11 @@
   color: var(--text-normal);
 }
 .claude-code-harness .cch-btn svg { width: 15px; height: 15px; }
+.claude-code-harness .cch-btn.cch-active,
+.claude-code-harness .cch-btn.cch-active:hover {
+  color: var(--color-green, #6BCF7F);
+  background: var(--background-modifier-success, rgba(107, 207, 127, 0.15));
+}
 .claude-code-harness .cch-zoom { font-size: 11px; min-width: 34px; }
 .claude-code-harness .cch-term {
   flex: 1 1 auto;

@@ -16,15 +16,21 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - **Sesión persistente**: arranca al abrir Obsidian aunque no abras el panel, y
   no se cierra al cerrar el panel — solo al cerrar Obsidian o desactivar el
   plugin.
-- **Comandos de inicio + prompt inicial** configurables: comandos slash que se
-  ejecutan al arrancar (vacío por defecto) y un prompt inicial que se inserta
-  después. Se envían se abra o no el panel.
-- **Prompts iniciales en archivos**: los prompts iniciales son archivos `.md` en
-  la carpeta `Initial Prompts/` del plugin (versionados en git). Edítalos ahí o
-  añade los tuyos, y cambia entre ellos desde un botón en la cabecera del panel.
+- **Comandos de inicio + skill** configurables: comandos slash que se ejecutan
+  al arrancar (vacío por defecto) y una skill que se invoca después. Se envían se
+  abra o no el panel.
+- **Selector de skills**: lista las skills de Claude Code en `~/.claude/skills`
+  (cada subcarpeta con un `SKILL.md`) y la invoca como `/<nombre>`. Cámbiala desde
+  un botón (icono ✨) en la cabecera; por defecto `second-brain-assistant`. Otro
+  botón abre la carpeta `~/.claude/skills`.
 - **Selector de modelo** en la cabecera (Haiku 4.5 / Sonnet 4.6 / Opus 4.8):
   ejecuta `/model <id>` y auto-confirma el diálogo "Switch model?".
 - **Enviar nota activa**: botón `@` que inserta `@<ruta>` de la nota abierta.
+- **Remote control (toggle)**: botón (icono 📱) que activa/desactiva
+  `/remote-control`. Al activarlo se pone verde, copia al portapapeles el enlace
+  de la sesión (`https://claude.ai/code/session_…`) y lo abre en Google Chrome
+  (pestaña nueva) para entrar directo a la sesión remota; al desactivarlo,
+  desconecta la sesión.
 - **Zoom de fuente**: `Ctrl +` / `Ctrl -` / `Ctrl 0` y botones en la cabecera.
 - **Copiar / pegar**: `Ctrl+C` (con selección) / `Ctrl+Shift+C` copian; `Ctrl+V`
   pega texto o **imagen** (guarda un PNG temporal y pega su ruta);
@@ -59,7 +65,7 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Command | Comando a ejecutar (por defecto `claude`). |
 | Extra arguments | Argumentos extra (p. ej. `--append-system-prompt "..."`). |
 | Startup commands | Comandos slash al iniciar, uno por línea (vacío por defecto). |
-| Initial prompt | Archivo `.md` de `Initial Prompts/` que se envía tras arrancar (también seleccionable desde la cabecera). |
+| Skill | Skill de `~/.claude/skills` que se invoca como `/<nombre>` tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Node.js path | Ruta a `node.exe` real (autodetectada si se deja vacía). |
 

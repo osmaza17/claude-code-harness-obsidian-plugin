@@ -130,10 +130,40 @@ nunca se llama dos veces (xterm no lo soporta).
 - **Ctrl+Enter / Shift+Enter**: nueva línea (LF 0x0a) sin enviar.
 - **Cabecera** (`buildHeader`): botón @ en la esquina izquierda (enviar nota
   activa), luego a la derecha: selector de modelo (menú Haiku 4.5 / Sonnet 4.6 /
-  Opus 4.8 -> envía `/model <id>`), selector de prompt inicial (menú con los
-  `.md` de `Initial Prompts/`), botón para abrir la carpeta de prompts
-  (`openPromptsFolder()`), zoom, reiniciar (`restart()`). No hay indicador de
+  Opus 4.8 -> envía `/model <id>`), selector de skill (icono `sparkles`; menú con
+  las skills de `~/.claude/skills`), botón para abrir la carpeta de skills
+  (`openSkillsFolder()`), botón **toggle de remote control** (icono `smartphone`;
+  `toggleRemoteControl()`), zoom, reiniciar (`restart()`). No hay indicador de
   estado.
+- **Remote control (toggle de dos estados)** (`toggleRemoteControl`): clave del
+  comportamiento de `/remote-control`: la **primera** ejecución solo **conecta**
+  (muestra `/rc connecting…` → `/rc active` en la barra de estado) y NO imprime la
+  URL; ejecutarlo **estando ya conectado** abre un menú (Disconnect · Show QR code
+  · Continue) que sí imprime la URL `https://claude.ai/code/session_…`.
+  - **OFF→ON**: envía el comando (conecta) y, para reabrir el menú y sacar la URL,
+    usa `fireRemoteMenu()` (one-shot, guardado por `remoteMenuFired`): vía rápida =
+    `maybeAfterRemoteActive` lo dispara al ver `/rc active`; respaldo = un timer a
+    ~3,5 s (el menú aparece aunque siga en "connecting…", así que no se depende de
+    parsear la barra de estado). `fireRemoteMenu` reenvía `/remote-control`, arma
+    `awaitRemoteUrl` y, tras ~1,5 s, manda Esc para seguir conectado.
+    `maybeCaptureRemoteUrl` saca la URL de la salida del PTY (regex), la copia al
+    portapapeles y la abre en el navegador (`openInBrowser`): intenta Chrome
+    explícito (rutas conocidas de `chrome.exe`; si no, `cmd /c start chrome`) y, de
+    fallar, `shell.openExternal` (navegador por defecto). Abrir Chrome con la URL
+    reutiliza la ventana existente -> pestaña nueva -> entra directo a la sesión.
+    El botón se pone verde (clase CSS `cch-active`).
+  - **ON→OFF**: reenvía el comando y, tras ~0,7 s, manda flecha arriba ×2
+    (Continue→QR→Disconnect) + Enter para desconectar. OJO: las flechas se inyectan
+    en crudo (sin pasar por el manejo de teclas de xterm), así que hay que usar la
+    secuencia que corresponde al **DECCKM** real (`term.modes.applicationCursorKeysMode`):
+    application cursor keys -> Up = `\x1bOA`, no `\x1b[A`. La TUI de Claude activa
+    ese modo, y mandar `\x1b[A` no movía el cursor (el Enter caía en "Continue" y no
+    desconectaba). Cada pulsación se envía con un pequeño desfase para que el TUI
+    las registre.
+  Los tres watchers (`maybeAfterRemoteActive`, `maybeCaptureRemoteUrl`,
+  `maybeConfirmModel`) cuelgan del handler `data`. El estado `remoteOn` vive en el
+  plugin y se resetea en `restart()` y cuando claude sale; `updateRemoteBtn()`
+  refleja el estado en el botón (se reconstruye con la cabecera).
 - **Selector de modelo** (`selectModel`): envía `\x15/model <id>\r` (el Ctrl+U
   inicial limpia cualquier borrador para que el comando vaya en su propia línea;
   restaurable con Ctrl+Y). Argumentos válidos comprobados: `haiku`, `sonnet`,
@@ -141,23 +171,24 @@ nunca se llama dos veces (xterm no lo soporta).
 - **Comandos**: "Open Claude Code panel", "Restart Claude Code session",
   "Send active note to Claude" (inserta `@<ruta>` de la nota activa).
 - **Instrucciones predefinidas**: ajuste "Extra arguments" (se anexa al comando,
-  p. ej. `--append-system-prompt "..."`) e "Initial prompt". `maybeSendInitial`
-  corre los `startupCommands` (p. ej. `/remote-control`) y luego el initial prompt
-  cuando llega la primera salida de claude, **se abra o no el panel**. Manda el
-  texto al pty con `pasteToPty()` (entrada IPC directa, con marcadores de
-  bracketed-paste si el modo está activo) en vez de `term.paste()`, que requería
-  la vista montada — por eso antes fallaba si nunca se abría la ventana.
-- **Prompts iniciales en archivos** (carpeta `Initial Prompts/` dentro del
-  plugin, versionada en git): cada `.md` es un prompt inicial seleccionable. El
-  ajuste `initialPromptFile` guarda el nombre del archivo activo; su contenido se
-  lee en tiempo de ejecución (`readActivePrompt()`), no se copia a `data.json`. La
-  cabecera tiene un botón (icono `file-text`) que abre un menú con los `.md`
-  disponibles (`listPromptFiles()`); al elegir uno, `selectInitialPrompt()`
-  persiste la elección y, si hay sesión viva, lo envía al instante. `onload`
-  llama a `ensurePromptsDir()`: crea la carpeta y migra un `initialPrompt` inline
-  antiguo a un archivo la primera vez. El ajuste "Initial prompt" es ahora un
-  desplegable con los archivos de la carpeta. El usuario edita/añade prompts
-  directamente en los `.md`.
+  p. ej. `--append-system-prompt "..."`) y "Skill". `maybeSendInitial` corre los
+  `startupCommands` (p. ej. `/remote-control`) y luego invoca la skill activa
+  (`/<skill>`) cuando llega la primera salida de claude, **se abra o no el
+  panel**. Cada paso se manda al pty con `pasteToPty()` (entrada IPC directa, con
+  marcadores de bracketed-paste si el modo está activo) en vez de `term.paste()`,
+  que requería la vista montada — por eso antes fallaba si nunca se abría la
+  ventana.
+- **Skills de Claude Code** (carpeta `~/.claude/skills`, propiedad de Claude, NO
+  versionada con el plugin): cada subcarpeta con un `SKILL.md` es una skill
+  seleccionable, invocable como `/<nombre-de-carpeta>`. El ajuste `skill` guarda
+  el nombre de la skill activa (por defecto `second-brain-assistant`). La cabecera
+  tiene un botón (icono `sparkles`) que abre un menú con las skills disponibles
+  (`listSkills()`, lee `~/.claude/skills` y filtra subcarpetas con `SKILL.md`) más
+  una opción "(none)"; al elegir una, `selectSkill()` persiste la elección y, si
+  hay sesión viva, envía `\x15/<nombre>\r` al instante (mismo patrón que el
+  selector de modelo). El ajuste "Skill" es un desplegable con esas skills. El
+  botón de carpeta (`openSkillsFolder()`) abre `~/.claude/skills`. (No hay
+  migración del antiguo sistema de "Initial Prompts": el campo viejo se ignora.)
 - **Limpieza**: los PNG temporales del pegado se registran y se borran en
   `onunload`; al cargar se barren los `cch-paste-*.png` viejos (`sweepTempImages`).
 - Todos los atajos hacen `stopPropagation` para que Obsidian no se los quede.
@@ -184,6 +215,5 @@ main.js              artefacto compilado (cargado por Obsidian)
 pty-host.js          proceso ayudante: corre node-pty fuera del renderer (NO se
                      empaqueta; se forkea con ELECTRON_RUN_AS_NODE)
 styles.css           xterm.css + layout del panel
-Initial Prompts/     prompts iniciales seleccionables (.md, versionados en git)
 node_modules/        incluye node-pty con su prebuild win32-x64
 ```

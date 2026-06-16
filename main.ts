@@ -39,15 +39,12 @@ interface HarnessSettings {
   // Extra arguments appended to the claude command (e.g.
   // --append-system-prompt "Be concise" --model opus).
   args: string;
-  // Legacy: inline initial prompt text. Migrated to a file in the "Initial
-  // Prompts" folder on first run; kept only as a fallback / migration source.
-  initialPrompt: string;
-  // Active initial prompt: the file name (e.g. "Second Brain.md") inside the
-  // plugin's "Initial Prompts" folder whose content is submitted to claude when
-  // the session starts. Selectable from the panel header. Empty = none.
-  initialPromptFile: string;
-  // Slash commands (one per line) run at session start, BEFORE the initial
-  // prompt. E.g. /remote-control.
+  // Active skill: the folder name (e.g. "second-brain-assistant") inside Claude
+  // Code's skills folder (~/.claude/skills). It is invoked as /<name> when the
+  // session starts. Selectable from the panel header. Empty = none.
+  skill: string;
+  // Slash commands (one per line) run at session start, BEFORE the skill.
+  // E.g. /remote-control.
   startupCommands: string;
   // Last model picked from the header menu (for the button label). The actual
   // model is owned by Claude (/model saves it as the default).
@@ -61,8 +58,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   rows: 30,
   fontSize: 14,
   args: "",
-  initialPrompt: "",
-  initialPromptFile: "",
+  skill: "second-brain-assistant",
   startupCommands: "",
   model: "opus",
 };
@@ -114,7 +110,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private rafFit: number | null = null; // pending per-frame display fit during a drag
   private zoomLabel: HTMLElement | null = null;
   private modelBtn: HTMLElement | null = null;
-  private promptBtn: HTMLElement | null = null;
+  private skillBtn: HTMLElement | null = null;
   private webgl: any = null; // WebglAddon, kept so we can clear its glyph atlas on zoom
   // After a /model switch, Claude may show a "Switch model?" confirmation. We
   // watch the stream and auto-confirm (option 1 is pre-selected).
@@ -122,11 +118,23 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private modelConfirmBuf = "";
   private modelConfirmDeadline = 0;
   private tempImages: string[] = []; // temp PNGs from image paste, cleaned on unload
-  private initialSent = false; // whether the initial prompt was inserted this session
+  private initialSent = false; // whether the startup steps were inserted this session
+  // Remote control toggle (/remote-control). remoteOn drives the button's green
+  // state; while awaiting the menu we scrape the session URL to the clipboard.
+  private remoteBtn: HTMLElement | null = null;
+  private remoteOn = false;
+  // After connecting we wait for "/rc active" in the output, then re-run
+  // /remote-control to open the menu that prints the session URL.
+  private awaitRemoteActive = false;
+  private remoteActiveBuf = "";
+  private remoteActiveDeadline = 0;
+  private remoteMenuFired = false; // guards the one-shot menu reopen
+  private awaitRemoteUrl = false;
+  private remoteUrlBuf = "";
+  private remoteUrlDeadline = 0;
 
   async onload() {
     await this.loadSettings();
-    this.ensurePromptsDir(); // create "Initial Prompts" + migrate legacy prompt
     this.injectFont();
 
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
@@ -574,107 +582,225 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.send({ t: "input", d });
   }
 
-  /** Folder where the selectable initial-prompt .md files live (committed to
-   *  git so they sync). The user edits these files directly. */
-  promptsDir(): string {
-    return path.join(this.pluginDir(), "Initial Prompts");
+  /** Claude Code's personal skills folder (~/.claude/skills). Each skill is a
+   *  subfolder with a SKILL.md, invoked as /<folder-name>. */
+  skillsDir(): string {
+    const os = nodeRequire("os");
+    return path.join(os.homedir(), ".claude", "skills");
   }
 
-  /** The .md files available as initial prompts, sorted by name. */
-  listPromptFiles(): string[] {
+  /** Names of the skills available in ~/.claude/skills (subfolders containing a
+   *  SKILL.md), sorted. The folder name is the /<name> used to invoke it. */
+  listSkills(): string[] {
     try {
       const fs = nodeRequire("fs");
+      const dir = this.skillsDir();
       return fs
-        .readdirSync(this.promptsDir())
-        .filter((f: string) => f.toLowerCase().endsWith(".md"))
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e: any) => e.isDirectory())
+        .map((e: any) => e.name)
+        .filter((name: string) =>
+          fs.existsSync(path.join(dir, name, "SKILL.md"))
+        )
         .sort((a: string, b: string) => a.localeCompare(b));
     } catch {
       return [];
     }
   }
 
-  /** Content (trimmed) of the currently selected initial-prompt file, or "". */
-  private readActivePrompt(): string {
-    const file = this.settings.initialPromptFile;
-    if (!file) return "";
-    try {
-      const fs = nodeRequire("fs");
-      const full = path.join(this.promptsDir(), file);
-      return fs.existsSync(full) ? String(fs.readFileSync(full, "utf8")).trim() : "";
-    } catch {
-      return "";
-    }
-  }
-
-  /** Create the "Initial Prompts" folder and migrate any legacy inline prompt
-   *  into a file on first run, so existing setups keep their prompt. */
-  ensurePromptsDir() {
-    try {
-      const fs = nodeRequire("fs");
-      const dir = this.promptsDir();
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      if (!this.listPromptFiles().length && this.settings.initialPrompt?.trim()) {
-        const name = "Initial Prompt.md";
-        fs.writeFileSync(
-          path.join(dir, name),
-          this.settings.initialPrompt.trim() + "\n",
-          "utf8"
-        );
-        if (!this.settings.initialPromptFile) {
-          this.settings.initialPromptFile = name;
-          void this.saveSettings();
-        }
-      }
-    } catch (e) {
-      console.warn("[claude-code-harness] ensurePromptsDir:", e);
-    }
-  }
-
-  /** Paste a prompt into the running session and submit it (Enter after a beat
-   *  so the bracketed paste lands first). No-op if claude isn't running. */
-  private sendPrompt(text: string) {
-    const t = text.trim();
-    if (!t || !this.child) return;
-    this.pasteToPty(t);
-    window.setTimeout(() => this.send({ t: "input", d: "\r" }), 350);
-  }
-
-  /** Choose the active initial prompt from the header. Persists the choice (so
-   *  future sessions use it) and, if a session is running, sends it now. */
-  selectInitialPrompt(file: string) {
-    this.settings.initialPromptFile = file;
+  /** Choose the active skill from the header. Persists the choice (so future
+   *  sessions invoke it) and, if a session is running, invokes it now. Sending
+   *  uses the same `\x15/<name>\r` pattern as selectModel: the leading Ctrl+U
+   *  clears any draft so the slash command runs on its own line. */
+  selectSkill(name: string) {
+    this.settings.skill = name;
     void this.saveSettings();
-    const label = file ? file.replace(/\.md$/i, "") : "none";
-    if (this.promptBtn) this.promptBtn.title = "Initial prompt: " + label;
-    const text = this.readActivePrompt();
-    if (text && this.child) {
-      this.sendPrompt(text);
-      new Notice("Initial prompt sent: " + label);
+    const label = name || "none";
+    if (this.skillBtn) this.skillBtn.title = "Skill: " + label;
+    if (name && this.child) {
+      this.send({ t: "input", d: `\x15/${name}\r` });
+      new Notice("Skill loaded: /" + name);
     } else {
-      new Notice("Initial prompt set: " + label + " (runs on next session)");
+      new Notice("Skill set: " + label + " (loads on next session)");
     }
     this.term?.focus();
   }
 
-  /** Open the "Initial Prompts" folder in the OS file manager so the user can
-   *  add or edit prompt files. */
-  openPromptsFolder() {
+  /** Open Claude Code's skills folder (~/.claude/skills) in the OS file manager. */
+  openSkillsFolder() {
     try {
-      this.ensurePromptsDir();
       const shell = nodeRequire("electron")?.shell;
       if (shell?.openPath) {
-        void shell.openPath(this.promptsDir());
+        void shell.openPath(this.skillsDir());
       } else {
         new Notice("Could not open the folder (shell unavailable).");
       }
     } catch (e) {
-      new Notice("Could not open the Initial Prompts folder.");
-      console.warn("[claude-code-harness] openPromptsFolder:", e);
+      new Notice("Could not open the skills folder.");
+      console.warn("[claude-code-harness] openSkillsFolder:", e);
     }
   }
 
-  /** Once claude is up, run the startup slash commands, then submit the active
-   *  initial prompt (read from its .md file) — in order, with small gaps. */
+  /** Two-state remote control toggle.
+   *  A first /remote-control just connects (shows "/rc connecting…" -> "/rc
+   *  active"); it does NOT print the URL. Running it again WHILE connected opens
+   *  a menu (Disconnect · Show QR code · > Continue) that prints the session URL
+   *  (https://claude.ai/code/session_…).
+   *  - OFF -> ON: connect, then once "/rc active" shows, re-run the command to
+   *    open the menu, scrape the URL to the clipboard and dismiss with Esc
+   *    ("Esc to continue") so the session stays connected. See maybeAfterRemoteActive.
+   *  - ON -> OFF: open the menu, arrow Up twice (Continue -> QR -> Disconnect)
+   *    and Enter to select "Disconnect this session".
+   *  The leading Ctrl+U clears any draft so the command lands on its own line. */
+  toggleRemoteControl() {
+    if (!this.child) {
+      new Notice("No live session");
+      return;
+    }
+    if (!this.remoteOn) {
+      this.send({ t: "input", d: "\x15/remote-control\r" });
+      this.remoteOn = true;
+      this.updateRemoteBtn();
+      new Notice("Remote control connecting…");
+      // Reopen the menu to surface + copy the URL. Fast path: as soon as the
+      // output shows "/rc active" (maybeAfterRemoteActive). Fallback: a timer,
+      // since the menu also appears while still "connecting…".
+      this.remoteMenuFired = false;
+      this.awaitRemoteActive = true;
+      this.remoteActiveBuf = "";
+      this.remoteActiveDeadline = Date.now() + 20000;
+      window.setTimeout(() => this.fireRemoteMenu(), 3500);
+    } else {
+      this.send({ t: "input", d: "\x15/remote-control\r" });
+      // Menu default is "Continue"; Up x2 lands on "Disconnect this session".
+      // Use the cursor-key sequence that matches xterm's DECCKM mode (the TUI
+      // usually enables application cursor keys, where Up is ESC O A, not ESC [ A),
+      // and send each keypress with a small gap so the TUI registers them.
+      const appCursor = !!(this.term as any)?.modes?.applicationCursorKeysMode;
+      const up = appCursor ? "\x1bOA" : "\x1b[A";
+      window.setTimeout(() => this.send({ t: "input", d: up }), 700);
+      window.setTimeout(() => this.send({ t: "input", d: up }), 820);
+      window.setTimeout(() => this.send({ t: "input", d: "\r" }), 940);
+      this.remoteOn = false;
+      this.awaitRemoteActive = false;
+      this.updateRemoteBtn();
+      new Notice("Remote control off");
+    }
+    this.term?.focus();
+  }
+
+  /** Fast path: when the output shows "/rc active", open the menu immediately. */
+  private maybeAfterRemoteActive(chunk: string) {
+    if (!this.awaitRemoteActive) return;
+    if (Date.now() > this.remoteActiveDeadline) {
+      this.awaitRemoteActive = false;
+      return;
+    }
+    this.remoteActiveBuf = (this.remoteActiveBuf + chunk).slice(-4000);
+    const clean = this.remoteActiveBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+    if (/\/rc active/i.test(clean)) this.fireRemoteMenu();
+  }
+
+  /** One-shot: re-run /remote-control to open the menu (which prints the session
+   *  URL), arm the URL capture, then dismiss with Esc to stay connected. */
+  private fireRemoteMenu() {
+    if (this.remoteMenuFired || !this.remoteOn || !this.child) return;
+    this.remoteMenuFired = true;
+    this.awaitRemoteActive = false;
+    this.send({ t: "input", d: "\x15/remote-control\r" });
+    this.awaitRemoteUrl = true;
+    this.remoteUrlBuf = "";
+    this.remoteUrlDeadline = Date.now() + 8000;
+    window.setTimeout(() => this.send({ t: "input", d: "\x1b" }), 700);
+  }
+
+  /** Reflect remoteOn on the header button (green when active). */
+  private updateRemoteBtn() {
+    if (!this.remoteBtn) return;
+    this.remoteBtn.toggleClass("cch-active", this.remoteOn);
+    this.remoteBtn.title = this.remoteOn
+      ? "Remote control ON — click to disconnect"
+      : "Activate remote control (/remote-control)";
+  }
+
+  /** While awaiting the remote-control menu, scrape the session URL from the
+   *  terminal output and copy it to the clipboard (once). */
+  private maybeCaptureRemoteUrl(chunk: string) {
+    if (!this.awaitRemoteUrl) return;
+    if (Date.now() > this.remoteUrlDeadline) {
+      this.awaitRemoteUrl = false;
+      return;
+    }
+    this.remoteUrlBuf = (this.remoteUrlBuf + chunk).slice(-5000);
+    const clean = this.remoteUrlBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+    const m = clean.match(/https:\/\/claude\.ai\/code\/session_[\w-]+/);
+    if (m) {
+      this.awaitRemoteUrl = false;
+      const url = m[0];
+      try {
+        const clip = nodeRequire("electron")?.clipboard;
+        if (clip) clip.writeText(url);
+        else void navigator.clipboard?.writeText(url).catch(() => {});
+      } catch {
+        /* clipboard unavailable */
+      }
+      this.openInBrowser(url);
+      new Notice("Remote session opening in Chrome:\n" + url);
+    }
+  }
+
+  /** Open the remote session URL, preferring Google Chrome (a new tab reuses the
+   *  running Chrome). Falls back to the OS default browser if Chrome isn't found.
+   *  The link is also on the clipboard, so this is best-effort. */
+  private openInBrowser(url: string) {
+    try {
+      const cp = nodeRequire("child_process");
+      const fs = nodeRequire("fs");
+      const os = nodeRequire("os");
+      const candidates = [
+        path.join(
+          (process.env as any)["PROGRAMFILES"] || "C:\\Program Files",
+          "Google\\Chrome\\Application\\chrome.exe"
+        ),
+        path.join(
+          (process.env as any)["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)",
+          "Google\\Chrome\\Application\\chrome.exe"
+        ),
+        path.join(
+          os.homedir(),
+          "AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"
+        ),
+      ];
+      const exe = candidates.find((p: string) => {
+        try {
+          return fs.existsSync(p);
+        } catch {
+          return false;
+        }
+      });
+      if (exe) {
+        cp.spawn(exe, [url], { detached: true, stdio: "ignore" }).unref();
+        return;
+      }
+      // Let Windows resolve "chrome" via its App Paths registry entry.
+      cp.spawn("cmd", ["/c", "start", "chrome", url], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      }).unref();
+      return;
+    } catch {
+      /* fall through to the default browser */
+    }
+    try {
+      nodeRequire("electron")?.shell?.openExternal(url);
+    } catch {
+      /* nothing else to try; the URL is still on the clipboard */
+    }
+  }
+
+  /** Once claude is up, run the startup slash commands, then invoke the active
+   *  skill (/<name>) — in order, with small gaps. */
   private maybeSendInitial() {
     if (this.initialSent) return;
     this.initialSent = true;
@@ -684,8 +810,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     for (const line of startup.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
       steps.push(line);
     }
-    const prompt = this.readActivePrompt();
-    if (prompt) steps.push(prompt);
+    if (this.settings.skill) steps.push("/" + this.settings.skill);
     if (!steps.length) return;
 
     let i = 0;
@@ -736,9 +861,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.scheduleFit();
   }
 
-  /** Build the panel header (@ send note · model selector · prompt selector ·
-   *  open prompts folder · zoom · restart). Rebuilt each time a panel opens; the
-   *  persistent terminal host is appended after it. */
+  /** Build the panel header (@ send note · model selector · skill selector ·
+   *  open skills folder · remote control · zoom · restart). Rebuilt each time a
+   *  panel opens; the persistent terminal host is appended after it. */
   private buildHeader(container: HTMLElement) {
     const header = container.createDiv({ cls: "cch-header" });
 
@@ -779,39 +904,49 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       menu.showAtPosition({ x: r.left, y: r.bottom });
     };
 
-    // Initial-prompt selector: pick which .md from the "Initial Prompts" folder
-    // is used as the initial prompt (and send it to the running session now).
-    const promptBtn = header.createEl("button", { cls: "cch-btn" });
-    setIcon(promptBtn, "file-text");
-    const cur = this.settings.initialPromptFile;
-    promptBtn.setAttr("aria-label", "Initial prompt");
-    promptBtn.title = "Initial prompt: " + (cur ? cur.replace(/\.md$/i, "") : "none");
-    this.promptBtn = promptBtn;
-    promptBtn.onclick = (e) => {
+    // Skill selector: pick which skill from ~/.claude/skills is invoked as
+    // /<name> (and invoke it in the running session now).
+    const skillBtn = header.createEl("button", { cls: "cch-btn" });
+    setIcon(skillBtn, "sparkles");
+    const cur = this.settings.skill;
+    skillBtn.setAttr("aria-label", "Skill");
+    skillBtn.title = "Skill: " + (cur || "none");
+    this.skillBtn = skillBtn;
+    skillBtn.onclick = (e) => {
       e.preventDefault();
       const menu = new Menu();
-      const files = this.listPromptFiles();
-      if (!files.length) {
+      const skills = this.listSkills();
+      if (!skills.length) {
         menu.addItem((item) =>
-          item.setTitle("No .md in 'Initial Prompts' folder").setDisabled(true)
+          item.setTitle("No skills in ~/.claude/skills").setDisabled(true)
         );
       } else {
-        for (const f of files) {
+        for (const s of skills) {
           menu.addItem((item) =>
             item
-              .setTitle(f.replace(/\.md$/i, ""))
-              .setChecked(this.settings.initialPromptFile === f)
-              .onClick(() => this.selectInitialPrompt(f))
+              .setTitle(s)
+              .setChecked(this.settings.skill === s)
+              .onClick(() => this.selectSkill(s))
           );
         }
       }
-      const r = promptBtn.getBoundingClientRect();
+      const r = skillBtn.getBoundingClientRect();
       menu.showAtPosition({ x: r.left, y: r.bottom });
     };
 
-    iconBtn("folder-open", "Edit initial prompts (open folder)", () =>
-      this.openPromptsFolder()
+    iconBtn("folder-open", "Open skills folder", () =>
+      this.openSkillsFolder()
     );
+    // Remote control toggle (green while ON). Rebuilt with the rest of the
+    // header, so reflect the persisted session state via updateRemoteBtn().
+    const remoteBtn = header.createEl("button", { cls: "cch-btn" });
+    setIcon(remoteBtn, "smartphone");
+    this.remoteBtn = remoteBtn;
+    remoteBtn.onclick = (e) => {
+      e.preventDefault();
+      this.toggleRemoteControl();
+    };
+    this.updateRemoteBtn();
     iconBtn("minus", "Zoom out (Ctrl -)", () => this.zoomBy(-1));
     const zl = header.createEl("button", {
       cls: "cch-btn cch-zoom",
@@ -877,6 +1012,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       this.ensureSession();
       return;
     }
+    this.remoteOn = false;
+    this.awaitRemoteActive = false;
+    this.remoteMenuFired = false;
+    this.awaitRemoteUrl = false;
+    this.updateRemoteBtn();
     this.killChild();
     this.term.reset();
     this.startHost();
@@ -1031,11 +1171,16 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           this.term.write(msg.d);
           this.maybeSendInitial();
           this.maybeConfirmModel(msg.d);
+          this.maybeAfterRemoteActive(msg.d);
+          this.maybeCaptureRemoteUrl(msg.d);
           break;
         case "exit":
           this.term.writeln(
             "\r\n\x1b[2m[claude exited — run 'Restart Claude Code session' to start a new one]\x1b[0m"
           );
+          this.remoteOn = false;
+          this.awaitRemoteUrl = false;
+          this.updateRemoteBtn();
           break;
         case "error":
           this.term.writeln("\r\n\x1b[2m[pty-host error] " + msg.message + "\x1b[0m");
@@ -1184,7 +1329,7 @@ class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Startup commands")
       .setDesc(
-        "Slash commands run at session start, one per line, BEFORE the initial prompt. E.g. /remote-control."
+        "Slash commands run at session start, one per line, BEFORE the skill. E.g. /remote-control."
       )
       .addTextArea((ta) => {
         ta.setValue(this.plugin.settings.startupCommands).onChange(
@@ -1198,18 +1343,18 @@ class HarnessSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Initial prompt")
+      .setName("Skill")
       .setDesc(
-        "Markdown file submitted to Claude when the session starts (after the startup commands). The files live in the plugin's 'Initial Prompts' folder — edit them there, add your own, or pick one from the panel header."
+        "Claude Code skill invoked as /<name> when the session starts (after the startup commands). Skills live in ~/.claude/skills — add your own there, or pick one from the panel header."
       )
       .addDropdown((d) => {
         d.addOption("", "(none)");
-        for (const f of this.plugin.listPromptFiles()) {
-          d.addOption(f, f.replace(/\.md$/i, ""));
+        for (const s of this.plugin.listSkills()) {
+          d.addOption(s, s);
         }
-        d.setValue(this.plugin.settings.initialPromptFile || "");
+        d.setValue(this.plugin.settings.skill || "");
         d.onChange(async (value) => {
-          this.plugin.settings.initialPromptFile = value;
+          this.plugin.settings.skill = value;
           await this.plugin.saveSettings();
         });
       });
