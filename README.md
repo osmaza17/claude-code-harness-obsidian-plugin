@@ -21,23 +21,71 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   abra o no el panel.
 - **Selector de skills**: lista las skills de Claude Code en `~/.claude/skills`
   (cada subcarpeta con un `SKILL.md`) y la invoca como `/<nombre>`. Cámbiala desde
-  un botón (icono ✨) en la cabecera; por defecto `second-brain-assistant`. Otro
-  botón abre la carpeta `~/.claude/skills`.
+  un botón (icono ✨) en la cabecera; por defecto `second-brain-assistant`. El
+  mismo menú tiene una opción **"Open skills folder"** que abre `~/.claude/skills`
+  y maximiza esa ventana del explorador.
 - **Selector de modelo** en la cabecera (Haiku 4.5 / Sonnet 4.6 / Opus 4.8):
   ejecuta `/model <id>` y auto-confirma el diálogo "Switch model?".
-- **Enviar nota activa**: botón `@` que inserta `@<ruta>` de la nota abierta.
-- **Remote control (toggle)**: botón (icono 📱) que activa/desactiva
+- **Enviar notas a Claude**: botón `@` (nota activa), entrada **"Send to Claude"**
+  en el menú contextual del explorador (una o varias notas/carpetas), y
+  **arrastrar y soltar** notas o imágenes sobre el terminal — todo inserta su
+  `@<ruta>`.
+- **Remote control (toggle)**: botón (icono 📱) o **`Ctrl+R`** que activa/desactiva
   `/remote-control`. Al activarlo se pone verde, copia al portapapeles el enlace
-  de la sesión (`https://claude.ai/code/session_…`) y lo abre en Google Chrome
+  de la sesión (`https://claude.ai/code/session_…`) y lo abre en el navegador
   (pestaña nueva) para entrar directo a la sesión remota; al desactivarlo,
   desconecta la sesión.
-- **Zoom de fuente**: `Ctrl +` / `Ctrl -` / `Ctrl 0` y botones en la cabecera.
+- **Navegador por cuenta**: como el enlace remoto solo funciona en el navegador
+  donde está logueada la misma cuenta de Claude, puedes mapear en ajustes cada
+  correo de cuenta a un navegador (Chrome / Firefox / Edge / Brave / Opera /
+  Opera GX / ruta personalizada).
+  La cuenta activa se lee de `~/.claude.json`; las no mapeadas usan el navegador
+  por defecto.
+- **Cambio de cuenta (sin interrupción)**: las cuentas se **guardan solas** al
+  iniciar sesión con ellas, y te cambias entre varias desde el botón de cuenta de
+  la cabecera (icono 👤) o la sección "Claude accounts" de ajustes. Hace un
+  **hot-swap** de `~/.claude/.credentials.json` **sin reiniciar**: la sesión sigue
+  corriendo y usa la cuenta nueva en su siguiente mensaje. Útil cuando se agota el
+  límite de 5 h de una cuenta y quieres saltar a otra. (Los snapshots se guardan en
+  `~/.claude/cch-accounts`, fuera de git.)
+- **Uso real por cuenta (API)**: lee el % autoritativo de consumo de 5 h/7 d desde
+  las cabeceras de rate-limit de la API de Anthropic (con el token de cada cuenta),
+  y **sondea todas las cuentas sin cambiarte a ellas**. El **menú del botón 👤**
+  muestra el % de cada cuenta **alineado en columnas y con color** según el nivel
+  de uso (verde = menos usada → rojo = cerca del límite), con la cuenta atrás del
+  reset y el % semanal; `expired` si su access token caducó. Hace llamadas mínimas
+  (modelo Haiku); se puede desactivar en ajustes ("Live usage (API)").
+- **Keep-alive de cuentas**: cada 3 min el plugin **refresca el token OAuth** de las
+  cuentas cuyo token esté por caducar (el mismo flujo que usa Claude Code por
+  dentro), para que las cuentas que no estás usando no se queden `expired` ni se
+  excluyan del auto-switch. Solo refresca cuando hace falta (no machaca el servidor)
+  y guarda el token rotado de forma atómica.
+- **Auto-switch** (opcional, desactivado por defecto): cambia de cuenta solo según
+  el % de uso de 5 h (leído de la barra de estado, con la API como respaldo si la
+  barra no es legible), en dos modos:
+  **umbral** (cambia al llegar a un % fijo, 90 % por defecto) o **rotación por
+  incremento** (cambia cada vez que el consumo sube un valor fijo —p. ej. +10 %—
+  desde que entró la cuenta, repartiendo el gasto entre todas). Al cambiar, salta a
+  la **cuenta menos gastada** (según el % real sondeado por API; fallback a
+  rotación por orden). El cambio es sin reinicio, así que no interrumpe lo que esté
+  en curso. Se puede activar/desactivar y elegir el modo y el porcentaje **desde un
+  botón de la cabecera** (icono 🔁; verde cuando está activo) o desde ajustes. Si
+  alguna vez no cambia y no sabes por qué, el comando **"Diagnose auto-switch"**
+  muestra en un aviso el motivo de la última evaluación (p. ej. "in cooldown", "no
+  usage % available yet", "at 72%; threshold is 90%").
+  Detalle técnico completo en [`README_TECNICO.md`](README_TECNICO.md).
+- **Aviso al terminar**: notifica (Obsidian Notice) cuando el terminal suena la
+  campana, que Claude tiende a sonar al acabar una tarea larga (configurable).
+- **Cabecera configurable**: cada botón de la cabecera se puede ocultar desde
+  ajustes.
+- **Zoom de fuente**: `Ctrl +` / `Ctrl -` / `Ctrl 0`, **`Ctrl + rueda del ratón`** y
+  botones en la cabecera.
 - **Copiar / pegar**: `Ctrl+C` (con selección) / `Ctrl+Shift+C` copian; `Ctrl+V`
   pega texto o **imagen** (guarda un PNG temporal y pega su ruta);
   `Ctrl+Shift+V` fuerza texto; clic derecho copia/pega.
-- **Teclado**: `Ctrl+Enter` / `Shift+Enter` = nueva línea sin enviar; AltGr+2 =
-  `@` (teclado español); `Ctrl+Z` / `Ctrl+Shift+Z` mapeados al borrar-línea /
-  restaurar de Claude.
+- **Teclado**: `Ctrl+Enter` / `Shift+Enter` = nueva línea sin enviar; `Ctrl+R` =
+  toggle remote control; AltGr+2 = `@` (teclado español); `Ctrl+Z` /
+  `Ctrl+Shift+Z` mapeados al borrar-línea / restaurar de Claude.
 
 ## Requisitos
 
@@ -67,6 +115,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Startup commands | Comandos slash al iniciar, uno por línea (vacío por defecto). |
 | Skill | Skill de `~/.claude/skills` que se invoca como `/<nombre>` tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
+| Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
+| Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, y auto-switch al superar un % de uso. |
+| Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, zoom). |
+| Default browser | Navegador para el control remoto cuando la cuenta activa no está mapeada. |
+| Browser per account | Correlación correo de cuenta → navegador (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada). |
 | Node.js path | Ruta a `node.exe` real (autodetectada si se deja vacía). |
 
 ## Cómo funciona (resumen)

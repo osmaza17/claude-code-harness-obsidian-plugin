@@ -234,9 +234,9 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  font-size: 12px;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
   color: var(--text-muted);
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
@@ -246,11 +246,11 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 22px;
-  min-width: 22px;
-  padding: 0 4px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0 7px;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -260,13 +260,18 @@
   background: var(--background-modifier-hover);
   color: var(--text-normal);
 }
-.claude-code-harness .cch-btn svg { width: 15px; height: 15px; }
+.claude-code-harness .cch-btn svg { width: 20px; height: 20px; }
 .claude-code-harness .cch-btn.cch-active,
 .claude-code-harness .cch-btn.cch-active:hover {
-  color: var(--color-green, #6BCF7F);
-  background: var(--background-modifier-success, rgba(107, 207, 127, 0.15));
+  /* Solid green "ON" with a light icon so the glyph stays visible regardless of
+     theme (some themes make --background-modifier-success a solid green, which
+     hid a same-colour icon). */
+  color: #ffffff;
+  background: var(--color-green, #3fb950);
 }
-.claude-code-harness .cch-zoom { font-size: 11px; min-width: 34px; }
+.claude-code-harness .cch-btn.cch-active svg { color: #ffffff; }
+.claude-code-harness .cch-model { font-size: 13px; }
+.claude-code-harness .cch-zoom { font-size: 12px; min-width: 44px; }
 .claude-code-harness .cch-term {
   flex: 1 1 auto;
   min-height: 0;

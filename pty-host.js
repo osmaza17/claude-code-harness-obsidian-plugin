@@ -45,10 +45,22 @@ process.on("message", (msg) => {
         break;
       }
       case "input":
-        if (term) term.write(msg.d);
+        // Swallow errors (e.g. writing after the pty exited) so a dead session
+        // doesn't flood the renderer terminal with error lines.
+        try {
+          if (term) term.write(msg.d);
+        } catch (_) {
+          /* pty gone */
+        }
         break;
       case "resize":
-        if (term) term.resize(msg.cols, msg.rows);
+        // Guard against degenerate sizes and a dead pty; ignore errors silently
+        // (node-pty throws "Cannot resize a pty that has already exited").
+        try {
+          if (term && msg.cols > 0 && msg.rows > 0) term.resize(msg.cols, msg.rows);
+        } catch (_) {
+          /* pty gone or invalid size */
+        }
         break;
       case "kill":
         cleanup();
