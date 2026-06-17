@@ -9,9 +9,10 @@ import {
   setIcon,
   Setting,
   TAbstractFile,
+  TFile,
   WorkspaceLeaf,
 } from "obsidian";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -32,27 +33,30 @@ interface HarnessSettings {
   nodePath: string;
   // Last fitted grid size. We spawn claude at this size so the first fit when
   // the panel opens doesn't change it (a resize makes claude repaint and stack
-  // its banner). Persisted across sessions.
+  // its banner). Persisted across sessions. Shared by all instances.
   cols: number;
   rows: number;
-  // Terminal font size (px), adjustable with Ctrl +/-/0.
+  // Terminal font size (px), adjustable with Ctrl +/-/0. Shared by all instances.
   fontSize: number;
   // Extra arguments appended to the claude command (e.g.
-  // --append-system-prompt "Be concise" --model opus).
+  // --append-system-prompt "Be concise" --model opus). Default for new sessions.
   args: string;
   // Active skill: the folder name (e.g. "second-brain-assistant") inside Claude
   // Code's skills folder (~/.claude/skills). It is invoked as /<name> when the
-  // session starts. Selectable from the panel header. Empty = none.
+  // session starts. Default for new sessions; selectable per-session. Empty = none.
   skill: string;
   // Slash commands (one per line) run at session start, BEFORE the skill.
   // E.g. /remote-control.
   startupCommands: string;
-  // Last model picked from the header menu (for the button label). The actual
-  // model is owned by Claude (/model saves it as the default).
+  // Last model picked from the header menu (default for new sessions; the actual
+  // model is owned by Claude per-session via /model).
   model: string;
   // Fire an Obsidian notice when the terminal rings the bell (\x07) — Claude
   // tends to ring it when a long task finishes / needs attention.
   notifyOnBell: boolean;
+  // Turn coloured note references in Claude's output (and [[wikilinks]]) into
+  // clickable links that open the matching .md note in the vault.
+  linkifyNotes: boolean;
   // Remote control: which browser opens the session URL per Claude account. The
   // URL only works in the browser where that same account is logged in, so the
   // active account (read from ~/.claude.json) picks the browser. browser is one
@@ -98,6 +102,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   startupCommands: "",
   model: "opus",
   notifyOnBell: true,
+  linkifyNotes: true,
   browserMap: [],
   defaultBrowser: "chrome",
   autoSwitch: false,
@@ -262,335 +267,92 @@ const ANSI_LIGHT = {
   brightCyan: "#2BA89F", brightWhite: "#1A1320",
 };
 
-export default class ClaudeCodeHarnessPlugin extends Plugin {
-  settings: HarnessSettings;
+// Monotonic id source for sessions (used for tab titles + identity).
+let SESSION_SEQ = 0;
 
-  // The session lives on the plugin, not the view, so it survives the panel
-  // being closed and reopened. node-pty runs in a forked Node process (see
-  // pty-host.js) because Obsidian's renderer cannot create worker_threads.
-  private term: Terminal | null = null;
-  private fit: FitAddon | null = null;
-  private host: HTMLElement | null = null; // element xterm renders into
-  private child: any = null; // forked pty-host process
-  private opened = false; // whether term.open() has been called
-  private exited = false; // claude (the inner pty process) has exited — stop resizing
+/**
+ * One Claude Code instance: its own xterm Terminal, DOM host and forked pty-host
+ * process (running `claude`). Several Sessions live on the plugin at once so the
+ * user can run parallel workflows over the vault; only the active one is mounted
+ * in the panel at any time, the rest keep running and buffering output in xterm.
+ *
+ * Per-session config (skill / model / args) lets each tab be a different
+ * workflow. Account, usage and auto-switch are GLOBAL (shared credentials), so
+ * they live on the plugin — the session just feeds its output to them.
+ */
+class Session {
+  plugin: ClaudeCodeHarnessPlugin;
+  id: number;
+  title: string;
+  // Per-session config (defaults copied from settings at creation).
+  skill: string;
+  model: string;
+  args: string;
+
+  term: Terminal | null = null;
+  fit: FitAddon | null = null;
+  host: HTMLElement | null = null; // element xterm renders into
+  child: any = null; // forked pty-host process
+  webgl: any = null; // WebglAddon, kept so it can be disposed on context loss
+  opened = false; // whether term.open() has been called
+  exited = false; // claude (the inner pty process) has exited — stop resizing
   // Last grid size sent to the pty. We only resize when it ACTUALLY changes:
   // every resize makes the Claude TUI repaint its whole screen and pushes the
   // previous frame into scrollback, so spurious resizes stack the boot banner.
-  private lastCols = 0;
-  private lastRows = 0;
-  private fontLink: HTMLLinkElement | null = null;
+  lastCols = 0;
+  lastRows = 0;
   private resizeTimer: number | null = null;
   private rafFit: number | null = null; // pending per-frame display fit during a drag
-  private zoomLabel: HTMLElement | null = null;
-  private modelBtn: HTMLElement | null = null;
-  private skillBtn: HTMLElement | null = null;
-  private accountBtn: HTMLElement | null = null;
-  private autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
-  private webgl: any = null; // WebglAddon, kept so we can clear its glyph atlas on zoom
+  private initialSent = false; // whether the startup steps were inserted this session
+
+  // Remote control toggle (/remote-control). remoteOn drives the button's green
+  // state; while awaiting the menu we scrape the session URL to the clipboard.
+  remoteOn = false;
+  private awaitRemoteActive = false;
+  private remoteActiveBuf = "";
+  private remoteActiveDeadline = 0;
+  // The menu (with the URL) only renders once the session is actually connected,
+  // which can take longer than one early attempt. So we RETRY: reopen the menu
+  // every few seconds until the URL shows up (bounded), instead of a single shot.
+  private remoteMenuLoopActive = false; // a retry chain is running
+  private remoteMenuAttempts = 0;
+  private remoteUrlCaptured = false; // stop retrying once we have the URL
+  private awaitRemoteUrl = false;
+  private remoteUrlBuf = "";
+  private remoteUrlDeadline = 0;
+
   // After a /model switch, Claude may show a "Switch model?" confirmation. We
   // watch the stream and auto-confirm (option 1 is pre-selected).
   private awaitModelConfirm = false;
   private modelConfirmBuf = "";
   private modelConfirmDeadline = 0;
-  private tempImages: string[] = []; // temp PNGs from image paste, cleaned on unload
-  private initialSent = false; // whether the startup steps were inserted this session
-  // Remote control toggle (/remote-control). remoteOn drives the button's green
-  // state; while awaiting the menu we scrape the session URL to the clipboard.
-  private remoteBtn: HTMLElement | null = null;
-  private remoteOn = false;
-  // After connecting we wait for "/rc active" in the output, then re-run
-  // /remote-control to open the menu that prints the session URL.
-  private awaitRemoteActive = false;
-  private remoteActiveBuf = "";
-  private remoteActiveDeadline = 0;
-  private remoteMenuFired = false; // guards the one-shot menu reopen
-  private awaitRemoteUrl = false;
-  private remoteUrlBuf = "";
-  private remoteUrlDeadline = 0;
-  // Auto-switch state: rolling buffer of recent output to scrape the 5h usage %,
-  // and a cooldown so a single high reading doesn't trigger repeated switches.
-  private autoSwitchBuf = "";
-  private autoSwitchCooldownUntil = 0;
-  // Rotate mode: usage % captured when the current account became active (the
-  // baseline); we switch once usage rises autoSwitchDelta points above it. Tracks
-  // the low-water mark so a 5h-window reset (usage drops) re-bases cleanly.
-  private rotateBaselinePct: number | null = null;
-  // Account email currently shown in the status bar (truth of which account is
-  // really active), used to anchor the % reading, verify swaps and label the button.
-  private barAccountEmail: string | null = null;
-  // Swap verification: the account we expect the bar to show after a switch.
-  private pendingVerifyEmail: string | null = null;
-  private verifyDeadline = 0;
-  private sawStatusSinceSwitch = false;
-  // Auth-failure recovery after a switch (a saved token may be dead).
-  private authWatchUntil = 0;
-  private recoverAttempts = 0;
-  private warnedNoAccounts = false; // one-shot "need ≥2 accounts" notice
-  // Auto-save the active account whenever it changes (throttled) so each account
-  // the user logs into gets snapshotted for switching without manual clicks.
-  private lastAutoSavedEmail = "";
-  private lastAutoSaveCheck = 0;
-  // Live usage probe: cached per-account utilisation (email → AccountUsage),
-  // a guard against overlapping sweeps, and a debounce for activity-triggered
-  // probes of the active account.
-  private accountUsage = new Map<string, AccountUsage>();
-  private usageProbing = false;
-  private lastActiveProbe = 0;
-  private lastAutoSwitchDiag = 0; // throttle for the rotate/threshold console log
-  // Last auto-switch evaluation, surfaced by the "Diagnose auto-switch" command
-  // (and the throttled console echo) so the user can see WHY no switch fired.
-  private lastDiagInfo:
-    | {
-        at: number;
-        mode: string;
-        enabled: boolean;
-        pct: number | null;
-        src: string;
-        cur: string | null;
-        bar: string | null;
-        baseline: number | null;
-        delta: number;
-        threshold: number;
-        savedAccounts: number;
-        reason: string;
-      }
-    | null = null;
 
-  async onload() {
-    await this.loadSettings();
-    this.injectFont();
+  // Auto-switch: rolling buffer of recent output to scrape the 5h usage %. The
+  // DECISION state (cooldown, baseline, verify) is global, on the plugin.
+  autoSwitchBuf = "";
 
-    this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
-
-    this.addRibbonIcon("terminal", "Claude Code", () => this.activateView());
-
-    this.addCommand({
-      id: "open-claude-code",
-      name: "Open Claude Code panel",
-      callback: () => this.activateView(),
-    });
-
-    this.addCommand({
-      id: "restart-claude-code",
-      name: "Restart Claude Code session",
-      callback: () => this.restart(),
-    });
-
-    this.addCommand({
-      id: "send-active-note",
-      name: "Send active note to Claude",
-      callback: () => this.sendActiveNote(),
-    });
-
-    this.addCommand({
-      id: "toggle-remote-control",
-      name: "Toggle remote control",
-      hotkeys: [{ modifiers: ["Mod"], key: "r" }],
-      callback: () => this.toggleRemoteControl(),
-    });
-
-    this.addCommand({
-      id: "save-claude-account",
-      name: "Save current Claude account",
-      callback: () => this.saveCurrentAccount(),
-    });
-
-    this.addCommand({
-      id: "diagnose-auto-switch",
-      name: "Diagnose auto-switch (why no account change)",
-      callback: () => this.diagnoseAutoSwitch(),
-    });
-
-    // Right-click a file/folder in the explorer -> "Send to Claude" (@-mention).
-    this.registerEvent(
-      this.app.workspace.on("file-menu", (menu, file: TAbstractFile) => {
-        menu.addItem((item) =>
-          item
-            .setTitle("Send to Claude")
-            .setIcon("terminal")
-            .onClick(() => this.sendPathsToClaude([file.path]))
-        );
-      })
-    );
-    this.registerEvent(
-      this.app.workspace.on("files-menu", (menu, files: TAbstractFile[]) => {
-        menu.addItem((item) =>
-          item
-            .setTitle("Send to Claude")
-            .setIcon("terminal")
-            .onClick(() => this.sendPathsToClaude(files.map((f) => f.path)))
-        );
-      })
-    );
-
-    this.addSettingTab(new HarnessSettingTab(this.app, this));
-
-    this.sweepTempImages(); // remove leftover paste PNGs from previous runs
-
-    // Start the session as soon as Obsidian loads, even if the user never
-    // opens the panel. xterm buffers all output until the panel is shown.
-    this.ensureSession();
-
-    // Token keep-alive + live usage. Every 3 min we CHECK every account (incl. the
-    // active one) and refresh its OAuth token if it's expired or about to expire
-    // (REFRESH_SKEW_MS) — so inactive accounts never drift into "expired" / get
-    // excluded from auto-switch — then re-probe usage. Also runs once shortly after
-    // start. The expiry throttle keeps the refresh rate near claude's own and
-    // avoids hammering the rate-limited token endpoint. 3 min < USAGE_FRESH_MS
-    // (6 min) so `pickNextAccount` always has fresh data. See refreshAccount().
-    window.setTimeout(() => void this.refreshUsage({ refreshTokens: true }), 5000);
-    this.registerInterval(
-      window.setInterval(
-        () => void this.refreshUsage({ refreshTokens: true }),
-        3 * 60 * 1000
-      )
-    );
+  constructor(
+    plugin: ClaudeCodeHarnessPlugin,
+    opts?: { skill?: string; model?: string; args?: string; title?: string }
+  ) {
+    this.plugin = plugin;
+    this.id = ++SESSION_SEQ;
+    const s = plugin.settings;
+    this.skill = opts?.skill !== undefined ? opts.skill : s.skill;
+    this.model = opts?.model !== undefined ? opts.model : s.model;
+    this.args = opts?.args !== undefined ? opts.args : s.args;
+    this.title = opts?.title || this.skill || "Claude";
+    this.create();
   }
 
-  onunload() {
-    if (this.resizeTimer != null) {
-      window.clearTimeout(this.resizeTimer);
-      this.resizeTimer = null;
-    }
-    if (this.rafFit != null) {
-      cancelAnimationFrame(this.rafFit);
-      this.rafFit = null;
-    }
-    this.killChild();
-    this.term?.dispose();
-    this.term = null;
-    this.fit = null;
-    this.host?.remove();
-    this.host = null;
-    this.opened = false;
-    this.fontLink?.remove();
-    this.fontLink = null;
-    this.cleanupTempImages();
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
-  }
-
-  /** Reference the active note in the prompt (Claude resolves @-mentions). */
-  async sendActiveNote() {
-    const file = this.app.workspace.getActiveFile();
-    if (!file) {
-      new Notice("No active note to send.");
-      return;
-    }
-    await this.sendPathsToClaude([file.path]);
-  }
-
-  /** @-mention one or more vault paths in Claude's input (opens the panel and
-   *  starts the session if needed). Used by the @ button, the file-explorer
-   *  context menu and drag-and-drop. */
-  async sendPathsToClaude(paths: string[]) {
-    const uniq = [...new Set(paths)].filter(Boolean);
-    if (!uniq.length) return;
-    await this.activateView();
-    this.ensureSession();
-    if (!this.child) {
-      new Notice("Claude session is not running.");
-      return;
-    }
-    this.send({ t: "input", d: uniq.map((p) => "@" + p + " ").join("") });
-    this.term?.focus();
-  }
-
-  /** Resolve files dropped on the terminal to paths and @-mention them. Handles
-   *  Obsidian internal drags (file explorer), OS files, and a text/plain
-   *  fallback (a wikilink or a path). */
-  private async handleDrop(e: DragEvent) {
-    const paths: string[] = [];
-    // 1) Obsidian internal drag (file explorer / links).
-    const dragged = (this.app as any).dragManager?.draggable;
-    if (dragged) {
-      if (dragged.file?.path) paths.push(dragged.file.path);
-      if (Array.isArray(dragged.files)) {
-        for (const f of dragged.files) if (f?.path) paths.push(f.path);
-      }
-    }
-    // 2) OS files dropped from outside Obsidian.
-    const dt = e.dataTransfer;
-    if (dt?.files?.length) {
-      for (let i = 0; i < dt.files.length; i++) {
-        const p = (dt.files[i] as any).path;
-        if (p) paths.push(p);
-      }
-    }
-    // 3) Fallback: text/plain may be a [[wikilink]] or a path.
-    if (!paths.length && dt) {
-      const txt = (dt.getData("text/plain") || "").trim();
-      if (txt) {
-        const wl = txt.match(/^\[\[([^\]|#]+)/);
-        const name = wl ? wl[1].trim() : txt;
-        const tf = this.app.metadataCache.getFirstLinkpathDest(name, "");
-        paths.push(tf ? tf.path : txt);
-      }
-    }
-    if (paths.length) await this.sendPathsToClaude(paths);
-  }
-
-  /** Delete temp PNGs created by image paste this session. */
-  private cleanupTempImages() {
-    if (!this.tempImages.length) return;
-    try {
-      const fs = nodeRequire("fs");
-      for (const f of this.tempImages) {
-        try {
-          fs.unlinkSync(f);
-        } catch {
-          /* already gone */
-        }
-      }
-    } catch {
-      /* fs unavailable */
-    }
-    this.tempImages = [];
-  }
-
-  /** Remove leftover cch-paste-*.png from earlier runs (older than 1 day). */
-  private sweepTempImages() {
-    try {
-      const fs = nodeRequire("fs");
-      const os = nodeRequire("os");
-      const dir = os.tmpdir();
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-      for (const name of fs.readdirSync(dir)) {
-        if (!/^cch-paste-\d+\.png$/.test(name)) continue;
-        const full = path.join(dir, name);
-        try {
-          if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
-        } catch {
-          /* ignore */
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  /** Load JetBrains Mono (same font the reference harness uses) so the terminal
-   *  renders identically. Falls back to ui-monospace if the fetch is blocked. */
-  private injectFont() {
-    if (document.getElementById("cch-jetbrains-mono")) return;
-    const link = document.createElement("link");
-    link.id = "cch-jetbrains-mono";
-    link.rel = "stylesheet";
-    link.href =
-      "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap";
-    document.head.appendChild(link);
-    this.fontLink = link;
-  }
-
-  /** Create the persistent terminal and start the pty host once. */
-  ensureSession() {
-    if (this.term) return;
+  /** Create the terminal and start the pty host. */
+  private create() {
     // Terminal config replicated verbatim from the reference harness
     // (terminalPool.ts) so the rendering is identical.
     this.term = new Terminal({
-      theme: this.termTheme(),
+      theme: this.plugin.termTheme(),
       fontFamily: '"JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace',
-      fontSize: this.settings.fontSize || 14,
+      fontSize: this.plugin.settings.fontSize || 14,
       lineHeight: 1.0,
       cursorBlink: true,
       cursorStyle: "block",
@@ -605,31 +367,54 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.host = document.createElement("div");
     this.host.addClass("cch-term");
 
-    // Forward keystrokes to the pty host (registered once, lives with the term).
+    // Forward keystrokes to the pty host.
     this.term.onData((d: string) => this.send({ t: "input", d }));
 
     // Claude rings the bell (\x07) when a long task finishes / needs attention.
     this.term.onBell(() => {
-      if (this.settings.notifyOnBell) {
+      if (this.plugin.settings.notifyOnBell) {
         new Notice("🔔 Claude Code needs your attention");
       }
     });
 
+    // Turn coloured note references / [[wikilinks]] in the output into clickable
+    // links that open the matching .md note (computed by the plugin on hover).
+    this.term.registerLinkProvider({
+      provideLinks: (y, callback) =>
+        callback(this.plugin.computeNoteLinks(this.term as Terminal, y)),
+    });
+
     this.setupClipboard();
     this.startHost();
+  }
 
-    // Follow the Obsidian theme: re-apply colours when it changes.
-    this.registerEvent(
-      this.app.workspace.on("css-change", () => {
-        if (!this.term) return;
-        this.term.options.theme = this.termTheme();
-        try {
-          this.term.refresh(0, Math.max(0, this.term.rows - 1));
-        } catch {
-          /* not open yet */
-        }
-      })
-    );
+  /** Re-apply the Obsidian theme to this terminal (called on css-change). */
+  applyTheme() {
+    if (!this.term) return;
+    this.term.options.theme = this.plugin.termTheme();
+    try {
+      this.term.refresh(0, Math.max(0, this.term.rows - 1));
+    } catch {
+      /* not open yet */
+    }
+  }
+
+  /** Send a message to the pty host, swallowing errors if the IPC channel has
+   *  already closed (the 'exit' handler nulls this.child asynchronously). */
+  private send(msg: any) {
+    try {
+      this.child?.send(msg);
+    } catch {
+      /* channel closed */
+    }
+  }
+
+  /** @-mention one or more vault paths in this session's input. */
+  mention(paths: string[]) {
+    const uniq = [...new Set(paths)].filter(Boolean);
+    if (!uniq.length) return;
+    this.send({ t: "input", d: uniq.map((p) => "@" + p + " ").join("") });
+    this.term?.focus();
   }
 
   /** Wire copy/paste. With the WebGL renderer there is no DOM text, so native
@@ -674,7 +459,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // paste the file path (Claude Code attaches a pasted image path the same way
     // it does a dragged file); otherwise paste text.
     const pasteSmart = () => {
-      const imgPath = this.saveClipboardImage(clipboard);
+      const imgPath = this.plugin.saveClipboardImage(clipboard);
       if (imgPath) {
         term.paste(imgPath);
         return;
@@ -711,19 +496,19 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (key === "=" || key === "+") {
         ev.preventDefault();
         ev.stopPropagation();
-        this.zoomBy(1);
+        this.plugin.zoomBy(1);
         return false;
       }
       if (key === "-" || key === "_") {
         ev.preventDefault();
         ev.stopPropagation();
-        this.zoomBy(-1);
+        this.plugin.zoomBy(-1);
         return false;
       }
       if (key === "0") {
         ev.preventDefault();
         ev.stopPropagation();
-        this.setFontSize(14);
+        this.plugin.setFontSize(14);
         return false;
       }
       // Ctrl+R -> toggle remote control (kept out of the pty and out of Obsidian's
@@ -776,7 +561,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         if (!ev.ctrlKey) return;
         ev.preventDefault();
         ev.stopPropagation();
-        this.zoomBy(ev.deltaY < 0 ? 1 : -1);
+        this.plugin.zoomBy(ev.deltaY < 0 ? 1 : -1);
       },
       { passive: false }
     );
@@ -794,29 +579,44 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
   }
 
-  /** If the clipboard holds an image, write it to a temp PNG and return its
-   *  path; otherwise null. */
-  private saveClipboardImage(clipboard: any): string | null {
-    try {
-      const img = clipboard?.readImage?.();
-      if (!img || img.isEmpty()) return null;
-      const os = nodeRequire("os");
-      const fs = nodeRequire("fs");
-      const file = path.join(os.tmpdir(), `cch-paste-${Date.now()}.png`);
-      fs.writeFileSync(file, img.toPNG());
-      this.tempImages.push(file);
-      return file;
-    } catch {
-      return null;
+  /** Resolve files dropped on this terminal to paths and @-mention them in this
+   *  session. Handles Obsidian internal drags, OS files and a text/plain fallback. */
+  private async handleDrop(e: DragEvent) {
+    const app = this.plugin.app;
+    const paths: string[] = [];
+    // 1) Obsidian internal drag (file explorer / links).
+    const dragged = (app as any).dragManager?.draggable;
+    if (dragged) {
+      if (dragged.file?.path) paths.push(dragged.file.path);
+      if (Array.isArray(dragged.files)) {
+        for (const f of dragged.files) if (f?.path) paths.push(f.path);
+      }
     }
+    // 2) OS files dropped from outside Obsidian.
+    const dt = e.dataTransfer;
+    if (dt?.files?.length) {
+      for (let i = 0; i < dt.files.length; i++) {
+        const p = (dt.files[i] as any).path;
+        if (p) paths.push(p);
+      }
+    }
+    // 3) Fallback: text/plain may be a [[wikilink]] or a path.
+    if (!paths.length && dt) {
+      const txt = (dt.getData("text/plain") || "").trim();
+      if (txt) {
+        const wl = txt.match(/^\[\[([^\]|#]+)/);
+        const name = wl ? wl[1].trim() : txt;
+        const tf = app.metadataCache.getFirstLinkpathDest(name, "");
+        paths.push(tf ? tf.path : txt);
+      }
+    }
+    if (paths.length) this.mention(paths);
   }
 
-  /** Move the persistent terminal into a freshly opened panel. */
-  attachTo(container: HTMLElement) {
-    this.ensureSession();
+  /** Mount this session's terminal host into a container (the panel body). */
+  attachInto(parent: HTMLElement) {
     if (!this.host || !this.term) return;
-    this.buildHeader(container);
-    container.appendChild(this.host);
+    parent.appendChild(this.host);
     if (!this.opened) {
       this.fit = new FitAddon();
       this.term.loadAddon(this.fit);
@@ -858,60 +658,55 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
   }
 
-  /** Font zoom (Ctrl +/-/0). Persisted; refits after changing. */
-  setFontSize(px: number) {
-    const clamped = Math.min(MAX_FONT, Math.max(MIN_FONT, Math.round(px)));
-    this.settings.fontSize = clamped;
-    void this.saveSettings();
-    if (this.term) {
-      this.term.options.fontSize = clamped;
-      // Match the reference harness exactly: set the font, refit, resize the pty.
-      // Do NOT clearTextureAtlas()/refresh() here — xterm's WebGL renderer
-      // rebuilds its glyph atlas on a font-size change by itself, and forcing an
-      // extra refresh mid-resize is what produced the garbled / duplicated frame
-      // on zoom. A single clean resize lets the Claude TUI repaint once.
-      if (this.fit && this.host?.isConnected) {
-        try {
-          this.fit.fit();
-          const { cols, rows } = this.term;
-          if (
-            !this.exited &&
-            cols >= 2 &&
-            rows >= 2 &&
-            (cols !== this.lastCols || rows !== this.lastRows)
-          ) {
-            this.lastCols = cols;
-            this.lastRows = rows;
-            this.send({ t: "resize", cols, rows });
-            if (this.settings.cols !== cols || this.settings.rows !== rows) {
-              this.settings.cols = cols;
-              this.settings.rows = rows;
-              void this.saveSettings();
-            }
-          }
-        } catch {
-          /* not laid out yet */
+  /** Remove this session's host from the DOM WITHOUT killing the process (tab
+   *  switch / panel close). */
+  detachHost() {
+    if (this.rafFit != null) {
+      cancelAnimationFrame(this.rafFit);
+      this.rafFit = null;
+    }
+    this.host?.remove();
+  }
+
+  /** Apply a new font size to this terminal and resize the pty (the persistence
+   *  + label update is the plugin's job, in setFontSize). */
+  applyFontSize(px: number) {
+    if (!this.term) return;
+    this.term.options.fontSize = px;
+    // Match the reference harness exactly: set the font, refit, resize the pty.
+    // Do NOT clearTextureAtlas()/refresh() here — xterm's WebGL renderer
+    // rebuilds its glyph atlas on a font-size change by itself, and forcing an
+    // extra refresh mid-resize is what produced the garbled / duplicated frame
+    // on zoom. A single clean resize lets the Claude TUI repaint once.
+    if (this.fit && this.host?.isConnected) {
+      try {
+        this.fit.fit();
+        const { cols, rows } = this.term;
+        if (
+          !this.exited &&
+          cols >= 2 &&
+          rows >= 2 &&
+          (cols !== this.lastCols || rows !== this.lastRows)
+        ) {
+          this.lastCols = cols;
+          this.lastRows = rows;
+          this.send({ t: "resize", cols, rows });
+          this.plugin.rememberSize(cols, rows);
         }
+      } catch {
+        /* not laid out yet */
       }
     }
-    if (this.zoomLabel) this.zoomLabel.setText(clamped + "px");
   }
 
-  zoomBy(delta: number) {
-    this.setFontSize((this.settings.fontSize || 14) + delta);
-  }
-
-  private currentModelLabel(): string {
-    return MODELS.find((m) => m.id === this.settings.model)?.label ?? "Model";
-  }
-
-  /** Switch Claude's model by running `/model <id>` in the terminal. A leading
-   *  Ctrl+U clears any draft first so the command runs on its own line (the
-   *  draft is restorable with Ctrl+Y). */
+  /** Switch this session's model by running `/model <id>`. A leading Ctrl+U
+   *  clears any draft first so the command runs on its own line (restorable with
+   *  Ctrl+Y). Also updates the global default so new sessions inherit it. */
   selectModel(id: string, label: string) {
-    this.settings.model = id;
-    void this.saveSettings();
-    this.modelBtn?.setText(label);
+    this.model = id;
+    this.plugin.settings.model = id;
+    void this.plugin.saveSettings();
+    this.plugin.updateModelBtn();
     this.send({ t: "input", d: `\x15/model ${id}\r` });
     // Arm auto-confirm in case Claude asks "Switch model?" (mid-conversation).
     this.awaitModelConfirm = true;
@@ -936,148 +731,38 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
+  /** Choose this session's skill. Persists as the new default and, if a session
+   *  is running, invokes /<name> now (same `\x15/<name>\r` pattern as selectModel). */
+  selectSkill(name: string) {
+    this.skill = name;
+    this.plugin.settings.skill = name;
+    void this.plugin.saveSettings();
+    this.plugin.updateSkillBtn();
+    const label = name || "none";
+    if (name && this.child) {
+      this.send({ t: "input", d: `\x15/${name}\r` });
+      new Notice("Skill loaded: /" + name);
+    } else {
+      new Notice("Skill set: " + label + (this.child ? "" : " (loads on next session)"));
+    }
+    this.term?.focus();
+  }
 
   /** Send text to the pty as if pasted, WITHOUT going through xterm's paste()
    *  (which needs the view attached). This is why the startup commands and the
-   *  initial prompt now fire even when the user never opens the panel. We bracket
+   *  initial prompt fire even when the user never opens the panel. We bracket
    *  the text only when Claude has bracketed-paste mode on — same condition
-   *  xterm.paste() uses — so a multi-line prompt is inserted as one block instead
-   *  of each newline submitting a line early. */
+   *  xterm.paste() uses — so a multi-line prompt is inserted as one block. */
   private pasteToPty(text: string) {
     const bracketed = !!(this.term as any)?.modes?.bracketedPasteMode;
     const d = bracketed ? `\x1b[200~${text}\x1b[201~` : text;
     this.send({ t: "input", d });
   }
 
-  /** Claude Code's personal skills folder (~/.claude/skills). Each skill is a
-   *  subfolder with a SKILL.md, invoked as /<folder-name>. */
-  skillsDir(): string {
-    const os = nodeRequire("os");
-    return path.join(os.homedir(), ".claude", "skills");
-  }
-
-  /** Names of the skills available in ~/.claude/skills (subfolders containing a
-   *  SKILL.md), sorted. The folder name is the /<name> used to invoke it. */
-  listSkills(): string[] {
-    try {
-      const fs = nodeRequire("fs");
-      const dir = this.skillsDir();
-      return fs
-        .readdirSync(dir, { withFileTypes: true })
-        .filter((e: any) => e.isDirectory())
-        .map((e: any) => e.name)
-        .filter((name: string) =>
-          fs.existsSync(path.join(dir, name, "SKILL.md"))
-        )
-        .sort((a: string, b: string) => a.localeCompare(b));
-    } catch {
-      return [];
-    }
-  }
-
-  /** Choose the active skill from the header. Persists the choice (so future
-   *  sessions invoke it) and, if a session is running, invokes it now. Sending
-   *  uses the same `\x15/<name>\r` pattern as selectModel: the leading Ctrl+U
-   *  clears any draft so the slash command runs on its own line. */
-  selectSkill(name: string) {
-    this.settings.skill = name;
-    void this.saveSettings();
-    const label = name || "none";
-    if (this.skillBtn) this.skillBtn.title = "Skill: " + label;
-    if (name && this.child) {
-      this.send({ t: "input", d: `\x15/${name}\r` });
-      new Notice("Skill loaded: /" + name);
-    } else {
-      new Notice("Skill set: " + label + " (loads on next session)");
-    }
-    this.term?.focus();
-  }
-
-  /** Open this plugin's settings tab directly. */
-  openSettings() {
-    try {
-      const setting = (this.app as any).setting;
-      setting.open();
-      setting.openTabById(this.manifest.id);
-    } catch (e) {
-      new Notice("Could not open settings.");
-      console.warn("[claude-code-harness] openSettings:", e);
-    }
-  }
-
-  /** Open Claude Code's skills folder (~/.claude/skills) in the OS file manager,
-   *  then bring that window to the front and maximise it. */
-  openSkillsFolder() {
-    try {
-      const dir = this.skillsDir();
-      const shell = nodeRequire("electron")?.shell;
-      if (shell?.openPath) {
-        void shell.openPath(dir);
-        this.focusFolderWindow(dir);
-      } else {
-        new Notice("Could not open the folder (shell unavailable).");
-      }
-    } catch (e) {
-      new Notice("Could not open the skills folder.");
-      console.warn("[claude-code-harness] openSkillsFolder:", e);
-    }
-  }
-
-  /** Bring the Explorer window showing `folder` to the front and maximise it.
-   *  Windows-only, best-effort (Win11 Explorer has no real F11 fullscreen, so we
-   *  maximise the exact window matched by its folder path).
-   *
-   *  Plain SetForegroundWindow rarely steals focus (Windows' foreground lock), so
-   *  we minimise→restore the window (a restore reliably grants foreground) and
-   *  also call AppActivate. Retries because the window may not exist yet. */
-  private focusFolderWindow(folder: string) {
-    try {
-      const cp = nodeRequire("child_process");
-      const target = folder.replace(/\//g, "\\").replace(/'/g, "''");
-      const ps = [
-        "$ErrorActionPreference='SilentlyContinue'",
-        "Add-Type -Name N -Namespace W -MemberDefinition '" +
-          '[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h,int n);' +
-          '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);' +
-          "'",
-        "$shell = New-Object -ComObject Shell.Application",
-        "$win = $null",
-        // Retry ~3.2s: the Explorer window may not be registered yet.
-        "for ($i=0; $i -lt 8 -and -not $win; $i++) {",
-        "  Start-Sleep -Milliseconds 400",
-        `  $win = $shell.Windows() | Where-Object { $_.Document.Folder.Self.Path -ieq '${target}' } | Select-Object -First 1`,
-        "}",
-        "if ($win) {",
-        "  $h = [System.IntPtr]$win.HWND",
-        "  [W.N]::ShowWindow($h, 6) | Out-Null", // SW_MINIMIZE
-        "  Start-Sleep -Milliseconds 150",
-        "  [W.N]::ShowWindow($h, 3) | Out-Null", // SW_MAXIMIZE (restores → foreground)
-        "  [W.N]::SetForegroundWindow($h) | Out-Null",
-        "  $ws = New-Object -ComObject WScript.Shell",
-        "  $ws.AppActivate($win.LocationName) | Out-Null",
-        "}",
-      ].join("; ");
-      cp.spawn(
-        "powershell",
-        ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
-        { detached: true, stdio: "ignore", windowsHide: true }
-      ).unref();
-    } catch {
-      /* best-effort: no focus/maximise if PowerShell isn't available */
-    }
-  }
-
-  /** Two-state remote control toggle.
-   *  A first /remote-control just connects (shows "/rc connecting…" -> "/rc
-   *  active"); it does NOT print the URL. Running it again WHILE connected opens
-   *  a menu (Disconnect · Show QR code · > Continue) that prints the session URL
-   *  (https://claude.ai/code/session_…).
-   *  - OFF -> ON: connect, then once "/rc active" shows, re-run the command to
-   *    open the menu, scrape the URL to the clipboard and dismiss with Esc
-   *    ("Esc to continue") so the session stays connected. See maybeAfterRemoteActive.
-   *  - ON -> OFF: open the menu, arrow Up twice (Continue -> QR -> Disconnect)
-   *    and Enter to select "Disconnect this session".
-   *  The leading Ctrl+U clears any draft so the command lands on its own line. */
+  /** Two-state remote control toggle (see the reference behaviour). The first
+   *  /remote-control connects; running it again while connected opens a menu that
+   *  prints the session URL. OFF→ON connects then scrapes + opens the URL;
+   *  ON→OFF opens the menu and arrows up to "Disconnect". */
   toggleRemoteControl() {
     if (!this.child) {
       new Notice("No live session");
@@ -1086,16 +771,19 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (!this.remoteOn) {
       this.send({ t: "input", d: "\x15/remote-control\r" });
       this.remoteOn = true;
-      this.updateRemoteBtn();
+      this.plugin.updateRemoteBtn();
       new Notice("Remote control connecting…");
       // Reopen the menu to surface + copy the URL. Fast path: as soon as the
-      // output shows "/rc active" (maybeAfterRemoteActive). Fallback: a timer,
-      // since the menu also appears while still "connecting…".
-      this.remoteMenuFired = false;
+      // output shows "/rc active" (maybeAfterRemoteActive). The retry loop below
+      // keeps reopening the menu until the URL renders (connection may be slow).
+      this.remoteMenuLoopActive = false;
+      this.remoteMenuAttempts = 0;
+      this.remoteUrlCaptured = false;
+      this.awaitRemoteUrl = false;
       this.awaitRemoteActive = true;
       this.remoteActiveBuf = "";
       this.remoteActiveDeadline = Date.now() + 20000;
-      window.setTimeout(() => this.fireRemoteMenu(), 3500);
+      window.setTimeout(() => this.fireRemoteMenu(), 1000);
     } else {
       this.send({ t: "input", d: "\x15/remote-control\r" });
       // Menu default is "Continue"; Up x2 lands on "Disconnect this session".
@@ -1109,7 +797,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       window.setTimeout(() => this.send({ t: "input", d: "\r" }), 940);
       this.remoteOn = false;
       this.awaitRemoteActive = false;
-      this.updateRemoteBtn();
+      this.awaitRemoteUrl = false;
+      this.remoteMenuLoopActive = false;
+      this.plugin.updateRemoteBtn();
       new Notice("Remote control off");
     }
     this.term?.focus();
@@ -1127,24 +817,667 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (/\/rc active/i.test(clean)) this.fireRemoteMenu();
   }
 
-  /** One-shot: re-run /remote-control to open the menu (which prints the session
-   *  URL), arm the URL capture, then dismiss with Esc to stay connected. */
+  /** Start the menu retry loop (idempotent): kicked off by the fallback timer and
+   *  the "/rc active" fast path. Only one loop runs at a time. */
   private fireRemoteMenu() {
-    if (this.remoteMenuFired || !this.remoteOn || !this.child) return;
-    this.remoteMenuFired = true;
+    if (!this.remoteOn || !this.child || this.remoteUrlCaptured) return;
+    if (this.remoteMenuLoopActive) return; // a retry chain is already running
+    this.remoteMenuLoopActive = true;
+    this.runRemoteMenuAttempt();
+  }
+
+  /** One attempt: reopen the menu (which prints the URL once the session is
+   *  actually connected), arm the URL capture, dismiss the menu shortly after to
+   *  stay connected, and schedule a retry if the URL hasn't shown up yet. The menu
+   *  doesn't render the URL until connected, so a single early attempt can miss it
+   *  — hence the retries (this is what fixed needing to press Ctrl+R twice). */
+  private runRemoteMenuAttempt() {
+    if (!this.remoteOn || !this.child || this.remoteUrlCaptured) {
+      this.remoteMenuLoopActive = false;
+      return;
+    }
+    if (this.remoteMenuAttempts >= 6) {
+      this.remoteMenuLoopActive = false;
+      this.awaitRemoteUrl = false;
+      console.log(
+        "[cch remote] gave up after retries. Last cleaned buffer:\n" +
+          this.remoteUrlBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").slice(-1200)
+      );
+      new Notice(
+        "Couldn't read the remote URL automatically. It should be shown in the Claude panel — copy it from there."
+      );
+      return;
+    }
+    this.remoteMenuAttempts++;
     this.awaitRemoteActive = false;
     this.send({ t: "input", d: "\x15/remote-control\r" });
     this.awaitRemoteUrl = true;
     this.remoteUrlBuf = "";
-    this.remoteUrlDeadline = Date.now() + 8000;
-    window.setTimeout(() => this.send({ t: "input", d: "\x1b" }), 700);
+    this.remoteUrlDeadline = Date.now() + 6000;
+    // Dismiss the menu so the next attempt can reopen it cleanly (and so we stay
+    // connected if this attempt already had the URL).
+    window.setTimeout(() => {
+      if (this.remoteOn && !this.remoteUrlCaptured) this.send({ t: "input", d: "\x1b" });
+    }, 900);
+    // Retry: if the URL still isn't captured, reopen the menu (connection may have
+    // completed by now).
+    window.setTimeout(() => {
+      if (this.remoteOn && !this.remoteUrlCaptured) this.runRemoteMenuAttempt();
+      else this.remoteMenuLoopActive = false;
+    }, 1500);
   }
 
-  /** Reflect remoteOn on the header button (green when active). */
-  private updateRemoteBtn() {
+  /** While awaiting the remote-control menu, scrape the session URL from the
+   *  terminal output and copy it to the clipboard (once). */
+  private maybeCaptureRemoteUrl(chunk: string) {
+    if (!this.awaitRemoteUrl || this.remoteUrlCaptured) return;
+    if (Date.now() > this.remoteUrlDeadline) {
+      // This attempt's window lapsed; the retry loop will reopen the menu.
+      this.awaitRemoteUrl = false;
+      return;
+    }
+    this.remoteUrlBuf = (this.remoteUrlBuf + chunk).slice(-8000);
+    const clean = this.remoteUrlBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+    // Match the /code/<id> link. The id is word-chars only — NOT dots or slashes:
+    // the menu prints option labels ("Disconnect this session", "Show QR code")
+    // right after the URL with whitespace stripped, so including '.' would glue
+    // ".Disconnectthissession…" onto the URL (a broken link). Stopping at '.'
+    // yields the clean URL.
+    const m = clean.match(/https:\/\/claude\.ai\/code\/[\w-]+/);
+    if (m) {
+      this.awaitRemoteUrl = false;
+      this.remoteUrlCaptured = true; // stop the retry loop
+      this.remoteMenuLoopActive = false;
+      const url = m[0];
+      // Dismiss the menu so we stay connected (Continue is the default).
+      window.setTimeout(() => {
+        if (this.remoteOn) this.send({ t: "input", d: "\x1b" });
+      }, 200);
+      try {
+        const clip = nodeRequire("electron")?.clipboard;
+        if (clip) clip.writeText(url);
+        else void navigator.clipboard?.writeText(url).catch(() => {});
+      } catch {
+        /* clipboard unavailable */
+      }
+      const label = this.plugin.openInBrowser(url);
+      new Notice("Remote session opening in " + label + ":\n" + url);
+    }
+  }
+
+  /** Once claude is up, run the startup slash commands, then invoke this
+   *  session's skill (/<name>) — in order, with small gaps. Runs on a fresh start. */
+  private maybeSendInitial() {
+    if (this.initialSent) return;
+    this.initialSent = true;
+
+    const steps: string[] = [];
+    const startup = this.plugin.settings.startupCommands || "";
+    for (const line of startup.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+      steps.push(line);
+    }
+    if (this.skill) steps.push("/" + this.skill);
+    if (!steps.length) return;
+
+    let i = 0;
+    const submit = (text: string, then: () => void) => {
+      if (!this.child) return;
+      this.pasteToPty(text);
+      window.setTimeout(() => {
+        this.send({ t: "input", d: "\r" });
+        then();
+      }, 350);
+    };
+    const next = () => {
+      if (i >= steps.length || !this.child) return;
+      const text = steps[i++];
+      submit(text, () => {
+        if (i < steps.length) window.setTimeout(next, 1800);
+      });
+    };
+    // First step after claude has settled at its prompt.
+    window.setTimeout(next, 1800);
+  }
+
+  /** Debounced fit — collapses a burst of resize events into a single resize. */
+  scheduleFit() {
+    if (this.resizeTimer != null) window.clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = null;
+      this.fitNow();
+    }, 120);
+  }
+
+  /** Container ResizeObserver entry point (panel open animation + splitter drag).
+   *  Per-frame: rewrap xterm WITHOUT touching the pty (no claude reprint); once
+   *  the burst settles: tell claude the final size ONCE (fitNow(true)). */
+  onContainerResize() {
+    if (this.rafFit == null) {
+      this.rafFit = requestAnimationFrame(() => {
+        this.rafFit = null;
+        this.fitNow(false);
+      });
+    }
+    this.scheduleFit();
+  }
+
+  /** Resize xterm to fill its container. `syncPty=false` only rewraps the buffer
+   *  (live drag, no claude reprint); `syncPty=true` also sends the real size to
+   *  claude (debounced, so a whole drag = ONE reprint). */
+  fitNow(syncPty = true) {
+    if (!this.fit || !this.term || !this.host?.isConnected) return;
+    try {
+      this.fit.fit();
+      const { cols, rows } = this.term;
+      // Only poke the pty when the grid actually changed AND is sane — otherwise
+      // the Claude TUI repaints (stacking its banner), and a degenerate size
+      // (0 cols/rows during a theme reflow) kills the conpty process.
+      if (
+        syncPty &&
+        !this.exited &&
+        cols >= 2 &&
+        rows >= 2 &&
+        (cols !== this.lastCols || rows !== this.lastRows)
+      ) {
+        this.lastCols = cols;
+        this.lastRows = rows;
+        this.send({ t: "resize", cols, rows });
+        this.plugin.rememberSize(cols, rows);
+      }
+      this.term.refresh(0, Math.max(0, rows - 1));
+    } catch {
+      /* not laid out yet */
+    }
+  }
+
+  /** Kill this claude process and start a fresh one in the same terminal. */
+  restart() {
+    if (!this.term) return;
+    this.remoteOn = false;
+    this.awaitRemoteActive = false;
+    this.remoteMenuLoopActive = false;
+    this.remoteUrlCaptured = false;
+    this.awaitRemoteUrl = false;
+    this.plugin.updateRemoteBtn();
+    this.killChild();
+    this.term.reset();
+    this.startHost();
+    this.fitNow();
+    this.plugin.rebuildHeader();
+  }
+
+  killChild() {
+    const child = this.child;
+    if (!child) return;
+    this.child = null;
+    // Ask the host to kill the PTY and exit itself (it also self-exits on IPC
+    // disconnect). Fallback-kill the host if it doesn't go away on its own.
+    try {
+      child.send({ t: "kill" });
+    } catch {
+      /* channel already closed */
+    }
+    window.setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+    }, 800);
+  }
+
+  /** Kill the process, dispose the terminal and remove the host (tab closed). */
+  dispose() {
+    if (this.resizeTimer != null) {
+      window.clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+    if (this.rafFit != null) {
+      cancelAnimationFrame(this.rafFit);
+      this.rafFit = null;
+    }
+    this.killChild();
+    try {
+      this.term?.dispose();
+    } catch {
+      /* already gone */
+    }
+    this.term = null;
+    this.fit = null;
+    this.host?.remove();
+    this.host = null;
+    this.opened = false;
+  }
+
+  /** Fork the pty-host (real Node) and wire it up. */
+  private startHost() {
+    if (!this.term) return;
+    const vault = this.plugin.vaultPath();
+    if (!vault) {
+      this.term.writeln("Could not resolve the vault path (desktop only).");
+      return;
+    }
+
+    let cp: any;
+    try {
+      cp = nodeRequire("child_process");
+    } catch (e: any) {
+      this.term.writeln("Failed to load child_process: " + (e?.message ?? e));
+      return;
+    }
+
+    const hostPath = path.join(this.plugin.pluginDir(), "pty-host.js");
+    const nodePath = this.plugin.resolveNodePath();
+    let child: any;
+    try {
+      child = cp.fork(hostPath, [], {
+        execPath: nodePath, // a REAL node.exe — Obsidian's binary ignores ELECTRON_RUN_AS_NODE
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+        windowsHide: true,
+      });
+    } catch (e: any) {
+      this.term.writeln("Failed to start the pty host with Node at:");
+      this.term.writeln("  " + nodePath);
+      this.term.writeln("  " + (e?.message ?? e));
+      this.term.writeln(
+        "\r\nSet a valid path to node.exe in the plugin settings (Node.js path)."
+      );
+      return;
+    }
+    this.child = child;
+    this.initialSent = false;
+    this.exited = false;
+
+    const isWin = process.platform === "win32";
+    const shell = isWin
+      ? process.env.COMSPEC || "cmd.exe"
+      : process.env.SHELL || "/bin/bash";
+    const base = this.plugin.settings.command || "claude";
+    const extra = this.args?.trim();
+    const full = extra ? `${base} ${extra}` : base;
+    const args = isWin ? ["/c", full] : ["-lc", full];
+    // Spawn at the remembered (or current) size so the first fit is a no-op.
+    const cols = this.lastCols || this.plugin.settings.cols || 100;
+    const rows = this.lastRows || this.plugin.settings.rows || 30;
+    this.lastCols = cols;
+    this.lastRows = rows;
+
+    child.on("message", (msg: any) => {
+      if (!msg || !this.term) return;
+      switch (msg.t) {
+        case "ready":
+          child.send({
+            t: "spawn",
+            shell,
+            args,
+            opts: { name: "xterm-256color", cols, rows, cwd: vault },
+          });
+          break;
+        case "data":
+          this.term.write(msg.d);
+          // Per-session watchers (this terminal's TUI).
+          this.maybeSendInitial();
+          this.maybeConfirmModel(msg.d);
+          this.maybeAfterRemoteActive(msg.d);
+          this.maybeCaptureRemoteUrl(msg.d);
+          // Global watchers (shared account / usage / auto-switch), fed this
+          // session's output.
+          this.plugin.maybeAutoSwitch(this, msg.d);
+          this.plugin.maybeAutoSaveAccount();
+          this.plugin.maybeProbeOnActivity();
+          break;
+        case "exit":
+          this.exited = true; // stop sending resizes to the dead pty
+          this.term.writeln(
+            "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"
+          );
+          this.remoteOn = false;
+          this.awaitRemoteUrl = false;
+          this.remoteMenuLoopActive = false;
+          this.plugin.updateRemoteBtn();
+          this.plugin.rebuildHeader(); // mark the tab as exited
+          break;
+        case "error":
+          this.term.writeln("\r\n\x1b[2m[pty-host error] " + msg.message + "\x1b[0m");
+          break;
+      }
+    });
+
+    child.on("exit", () => {
+      if (this.child === child) {
+        this.child = null;
+      }
+    });
+
+    child.stderr?.on("data", (b: Buffer) =>
+      console.error("[claude-code-harness pty-host]", b.toString())
+    );
+  }
+}
+
+export default class ClaudeCodeHarnessPlugin extends Plugin {
+  settings: HarnessSettings;
+
+  // Several parallel Claude Code instances. Only the active one is mounted in
+  // the panel; the rest keep running and buffering output in xterm. They live on
+  // the plugin (not the view) so they survive the panel being closed/reopened.
+  private sessions: Session[] = [];
+  private activeIndex = 0;
+  private viewRoot: HTMLElement | null = null; // the panel contentEl while open
+
+  private fontLink: HTMLLinkElement | null = null;
+  // Header button refs (single header, reflecting the ACTIVE session + global state).
+  private zoomLabel: HTMLElement | null = null;
+  private modelBtn: HTMLElement | null = null;
+  private skillBtn: HTMLElement | null = null;
+  private accountBtn: HTMLElement | null = null;
+  private autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
+  private remoteBtn: HTMLElement | null = null;
+  private tempImages: string[] = []; // temp PNGs from image paste, cleaned on unload
+
+  // --- Global account / auto-switch / usage state (shared by all sessions,
+  // because every claude process reads the same ~/.claude/.credentials.json). ---
+  private autoSwitchCooldownUntil = 0;
+  // Rotate mode: usage % captured when the current account became active.
+  private rotateBaselinePct: number | null = null;
+  // Account email currently shown in the status bar.
+  private barAccountEmail: string | null = null;
+  // Swap verification.
+  private pendingVerifyEmail: string | null = null;
+  private verifyDeadline = 0;
+  private sawStatusSinceSwitch = false;
+  // Auth-failure recovery after a switch.
+  private authWatchUntil = 0;
+  private recoverAttempts = 0;
+  private warnedNoAccounts = false; // one-shot "need ≥2 accounts" notice
+  // Auto-save the active account whenever it changes (throttled).
+  private lastAutoSavedEmail = "";
+  private lastAutoSaveCheck = 0;
+  // Live usage probe cache + guards.
+  private accountUsage = new Map<string, AccountUsage>();
+  private usageProbing = false;
+  private lastActiveProbe = 0;
+  private lastAutoSwitchDiag = 0; // throttle for the rotate/threshold console log
+  // Last auto-switch evaluation, surfaced by the "Diagnose auto-switch" command.
+  private lastDiagInfo:
+    | {
+        at: number;
+        mode: string;
+        enabled: boolean;
+        pct: number | null;
+        src: string;
+        cur: string | null;
+        bar: string | null;
+        baseline: number | null;
+        delta: number;
+        threshold: number;
+        savedAccounts: number;
+        reason: string;
+      }
+    | null = null;
+
+  async onload() {
+    await this.loadSettings();
+    this.injectFont();
+
+    this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
+
+    this.addRibbonIcon("terminal", "Claude Code", () => this.activateView());
+
+    this.addCommand({
+      id: "open-claude-code",
+      name: "Open Claude Code panel",
+      callback: () => this.activateView(),
+    });
+
+    this.addCommand({
+      id: "new-claude-code-session",
+      name: "New Claude Code session",
+      callback: async () => {
+        await this.activateView();
+        this.newSession();
+      },
+    });
+
+    this.addCommand({
+      id: "restart-claude-code",
+      name: "Restart Claude Code session",
+      callback: () => this.activeSession()?.restart(),
+    });
+
+    this.addCommand({
+      id: "send-active-note",
+      name: "Send active note to Claude",
+      callback: () => this.sendActiveNote(),
+    });
+
+    this.addCommand({
+      id: "toggle-remote-control",
+      name: "Toggle remote control",
+      hotkeys: [{ modifiers: ["Mod"], key: "r" }],
+      callback: () => this.activeSession()?.toggleRemoteControl(),
+    });
+
+    this.addCommand({
+      id: "save-claude-account",
+      name: "Save current Claude account",
+      callback: () => this.saveCurrentAccount(),
+    });
+
+    this.addCommand({
+      id: "diagnose-auto-switch",
+      name: "Diagnose auto-switch (why no account change)",
+      callback: () => this.diagnoseAutoSwitch(),
+    });
+
+    // Right-click a file/folder in the explorer -> "Send to Claude" (@-mention).
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file: TAbstractFile) => {
+        menu.addItem((item) =>
+          item
+            .setTitle("Send to Claude")
+            .setIcon("terminal")
+            .onClick(() => this.sendPathsToClaude([file.path]))
+        );
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("files-menu", (menu, files: TAbstractFile[]) => {
+        menu.addItem((item) =>
+          item
+            .setTitle("Send to Claude")
+            .setIcon("terminal")
+            .onClick(() => this.sendPathsToClaude(files.map((f) => f.path)))
+        );
+      })
+    );
+
+    // Follow the Obsidian theme: re-apply colours to every session on change.
+    this.registerEvent(
+      this.app.workspace.on("css-change", () => {
+        for (const s of this.sessions) s.applyTheme();
+      })
+    );
+
+    this.addSettingTab(new HarnessSettingTab(this.app, this));
+
+    this.sweepTempImages(); // remove leftover paste PNGs from previous runs
+
+    // Start one session as soon as Obsidian loads, even if the user never opens
+    // the panel. xterm buffers all output until the panel is shown.
+    this.ensureAtLeastOneSession();
+
+    // Token keep-alive + live usage (see refreshAccount()). Every 3 min we CHECK
+    // every account and refresh its OAuth token if it's expired/about to expire,
+    // then re-probe usage; also once shortly after start.
+    window.setTimeout(() => void this.refreshUsage({ refreshTokens: true }), 5000);
+    this.registerInterval(
+      window.setInterval(
+        () => void this.refreshUsage({ refreshTokens: true }),
+        3 * 60 * 1000
+      )
+    );
+  }
+
+  onunload() {
+    for (const s of this.sessions) s.dispose();
+    this.sessions = [];
+    this.viewRoot = null;
+    this.fontLink?.remove();
+    this.fontLink = null;
+    this.cleanupTempImages();
+    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  // --- Session manager ----------------------------------------------------
+
+  activeSession(): Session | null {
+    return this.sessions[this.activeIndex] ?? null;
+  }
+
+  private ensureAtLeastOneSession() {
+    if (!this.sessions.length) this.newSession();
+  }
+
+  /** Create a new session (its own claude), make it active, and mount it if the
+   *  panel is open. Used by the + tab button and the "New session" command. */
+  newSession(opts?: { skill?: string; model?: string; args?: string; title?: string }): Session {
+    if (this.viewRoot) this.activeSession()?.detachHost();
+    const sess = new Session(this, opts);
+    this.sessions.push(sess);
+    this.activeIndex = this.sessions.length - 1;
+    if (this.viewRoot) {
+      this.rebuildHeader();
+      sess.attachInto(this.viewRoot);
+    }
+    return sess;
+  }
+
+  /** Switch the visible tab to session index `i`. */
+  setActive(i: number) {
+    if (i < 0 || i >= this.sessions.length) return;
+    if (i === this.activeIndex && this.activeSession()?.host?.isConnected) return;
+    if (this.viewRoot) this.activeSession()?.detachHost();
+    this.activeIndex = i;
+    this.rebuildHeader();
+    if (this.viewRoot) this.activeSession()?.attachInto(this.viewRoot);
+  }
+
+  /** Close a tab: kill that instance's claude process and drop it. Keeps at
+   *  least one session alive so the panel stays usable. */
+  closeSession(sess: Session) {
+    const idx = this.sessions.indexOf(sess);
+    if (idx < 0) return;
+    if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
+    sess.dispose();
+    this.sessions.splice(idx, 1);
+    if (!this.sessions.length) {
+      this.activeIndex = 0;
+      this.newSession(); // always keep one
+      return;
+    }
+    if (this.activeIndex > idx) this.activeIndex--;
+    else if (this.activeIndex >= this.sessions.length)
+      this.activeIndex = this.sessions.length - 1;
+    this.rebuildHeader();
+    if (this.viewRoot) {
+      const a = this.activeSession();
+      if (a && !a.host?.isConnected) a.attachInto(this.viewRoot);
+      else a?.scheduleFit();
+    }
+  }
+
+  /** Mount the panel: build the header (tabs + toolbar) and show the active
+   *  session. Called from the view's onOpen. */
+  attachView(root: HTMLElement) {
+    this.viewRoot = root;
+    this.ensureAtLeastOneSession();
+    this.buildHeader(root);
+    this.activeSession()?.attachInto(root);
+  }
+
+  /** Unmount the panel WITHOUT killing any session. Called from the view's onClose. */
+  detachView() {
+    this.activeSession()?.detachHost();
+    this.viewRoot = null;
+  }
+
+  /** ResizeObserver entry point — delegate to the active session. */
+  onContainerResize() {
+    this.activeSession()?.onContainerResize();
+  }
+
+  /** Reference the active note in the prompt (Claude resolves @-mentions). */
+  async sendActiveNote() {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice("No active note to send.");
+      return;
+    }
+    await this.sendPathsToClaude([file.path]);
+  }
+
+  /** @-mention one or more vault paths in the active session (opens the panel
+   *  and starts a session if needed). Used by the @ button, the file-explorer
+   *  context menu and drag-and-drop. */
+  async sendPathsToClaude(paths: string[]) {
+    const uniq = [...new Set(paths)].filter(Boolean);
+    if (!uniq.length) return;
+    await this.activateView();
+    this.ensureAtLeastOneSession();
+    const a = this.activeSession();
+    if (!a?.child) {
+      new Notice("Claude session is not running.");
+      return;
+    }
+    a.mention(uniq);
+  }
+
+  // --- Font / size --------------------------------------------------------
+
+  /** Font zoom (Ctrl +/-/0). Persisted; applied to every session. */
+  setFontSize(px: number) {
+    const clamped = Math.min(MAX_FONT, Math.max(MIN_FONT, Math.round(px)));
+    this.settings.fontSize = clamped;
+    void this.saveSettings();
+    for (const s of this.sessions) s.applyFontSize(clamped);
+    if (this.zoomLabel) this.zoomLabel.setText(clamped + "px");
+  }
+
+  zoomBy(delta: number) {
+    this.setFontSize((this.settings.fontSize || 14) + delta);
+  }
+
+  /** Persist the last fitted grid size (so the next session spawns claude at it). */
+  rememberSize(cols: number, rows: number) {
+    if (this.settings.cols !== cols || this.settings.rows !== rows) {
+      this.settings.cols = cols;
+      this.settings.rows = rows;
+      void this.saveSettings();
+    }
+  }
+
+  // --- Header buttons reflecting the active session -----------------------
+
+  updateModelBtn() {
+    if (!this.modelBtn) return;
+    const id = this.activeSession()?.model ?? this.settings.model;
+    this.modelBtn.setText(MODELS.find((m) => m.id === id)?.label ?? "Model");
+  }
+
+  updateSkillBtn() {
+    if (!this.skillBtn) return;
+    const skill = this.activeSession()?.skill ?? this.settings.skill;
+    this.skillBtn.title = "Skill: " + (skill || "none");
+  }
+
+  /** Reflect the active session's remoteOn on the header button (green when ON). */
+  updateRemoteBtn() {
     if (!this.remoteBtn) return;
-    this.remoteBtn.toggleClass("cch-active", this.remoteOn);
-    this.remoteBtn.title = this.remoteOn
+    const on = this.activeSession()?.remoteOn ?? false;
+    this.remoteBtn.toggleClass("cch-active", on);
+    this.remoteBtn.title = on
       ? "Remote control ON — click to disconnect"
       : "Activate remote control (/remote-control)";
   }
@@ -1248,34 +1581,174 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     menu.showAtPosition({ x: r.left, y: r.bottom });
   }
 
-  /** While awaiting the remote-control menu, scrape the session URL from the
-   *  terminal output and copy it to the clipboard (once). */
-  private maybeCaptureRemoteUrl(chunk: string) {
-    if (!this.awaitRemoteUrl) return;
-    if (Date.now() > this.remoteUrlDeadline) {
-      this.awaitRemoteUrl = false;
-      return;
-    }
-    this.remoteUrlBuf = (this.remoteUrlBuf + chunk).slice(-5000);
-    const clean = this.remoteUrlBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    const m = clean.match(/https:\/\/claude\.ai\/code\/session_[\w-]+/);
-    if (m) {
-      this.awaitRemoteUrl = false;
-      const url = m[0];
-      try {
-        const clip = nodeRequire("electron")?.clipboard;
-        if (clip) clip.writeText(url);
-        else void navigator.clipboard?.writeText(url).catch(() => {});
-      } catch {
-        /* clipboard unavailable */
-      }
-      const label = this.openInBrowser(url);
-      new Notice("Remote session opening in " + label + ":\n" + url);
+  // --- Skills -------------------------------------------------------------
+
+  /** Claude Code's personal skills folder (~/.claude/skills). */
+  skillsDir(): string {
+    const os = nodeRequire("os");
+    return path.join(os.homedir(), ".claude", "skills");
+  }
+
+  /** Names of the skills available in ~/.claude/skills (subfolders with a
+   *  SKILL.md), sorted. The folder name is the /<name> used to invoke it. */
+  listSkills(): string[] {
+    try {
+      const fs = nodeRequire("fs");
+      const dir = this.skillsDir();
+      return fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e: any) => e.isDirectory())
+        .map((e: any) => e.name)
+        .filter((name: string) =>
+          fs.existsSync(path.join(dir, name, "SKILL.md"))
+        )
+        .sort((a: string, b: string) => a.localeCompare(b));
+    } catch {
+      return [];
     }
   }
 
-  /** The Claude account currently logged in, from ~/.claude.json. Updated by
-   *  Claude on /login, so reading it now reflects the active account. */
+  /** Open this plugin's settings tab directly. */
+  openSettings() {
+    try {
+      const setting = (this.app as any).setting;
+      setting.open();
+      setting.openTabById(this.manifest.id);
+    } catch (e) {
+      new Notice("Could not open settings.");
+      console.warn("[claude-code-harness] openSettings:", e);
+    }
+  }
+
+  /** Open Claude Code's skills folder (~/.claude/skills) in the OS file manager,
+   *  then bring that window to the front and maximise it. */
+  openSkillsFolder() {
+    try {
+      const dir = this.skillsDir();
+      const shell = nodeRequire("electron")?.shell;
+      if (shell?.openPath) {
+        void shell.openPath(dir);
+        this.focusFolderWindow(dir);
+      } else {
+        new Notice("Could not open the folder (shell unavailable).");
+      }
+    } catch (e) {
+      new Notice("Could not open the skills folder.");
+      console.warn("[claude-code-harness] openSkillsFolder:", e);
+    }
+  }
+
+  /** Bring the Explorer window showing `folder` to the front and maximise it.
+   *  Windows-only, best-effort (see the original notes). */
+  private focusFolderWindow(folder: string) {
+    try {
+      const cp = nodeRequire("child_process");
+      const target = folder.replace(/\//g, "\\").replace(/'/g, "''");
+      const ps = [
+        "$ErrorActionPreference='SilentlyContinue'",
+        "Add-Type -Name N -Namespace W -MemberDefinition '" +
+          '[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h,int n);' +
+          '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);' +
+          "'",
+        "$shell = New-Object -ComObject Shell.Application",
+        "$win = $null",
+        "for ($i=0; $i -lt 8 -and -not $win; $i++) {",
+        "  Start-Sleep -Milliseconds 400",
+        `  $win = $shell.Windows() | Where-Object { $_.Document.Folder.Self.Path -ieq '${target}' } | Select-Object -First 1`,
+        "}",
+        "if ($win) {",
+        "  $h = [System.IntPtr]$win.HWND",
+        "  [W.N]::ShowWindow($h, 6) | Out-Null", // SW_MINIMIZE
+        "  Start-Sleep -Milliseconds 150",
+        "  [W.N]::ShowWindow($h, 3) | Out-Null", // SW_MAXIMIZE (restores → foreground)
+        "  [W.N]::SetForegroundWindow($h) | Out-Null",
+        "  $ws = New-Object -ComObject WScript.Shell",
+        "  $ws.AppActivate($win.LocationName) | Out-Null",
+        "}",
+      ].join("; ");
+      cp.spawn(
+        "powershell",
+        ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+        { detached: true, stdio: "ignore", windowsHide: true }
+      ).unref();
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // --- Temp image paste cleanup ------------------------------------------
+
+  /** If the clipboard holds an image, write it to a temp PNG and return its
+   *  path; otherwise null. */
+  saveClipboardImage(clipboard: any): string | null {
+    try {
+      const img = clipboard?.readImage?.();
+      if (!img || img.isEmpty()) return null;
+      const os = nodeRequire("os");
+      const fs = nodeRequire("fs");
+      const file = path.join(os.tmpdir(), `cch-paste-${Date.now()}.png`);
+      fs.writeFileSync(file, img.toPNG());
+      this.tempImages.push(file);
+      return file;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Delete temp PNGs created by image paste this session. */
+  private cleanupTempImages() {
+    if (!this.tempImages.length) return;
+    try {
+      const fs = nodeRequire("fs");
+      for (const f of this.tempImages) {
+        try {
+          fs.unlinkSync(f);
+        } catch {
+          /* already gone */
+        }
+      }
+    } catch {
+      /* fs unavailable */
+    }
+    this.tempImages = [];
+  }
+
+  /** Remove leftover cch-paste-*.png from earlier runs (older than 1 day). */
+  private sweepTempImages() {
+    try {
+      const fs = nodeRequire("fs");
+      const os = nodeRequire("os");
+      const dir = os.tmpdir();
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      for (const name of fs.readdirSync(dir)) {
+        if (!/^cch-paste-\d+\.png$/.test(name)) continue;
+        const full = path.join(dir, name);
+        try {
+          if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Load JetBrains Mono so the terminal renders identically to the reference. */
+  private injectFont() {
+    if (document.getElementById("cch-jetbrains-mono")) return;
+    const link = document.createElement("link");
+    link.id = "cch-jetbrains-mono";
+    link.rel = "stylesheet";
+    link.href =
+      "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap";
+    document.head.appendChild(link);
+    this.fontLink = link;
+  }
+
+  // --- Account email ------------------------------------------------------
+
+  /** The Claude account currently logged in, from ~/.claude.json. */
   private currentAccountEmail(): string | null {
     try {
       const fs = nodeRequire("fs");
@@ -1317,8 +1790,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     fs.renameSync(tmp, file);
   }
 
-  /** Snapshot the active account's credentials + oauthAccount under its email.
-   *  Returns the saved email, or null. */
+  /** Snapshot the active account's credentials + oauthAccount under its email. */
   saveCurrentAccount(notify = true): string | null {
     try {
       const fs = nodeRequire("fs");
@@ -1372,9 +1844,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Switch to a saved account by hot-swapping the credentials file — NO restart.
-   *  The running claude re-reads ~/.claude/.credentials.json and uses the new
-   *  account on its next request, so the conversation keeps going uninterrupted.
-   *  Snapshots the outgoing account first (to keep its freshly-refreshed token). */
+   *  Affects ALL running sessions (they re-read ~/.claude/.credentials.json and
+   *  use the new account on their next request). Snapshots the outgoing account
+   *  first (to keep its freshly-refreshed token). */
   switchToAccount(email: string) {
     try {
       const fs = nodeRequire("fs");
@@ -1395,8 +1867,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       // Atomic writes so the live claude never reads a half-written file.
       this.writeJsonAtomic(this.credsPath(), saved.credentials);
       if (saved.oauthAccount) {
-        // Re-read immediately before writing to minimise clobbering Claude's own
-        // concurrent updates to ~/.claude.json (it writes that file frequently).
         const cj = JSON.parse(fs.readFileSync(this.claudeJsonPath(), "utf8"));
         cj.oauthAccount = saved.oauthAccount;
         this.writeJsonAtomic(this.claudeJsonPath(), cj);
@@ -1404,7 +1874,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const target = email.trim().toLowerCase();
       this.lastAutoSavedEmail = target;
       this.rotateBaselinePct = null; // new account re-establishes its own baseline
-      // Arm verification + auth-failure watch for this swap.
       this.pendingVerifyEmail = target;
       this.verifyDeadline = Date.now() + 45000;
       this.sawStatusSinceSwitch = false;
@@ -1427,9 +1896,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Auto-snapshot the active account whenever it changes (throttled to ~10s), so
-   *  every account logged into gets saved for switching without manual clicks. */
-  private maybeAutoSaveAccount() {
+  /** Auto-snapshot the active account whenever it changes (throttled to ~10s). */
+  maybeAutoSaveAccount() {
     const now = Date.now();
     if (now - this.lastAutoSaveCheck < 10000) return;
     this.lastAutoSaveCheck = now;
@@ -1449,15 +1917,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Forget the rotate-mode baseline (re-captured on the next reading). Called
-   *  when the auto-switch mode/enable changes so a stale baseline isn't reused. */
+  /** Forget the rotate-mode baseline (re-captured on the next reading). */
   resetRotationBaseline() {
     this.rotateBaselinePct = null;
   }
 
   /** Account to switch to: the **least-used** one (lowest probed 5h %), skipping
-   *  accounts whose saved token is dead (error "auth"). Falls back to round-robin
-   *  order when no fresh usage data is available. Null if there's nowhere to go. */
+   *  dead-token accounts. Falls back to round-robin. Null if nowhere to go. */
   private pickNextAccount(): string | null {
     const saved = this.listSavedAccounts().map((a) => a.email);
     if (saved.length < 2) return null;
@@ -1465,9 +1931,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const others = saved.filter((e) => e.trim().toLowerCase() !== cur);
     if (!others.length) return null;
 
-    // Prefer the candidate with the lowest fresh 5h usage; never pick one whose
-    // token is known-dead. Candidates without a fresh reading rank after those
-    // with one (handled by treating unknown as +Infinity but keeping order).
     let best: string | null = null;
     let bestPct = Infinity;
     for (const e of others) {
@@ -1484,8 +1947,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
     if (best && bestPct < Infinity) return best;
 
-    // No fresh usage data → round-robin from the current account (original logic),
-    // still skipping dead-token accounts.
     const idx = saved.findIndex((e) => e.trim().toLowerCase() === cur);
     const start = idx >= 0 ? idx + 1 : 0;
     for (let i = 0; i < saved.length; i++) {
@@ -1499,7 +1960,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   // --- Live usage probe (API rate-limit headers) --------------------------
 
-  /** OAuth access token for an account: the live creds for the active account,
+  /** OAuth access token for an account: live creds for the active account,
    *  otherwise the saved snapshot. Null if unreadable. */
   private accessTokenFor(email: string): string | null {
     try {
@@ -1510,8 +1971,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           ? this.credsPath()
           : path.join(this.accountsDir(), this.accountFileName(email));
       const j = JSON.parse(fs.readFileSync(file, "utf8"));
-      // Active creds file holds claudeAiOauth at the root; snapshots nest it
-      // under .credentials.
       return (
         j?.claudeAiOauth?.accessToken ||
         j?.credentials?.claudeAiOauth?.accessToken ||
@@ -1522,16 +1981,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Refresh one account's OAuth token with its refresh token (the same grant
-   *  Claude Code uses internally) and persist the rotated pair atomically, so an
-   *  inactive account doesn't drift into "expired". Returns true on success.
-   *
-   *  SAFETY: the refresh token ROTATES on every success — the server returns a new
-   *  one and invalidates the old. Losing it locks the account out (needs /login).
-   *  Hence: we only touch the file on HTTP 200 (any error → creds left intact, old
-   *  refresh token still valid), and we write atomically (temp+rename). The active
-   *  account is refreshed too (user opted into the aggressive mode); claude re-reads
-   *  .credentials.json per request, so it just picks up the fresher token. */
+  /** Refresh one account's OAuth token (the same grant Claude Code uses) and
+   *  persist the rotated pair atomically. Returns true on success. Only touches
+   *  the file on HTTP 200, so a failure never destroys the refresh token. */
   private async refreshAccount(email: string): Promise<boolean> {
     const fs = nodeRequire("fs");
     const lower = email.trim().toLowerCase();
@@ -1546,14 +1998,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     } catch {
       return false;
     }
-    // Active creds hold claudeAiOauth at the root; snapshots nest it under
-    // .credentials. Refresh in place, preserving every other field.
     const oauth = isActive ? store?.claudeAiOauth : store?.credentials?.claudeAiOauth;
     const refreshToken = oauth?.refreshToken;
     if (!refreshToken) return false;
 
-    // Throttle: only refresh when expired or about to expire (see REFRESH_SKEW_MS).
-    // expiresAt is stored in ms here, but tolerate seconds defensively.
     const prev = Number(oauth.expiresAt) || 0;
     const prevMs = prev > 0 && prev < 1e12 ? prev * 1000 : prev;
     if (prevMs && prevMs - Date.now() > REFRESH_SKEW_MS) return true; // still alive
@@ -1561,8 +2009,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const resp = await this.oauthRefresh(refreshToken);
     if (!resp) return false; // network/HTTP error → keep old creds intact
 
-    // Preserve the stored unit of expiresAt (confirmed ms here, but be defensive
-    // in case a snapshot ever used seconds) so claude reads it correctly.
     const ttl = resp.expires_in || 0;
     const expiresAt =
       prev > 0 && prev < 1e12
@@ -1589,8 +2035,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** POST the OAuth refresh-token grant. Resolves to the parsed token response on
-   *  HTTP 200, or null on any non-200 / network / parse error (never rejects), so
-   *  a failure never destroys the stored refresh token. */
+   *  HTTP 200, or null on any error (never rejects). */
   private oauthRefresh(
     refreshToken: string
   ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | null> {
@@ -1651,8 +2096,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Probe one account's usage via a minimal API call, reading the rate-limit
-   *  response headers. Resolves to an AccountUsage (never rejects). Uses Node's
-   *  https (desktop-only) so all response headers are exposed. */
+   *  response headers. Resolves to an AccountUsage (never rejects). */
   private probeUsage(token: string): Promise<AccountUsage> {
     const now = Date.now();
     const empty = (error: AccountUsage["error"]): AccountUsage => ({
@@ -1682,7 +2126,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         if (v == null) return null;
         const f = parseFloat(v);
         if (isNaN(f)) return null;
-        return Math.round(f <= 1 ? f * 100 : f); // headers are a 0..1 fraction
+        // The unified-utilization headers are ALWAYS a 0..1 fraction, so always
+        // ×100. (The old `f <= 1 ? …` guard mis-read a maxed-out account: at the
+        // limit the fraction is ~1.0 and can tip just above 1.0, e.g. 1.02, which
+        // the guard treated as "already a %" → reported 100% as 1%.) Cap at 100.
+        return Math.min(100, Math.round(f * 100));
       };
       let done = false;
       const finish = (r: AccountUsage) => {
@@ -1737,9 +2185,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Refresh cached usage for the active account (activeOnly) or every saved
-   *  account, probing sequentially with a small gap to avoid bursts. With
-   *  `refreshTokens`, each account's OAuth token is refreshed first (keep-alive),
-   *  so inactive accounts don't go "expired" and their usage reads correctly. */
+   *  account. With `refreshTokens`, each account's OAuth token is refreshed first. */
   async refreshUsage(opts: { activeOnly?: boolean; refreshTokens?: boolean } = {}) {
     if (!this.settings.usageProbe || this.usageProbing) return;
     this.usageProbing = true;
@@ -1817,10 +2263,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return "var(--color-green)";
   }
 
-  /** Aligned, colour-coded title for an account in the 👤 menu. Monospace +
-   *  pre-spaced so the email / 5h% / countdown / 7d% line up in columns; the %
-   *  numbers are coloured by how close to the limit they are. `emailWidth` is the
-   *  longest email in the list, used to pad the first column. */
+  /** Aligned, colour-coded title for an account in the 👤 menu. */
   private accountMenuTitle(email: string, emailWidth: number): DocumentFragment {
     const frag = document.createDocumentFragment();
     const seg = (text: string, color?: string) => {
@@ -1842,11 +2285,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (u.error === "rate") return (seg("rate-limited", "var(--color-orange)"), frag);
     if (u.error || u.pct5h == null) return (seg("unavailable", "var(--text-muted)"), frag);
 
-    // 5h: "5h " + right-aligned number + "%" (number coloured by level).
     seg("5h ", "var(--text-muted)");
     seg(String(u.pct5h).padStart(3, " ") + "%", this.usageColor(u.pct5h));
 
-    // Countdown to reset, padded to a fixed width so the 7d column lines up.
     let cd = "";
     if (u.reset5h) {
       const diff = u.reset5h - Math.floor(Date.now() / 1000);
@@ -1866,7 +2307,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Debounced probe of the active account on terminal activity (≥60s apart). */
-  private maybeProbeOnActivity() {
+  maybeProbeOnActivity() {
     if (!this.settings.usageProbe) return;
     const now = Date.now();
     if (now - this.lastActiveProbe < 60000) return;
@@ -1874,8 +2315,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     void this.refreshUsage({ activeOnly: true });
   }
 
-  /** Emails of accounts we know about (saved snapshots ∪ the active one), so a
-   *  stray email in note content isn't mistaken for the account in the status bar. */
+  /** Emails of accounts we know about (saved snapshots ∪ the active one). */
   private knownAccountEmails(): Set<string> {
     const set = new Set(this.listSavedAccounts().map((a) => a.email.trim().toLowerCase()));
     const cur = this.currentAccountEmail();
@@ -1893,13 +2333,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Process Claude's output: track the active account from the status bar
+  /** Process a session's output: track the active account from the status bar
    *  (label + swap verification + auth-fail recovery) and, if enabled, auto-switch
-   *  accounts by usage. Runs on every `data` chunk (not only when autoSwitch is on)
-   *  so the live label and verification work regardless. */
-  private maybeAutoSwitch(chunk: string) {
-    this.autoSwitchBuf = (this.autoSwitchBuf + chunk).slice(-3000);
-    const clean = this.autoSwitchBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+   *  accounts by usage. Fed every `data` chunk from every session; uses that
+   *  session's rolling buffer, but the decision state (cooldown, baseline, verify)
+   *  is global because the credentials are shared across all instances. */
+  maybeAutoSwitch(session: Session, chunk: string) {
+    session.autoSwitchBuf = (session.autoSwitchBuf + chunk).slice(-3000);
+    const clean = session.autoSwitchBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 
     // --- Track the account shown in the status bar -------------------------
     const known = this.knownAccountEmails();
@@ -1946,12 +2387,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
 
     // --- Auto-switch decision --------------------------------------------
-    // Read the active account's 5h usage %: prefer the scraped status-bar %
-    // (works even with no API access; the bar can lag a swap, hence the anchor
-    // guard). Fall back to the authoritative API reading (tied to the account's
-    // own token, so no anchoring needed) so auto-switch keeps working if the bar
-    // % is ever hidden. We compute this even when auto-switch is off so the
-    // "Diagnose auto-switch" command always has something to show.
     const cur = this.currentAccountEmail();
     let pct: number | null = null;
     let src = "none";
@@ -1959,8 +2394,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const scraped = m && m[1] !== undefined ? parseInt(m[1], 10) : NaN;
     if (!isNaN(scraped)) {
       if (this.barAccountEmail && this.barAccountEmail !== cur) {
-        // Anchor: the bar's account isn't the one we believe is active — its % is
-        // stale (it hasn't caught up to the last swap). Don't act on it.
         src = "scrape(anchored-out)";
       } else {
         pct = scraped;
@@ -1972,9 +2405,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (pct != null) src = "api";
     }
 
-    // Decide — and capture WHY, in plain language, for the "Diagnose auto-switch"
-    // command. `decide()` returns a human-readable reason and performs the switch
-    // as a side effect when warranted (so the recorded reason matches reality).
     const decide = (): string => {
       if (!this.settings.autoSwitch) return "auto-switch is OFF";
       const cd = this.autoSwitchCooldownUntil - Date.now();
@@ -1991,11 +2421,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (this.settings.autoSwitchMode === "rotate") {
         const delta = this.settings.autoSwitchDelta || 10;
         if (this.rotateBaselinePct === null) {
-          this.rotateBaselinePct = pct; // first reading after activation = baseline
+          this.rotateBaselinePct = pct;
           return `baseline set at ${pct}% — will rotate at ${pct + delta}% (+${delta})`;
         }
         if (pct < this.rotateBaselinePct) {
-          this.rotateBaselinePct = pct; // 5h window reset → re-base to the low-water mark
+          this.rotateBaselinePct = pct;
           return `usage dropped → baseline re-based to ${pct}%`;
         }
         const target = this.rotateBaselinePct + delta;
@@ -2026,7 +2456,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       savedAccounts: this.listSavedAccounts().length,
       reason,
     };
-    // Throttled console echo (open DevTools with Ctrl+Shift+I → Console).
     if (Date.now() - this.lastAutoSwitchDiag > 4000) {
       this.lastAutoSwitchDiag = Date.now();
       console.log("[cch auto-switch]", this.lastDiagInfo);
@@ -2074,17 +2503,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   /** Common path for an automatic switch: set cooldown, reset state, notify, swap. */
   private triggerSwitch(next: string, reason: string) {
     this.autoSwitchCooldownUntil = Date.now() + 10000;
-    this.autoSwitchBuf = "";
     this.rotateBaselinePct = null; // recapture baseline for the new account
     new Notice(`Claude account ${reason} — switching to ${next}…`);
     this.switchToAccount(next);
   }
 
   /** Open the remote session URL in the browser mapped to the active Claude
-   *  account (the URL only works where that same account is logged in). Returns
-   *  a human label for the notice. The link is also on the clipboard, so this is
-   *  best-effort. */
-  private openInBrowser(url: string): string {
+   *  account. Returns a human label for the notice. */
+  openInBrowser(url: string): string {
     const email = this.currentAccountEmail();
     const map = this.settings.browserMap.find(
       (m) => m.email.trim().toLowerCase() === email && !!email
@@ -2093,8 +2519,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return this.launchBrowser(browser, map?.path || "", url);
   }
 
-  /** Launch a specific browser with the URL (new tab in the running instance).
-   *  Best-effort; any failure falls back to the OS default browser. */
+  /** Launch a specific browser with the URL (new tab in the running instance). */
   private launchBrowser(browser: string, customPath: string, url: string): string {
     const openDefault = () => {
       try {
@@ -2139,7 +2564,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (exe) {
         cp.spawn(exe, [url], { detached: true, stdio: "ignore" }).unref();
       } else {
-        // Let Windows resolve the alias via its App Paths registry entry.
         cp.spawn("cmd", ["/c", "start", def.alias, url], {
           detached: true,
           stdio: "ignore",
@@ -2155,18 +2579,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Bring the just-launched browser window to the foreground and toggle
-   *  fullscreen (F11). CLI fullscreen flags are ignored when the browser is
-   *  already running, so we drive the window instead: a short PowerShell that
-   *  activates the process's main window (WScript.Shell.AppActivate, which
-   *  handles Windows' foreground rules) and sends {F11}. Best-effort and fire-
-   *  and-forget — the link is already open and on the clipboard regardless. */
+   *  fullscreen (F11). Best-effort, fire-and-forget. */
   private focusFullscreen(proc: string) {
     if (!proc) return;
     try {
       const cp = nodeRequire("child_process");
       const ps = [
         "$ErrorActionPreference='SilentlyContinue'",
-        // Give the new tab/window time to appear (cold start needs longer).
         "Start-Sleep -Milliseconds 1800",
         `$p = Get-Process '${proc}' -ErrorAction SilentlyContinue | ` +
           "Where-Object { $_.MainWindowHandle -ne 0 } | " +
@@ -2184,77 +2603,17 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         { detached: true, stdio: "ignore", windowsHide: true }
       ).unref();
     } catch {
-      /* best-effort: no fullscreen if PowerShell isn't available */
+      /* best-effort */
     }
   }
 
-  /** Once claude is up, run the startup slash commands, then invoke the active
-   *  skill (/<name>) — in order, with small gaps. Runs on a fresh start (Obsidian
-   *  launch or the Restart button); account switching no longer restarts, so the
-   *  skill is never re-injected on a switch. */
-  private maybeSendInitial() {
-    if (this.initialSent) return;
-    this.initialSent = true;
+  // --- Header (tabs + toolbar) -------------------------------------------
 
-    const steps: string[] = [];
-    const startup = this.settings.startupCommands || "";
-    for (const line of startup.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
-      steps.push(line);
-    }
-    if (this.settings.skill) steps.push("/" + this.settings.skill);
-    if (!steps.length) return;
-
-    let i = 0;
-    const submit = (text: string, then: () => void) => {
-      if (!this.child) return;
-      this.pasteToPty(text);
-      window.setTimeout(() => {
-        this.send({ t: "input", d: "\r" });
-        then();
-      }, 350);
-    };
-    const next = () => {
-      if (i >= steps.length || !this.child) return;
-      const text = steps[i++];
-      submit(text, () => {
-        if (i < steps.length) window.setTimeout(next, 1800);
-      });
-    };
-    // First step after claude has settled at its prompt.
-    window.setTimeout(next, 1800);
-  }
-
-  /** Debounced fit — collapses a burst of resize events into a single resize. */
-  scheduleFit() {
-    if (this.resizeTimer != null) window.clearTimeout(this.resizeTimer);
-    this.resizeTimer = window.setTimeout(() => {
-      this.resizeTimer = null;
-      this.fitNow();
-    }, 120);
-  }
-
-  /** Container ResizeObserver entry point (panel open animation + splitter drag).
-   *  Both are bursts of width changes. We split the work:
-   *   - every frame: rewrap xterm to the container WITHOUT touching the pty
-   *     (`fitNow(false)`), so the panel tracks the drag live with no gap and,
-   *     crucially, without making claude reprint (which is what stacked the
-   *     duplicate banners);
-   *   - once the burst settles: tell claude the final size ONCE
-   *     (`scheduleFit()` -> `fitNow(true)`), so a whole drag costs a single
-   *     reprint instead of one per column crossed. */
-  onContainerResize() {
-    if (this.rafFit == null) {
-      this.rafFit = requestAnimationFrame(() => {
-        this.rafFit = null;
-        this.fitNow(false);
-      });
-    }
-    this.scheduleFit();
-  }
-
-  /** Build the panel header (@ send note · model selector · skill selector ·
-   *  open skills folder · remote control · zoom · restart). Rebuilt each time a
-   *  panel opens; the persistent terminal host is appended after it. */
+  /** Build the panel header: a row of session tabs (each with a close ×, plus a
+   *  + button to spawn a new instance) over the toolbar (@ · model · account ·
+   *  skill · remote · auto-switch · zoom · settings · restart). The toolbar acts
+   *  on the ACTIVE session. Rebuilt whenever the active session or the set of
+   *  sessions changes; the terminal host is appended after it. */
   private buildHeader(container: HTMLElement) {
     // Drop stale references from a previous build (a hidden button stays null).
     this.modelBtn = null;
@@ -2267,8 +2626,42 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const header = container.createDiv({ cls: "cch-header" });
     const s = this.settings;
 
+    // --- Tab strip: one tab per session + a "new session" button. ---
+    const tabs = header.createDiv({ cls: "cch-tabs" });
+    this.sessions.forEach((sess, i) => {
+      const tab = tabs.createDiv({
+        cls: "cch-tab" + (i === this.activeIndex ? " cch-tab-active" : ""),
+      });
+      tab.createSpan({
+        cls: "cch-tab-label" + (sess.exited ? " cch-tab-exited" : ""),
+        text: sess.title || "Claude",
+      });
+      tab.onclick = (e) => {
+        e.preventDefault();
+        this.setActive(i);
+      };
+      const close = tab.createSpan({ cls: "cch-tab-close" });
+      setIcon(close, "x");
+      close.setAttr("aria-label", "Close session");
+      close.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closeSession(sess);
+      };
+    });
+    const add = tabs.createEl("button", { cls: "cch-btn cch-tab-new" });
+    setIcon(add, "plus");
+    add.setAttr("aria-label", "New Claude session");
+    add.title = "New Claude session";
+    add.onclick = (e) => {
+      e.preventDefault();
+      this.openNewSessionMenu(add);
+    };
+
+    // --- Toolbar: buttons that act on the active session / global state. ---
+    const bar = header.createDiv({ cls: "cch-toolbar" });
     const iconBtn = (icon: string, title: string, onClick: () => void) => {
-      const b = header.createEl("button", { cls: "cch-btn" });
+      const b = bar.createEl("button", { cls: "cch-btn" });
       setIcon(b, icon);
       b.setAttr("aria-label", title);
       b.title = title;
@@ -2284,25 +2677,27 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         void this.sendActiveNote()
       );
     }
-    header.createDiv({ cls: "cch-spacer" });
+    bar.createDiv({ cls: "cch-spacer" });
 
-    // Model selector.
+    // Model selector (active session's model).
     if (s.btnModel) {
-      const modelBtn = header.createEl("button", {
+      const id = this.activeSession()?.model ?? s.model;
+      const modelBtn = bar.createEl("button", {
         cls: "cch-btn cch-model",
-        text: this.currentModelLabel(),
+        text: MODELS.find((m) => m.id === id)?.label ?? "Model",
       });
       modelBtn.title = "Select model";
       this.modelBtn = modelBtn;
       modelBtn.onclick = (e) => {
         e.preventDefault();
         const menu = new Menu();
+        const a = this.activeSession();
         for (const m of MODELS) {
           menu.addItem((item) =>
             item
               .setTitle(m.label)
-              .setChecked(this.settings.model === m.id)
-              .onClick(() => this.selectModel(m.id, m.label))
+              .setChecked((a?.model ?? s.model) === m.id)
+              .onClick(() => a?.selectModel(m.id, m.label))
           );
         }
         const r = modelBtn.getBoundingClientRect();
@@ -2310,9 +2705,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       };
     }
 
-    // Account: save the current Claude account / switch to a saved one.
+    // Account: save the current Claude account / switch to a saved one (global).
     if (s.btnAccount) {
-      const accountBtn = header.createEl("button", { cls: "cch-btn" });
+      const accountBtn = bar.createEl("button", { cls: "cch-btn" });
       setIcon(accountBtn, "user-round");
       this.accountBtn = accountBtn;
       const curEmail = this.barAccountEmail || this.currentAccountEmail();
@@ -2320,8 +2715,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       accountBtn.title = "Account: " + (curEmail || "unknown");
       accountBtn.onclick = (e) => {
         e.preventDefault();
-        // Refresh all accounts' usage in the background; the menu shows the
-        // cached values now (it's built synchronously) and the next open is fresh.
         if (this.settings.usageProbe) void this.refreshUsage({});
         const menu = new Menu();
         const cur = this.currentAccountEmail();
@@ -2365,18 +2758,18 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       };
     }
 
-    // Skill selector: pick which skill from ~/.claude/skills is invoked as
-    // /<name> (and invoke it in the running session now).
+    // Skill selector (active session's skill).
     if (s.btnSkill) {
-      const skillBtn = header.createEl("button", { cls: "cch-btn" });
+      const skillBtn = bar.createEl("button", { cls: "cch-btn" });
       setIcon(skillBtn, "sparkles");
-      const cur = this.settings.skill;
+      const cur = this.activeSession()?.skill ?? s.skill;
       skillBtn.setAttr("aria-label", "Skill");
       skillBtn.title = "Skill: " + (cur || "none");
       this.skillBtn = skillBtn;
       skillBtn.onclick = (e) => {
         e.preventDefault();
         const menu = new Menu();
+        const a = this.activeSession();
         const skills = this.listSkills();
         if (!skills.length) {
           menu.addItem((item) =>
@@ -2387,12 +2780,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
             menu.addItem((item) =>
               item
                 .setTitle(sk)
-                .setChecked(this.settings.skill === sk)
-                .onClick(() => this.selectSkill(sk))
+                .setChecked((a?.skill ?? s.skill) === sk)
+                .onClick(() => a?.selectSkill(sk))
             );
           }
         }
-        // Open the skills folder (to add new ones) from inside the menu.
         menu.addSeparator();
         menu.addItem((item) =>
           item
@@ -2405,22 +2797,21 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       };
     }
 
-    // Remote control toggle (green while ON). Rebuilt with the rest of the
-    // header, so reflect the persisted session state via updateRemoteBtn().
+    // Remote control toggle (active session; green while ON).
     if (s.btnRemote) {
-      const remoteBtn = header.createEl("button", { cls: "cch-btn" });
+      const remoteBtn = bar.createEl("button", { cls: "cch-btn" });
       setIcon(remoteBtn, "smartphone");
       this.remoteBtn = remoteBtn;
       remoteBtn.onclick = (e) => {
         e.preventDefault();
-        this.toggleRemoteControl();
+        this.activeSession()?.toggleRemoteControl();
       };
       this.updateRemoteBtn();
     }
 
-    // Auto-switch toggle + mode/percentage picker (green while ON).
+    // Auto-switch toggle + mode/percentage picker (global; green while ON).
     if (s.btnAutoSwitch) {
-      const asBtn = header.createEl("button", { cls: "cch-btn" });
+      const asBtn = bar.createEl("button", { cls: "cch-btn" });
       setIcon(asBtn, "repeat");
       this.autoSwitchBtn = asBtn;
       asBtn.onclick = (e) => {
@@ -2432,7 +2823,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
     if (s.btnZoom) {
       iconBtn("minus", "Zoom out (Ctrl -)", () => this.zoomBy(-1));
-      const zl = header.createEl("button", {
+      const zl = bar.createEl("button", {
         cls: "cch-btn cch-zoom",
         text: (this.settings.fontSize || 14) + "px",
       });
@@ -2443,126 +2834,54 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
 
     iconBtn("settings", "Plugin settings", () => this.openSettings());
-    iconBtn("rotate-ccw", "Restart session", () => this.restart());
+    iconBtn("rotate-ccw", "Restart session", () => this.activeSession()?.restart());
 
-    // Keep the header as the first child so it survives a rebuild (refreshHeader
+    // Keep the header as the first child so it survives a rebuild (rebuildHeader
     // removes the old one and calls this while the terminal host is already in).
     container.prepend(header);
   }
 
-  /** Rebuild the header of any open panel (after toggling button visibility). */
+  /** Menu shown by the + tab button: spawn a new session with a chosen skill. */
+  private openNewSessionMenu(anchor: HTMLElement) {
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle("New session (default skill)")
+        .setIcon("plus")
+        .onClick(() => this.newSession())
+    );
+    menu.addItem((item) =>
+      item.setTitle("New session (no skill)").onClick(() => this.newSession({ skill: "" }))
+    );
+    const skills = this.listSkills();
+    if (skills.length) {
+      menu.addSeparator();
+      for (const sk of skills) {
+        menu.addItem((item) =>
+          item.setTitle("New: /" + sk).onClick(() => this.newSession({ skill: sk }))
+        );
+      }
+    }
+    const r = anchor.getBoundingClientRect();
+    menu.showAtPosition({ x: r.left, y: r.bottom });
+  }
+
+  /** Rebuild the header in the open panel (tabs + toolbar), preserving the
+   *  mounted terminal host. Also called from the settings tab as refreshHeader. */
+  rebuildHeader() {
+    if (!this.viewRoot) return;
+    this.viewRoot.querySelector(".cch-header")?.remove();
+    this.buildHeader(this.viewRoot);
+  }
+
   refreshHeader() {
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
-      const root = (leaf.view as any)?.contentEl as HTMLElement | undefined;
-      if (!root) continue;
-      root.querySelector(".cch-header")?.remove();
-      this.buildHeader(root);
-    }
+    this.rebuildHeader();
   }
 
-  /** Detach the terminal from a closing panel WITHOUT killing the session. */
-  detach() {
-    if (this.rafFit != null) {
-      cancelAnimationFrame(this.rafFit);
-      this.rafFit = null;
-    }
-    this.host?.remove();
-  }
-
-  /** Resize xterm to fill its container.
-   *
-   *  `syncPty` controls the expensive half. The Claude TUI redraws its WHOLE
-   *  screen on every width change (SIGWINCH), and because it runs on the main
-   *  buffer — not the alternate screen — each redraw leaves the previous frame
-   *  behind as scrollback. So every pty resize costs one stacked banner.
-   *
-   *  - `syncPty=false` (live drag): only `fit.fit()` — rewrap the EXISTING buffer
-   *    to the new width so the panel tracks the splitter with no visual gap, but
-   *    DON'T tell claude, so it doesn't reprint. No new duplicate lines.
-   *  - `syncPty=true` (drag settled / zoom / open): also send the real size to
-   *    claude. Debounced via scheduleFit so a whole drag = ONE reprint, not one
-   *    per column crossed. */
-  fitNow(syncPty = true) {
-    if (!this.fit || !this.term || !this.host?.isConnected) return;
-    try {
-      this.fit.fit();
-      const { cols, rows } = this.term;
-      // Only poke the pty when the grid actually changed AND is sane — otherwise
-      // the Claude TUI repaints (stacking its banner), and a degenerate size
-      // (0 cols/rows during a theme reflow) kills the conpty process.
-      if (
-        syncPty &&
-        !this.exited &&
-        cols >= 2 &&
-        rows >= 2 &&
-        (cols !== this.lastCols || rows !== this.lastRows)
-      ) {
-        this.lastCols = cols;
-        this.lastRows = rows;
-        this.send({ t: "resize", cols, rows });
-        // Remember the size so next session spawns claude at it -> no first-fit
-        // resize -> no stacked banner.
-        if (this.settings.cols !== cols || this.settings.rows !== rows) {
-          this.settings.cols = cols;
-          this.settings.rows = rows;
-          void this.saveSettings();
-        }
-      }
-      this.term.refresh(0, Math.max(0, rows - 1));
-    } catch {
-      /* not laid out yet */
-    }
-  }
-
-  /** Kill the current claude process and start a fresh one in the same panel. */
-  restart() {
-    if (!this.term) {
-      this.ensureSession();
-      return;
-    }
-    this.remoteOn = false;
-    this.awaitRemoteActive = false;
-    this.remoteMenuFired = false;
-    this.awaitRemoteUrl = false;
-    this.updateRemoteBtn();
-    this.killChild();
-    this.term.reset();
-    this.startHost();
-    this.fitNow();
-  }
-
-  /** Send a message to the pty host, swallowing errors if the IPC channel has
-   *  already closed (the 'exit' handler nulls this.child asynchronously). */
-  private send(msg: any) {
-    try {
-      this.child?.send(msg);
-    } catch {
-      /* channel closed */
-    }
-  }
-
-  private killChild() {
-    const child = this.child;
-    if (!child) return;
-    this.child = null;
-    // Ask the host to kill the PTY and exit itself (it also self-exits on IPC
-    // disconnect). Fallback-kill the host if it doesn't go away on its own.
-    try {
-      child.send({ t: "kill" });
-    } catch {
-      /* channel already closed */
-    }
-    window.setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* already gone */
-      }
-    }, 800);
-  }
+  // --- Node / paths -------------------------------------------------------
 
   /** Find a real node.exe to fork the pty host with. */
-  private resolveNodePath(): string {
+  resolveNodePath(): string {
     const isWin = process.platform === "win32";
     let fs: any;
     try {
@@ -2587,7 +2906,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       }
     }
 
-    // Last resort: ask the OS to locate it.
     try {
       const cp = nodeRequire("child_process");
       const cmd = isWin ? "where node" : "command -v node";
@@ -2602,7 +2920,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return isWin ? "node.exe" : "node";
   }
 
-  private pluginDir(): string {
+  pluginDir(): string {
     return path.join(
       this.vaultPath(),
       this.app.vault.configDir,
@@ -2611,111 +2929,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     );
   }
 
-  /** Fork the pty-host (Obsidian binary as plain Node) and wire it up. */
-  private startHost() {
-    if (!this.term) return;
-    const vault = this.vaultPath();
-    if (!vault) {
-      this.term.writeln("Could not resolve the vault path (desktop only).");
-      return;
-    }
-
-    let cp: any;
-    try {
-      cp = nodeRequire("child_process");
-    } catch (e: any) {
-      this.term.writeln("Failed to load child_process: " + (e?.message ?? e));
-      return;
-    }
-
-    const hostPath = path.join(this.pluginDir(), "pty-host.js");
-    const nodePath = this.resolveNodePath();
-    let child: any;
-    try {
-      child = cp.fork(hostPath, [], {
-        execPath: nodePath, // a REAL node.exe — Obsidian's binary ignores ELECTRON_RUN_AS_NODE
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe", "ipc"],
-        windowsHide: true,
-      });
-    } catch (e: any) {
-      this.term.writeln("Failed to start the pty host with Node at:");
-      this.term.writeln("  " + nodePath);
-      this.term.writeln("  " + (e?.message ?? e));
-      this.term.writeln(
-        "\r\nSet a valid path to node.exe in the plugin settings (Node.js path)."
-      );
-      return;
-    }
-    this.child = child;
-    this.initialSent = false;
-    this.exited = false;
-
-    const isWin = process.platform === "win32";
-    const shell = isWin
-      ? process.env.COMSPEC || "cmd.exe"
-      : process.env.SHELL || "/bin/bash";
-    const base = this.settings.command || "claude";
-    const extra = this.settings.args?.trim();
-    const full = extra ? `${base} ${extra}` : base;
-    const args = isWin ? ["/c", full] : ["-lc", full];
-    // Spawn at the remembered (or current) size so the first fit is a no-op.
-    const cols = this.lastCols || this.settings.cols || 100;
-    const rows = this.lastRows || this.settings.rows || 30;
-    this.lastCols = cols;
-    this.lastRows = rows;
-
-    child.on("message", (msg: any) => {
-      if (!msg || !this.term) return;
-      switch (msg.t) {
-        case "ready":
-          child.send({
-            t: "spawn",
-            shell,
-            args,
-            opts: { name: "xterm-256color", cols, rows, cwd: vault },
-          });
-          break;
-        case "data":
-          this.term.write(msg.d);
-          this.maybeSendInitial();
-          this.maybeConfirmModel(msg.d);
-          this.maybeAfterRemoteActive(msg.d);
-          this.maybeCaptureRemoteUrl(msg.d);
-          this.maybeAutoSwitch(msg.d);
-          this.maybeAutoSaveAccount();
-          this.maybeProbeOnActivity();
-          break;
-        case "exit":
-          this.exited = true; // stop sending resizes to the dead pty
-          this.term.writeln(
-            "\r\n\x1b[2m[claude exited — run 'Restart Claude Code session' to start a new one]\x1b[0m"
-          );
-          this.remoteOn = false;
-          this.awaitRemoteUrl = false;
-          this.updateRemoteBtn();
-          break;
-        case "error":
-          this.term.writeln("\r\n\x1b[2m[pty-host error] " + msg.message + "\x1b[0m");
-          break;
-      }
-    });
-
-    child.on("exit", () => {
-      if (this.child === child) {
-        this.child = null;
-      }
-    });
-
-    child.stderr?.on("data", (b: Buffer) =>
-      console.error("[claude-code-harness pty-host]", b.toString())
-    );
-  }
-
-  /** Terminal theme derived from the active Obsidian theme: surface colours
-   *  from CSS variables, ANSI palette chosen by light/dark. Re-applied on the
-   *  workspace 'css-change' event. */
-  private termTheme() {
+  /** Terminal theme derived from the active Obsidian theme. */
+  termTheme() {
     const s = getComputedStyle(document.body);
     const v = (name: string, fb: string) => s.getPropertyValue(name).trim() || fb;
     const dark = !document.body.classList.contains("theme-light");
@@ -2748,6 +2963,200 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   vaultPath(): string {
     const adapter = this.app.vault.adapter;
     return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
+  }
+
+  // --- Clickable note references in the terminal --------------------------
+
+  /** Resolve a link text (note name, possibly `Name|alias` / `Name#heading`) to
+   *  an existing .md note in the vault, or null. */
+  private resolveNote(name: string): TFile | null {
+    const clean = name
+      .trim()
+      .replace(/^\[\[+/, "")
+      .replace(/\]\]+$/, "")
+      .split("|")[0]
+      .split("#")[0]
+      .trim();
+    if (!clean) return null;
+    const f = this.app.metadataCache.getFirstLinkpathDest(clean, "");
+    return f && f.extension === "md" ? f : null;
+  }
+
+  /** Open a note referenced from the terminal (Ctrl/Cmd-click = new tab). */
+  openNoteLink(linktext: string, ev: MouseEvent) {
+    const f = this.resolveNote(linktext);
+    if (!f) return;
+    const newTab = !!ev && (ev.ctrlKey || ev.metaKey);
+    void this.app.workspace.openLinkText(f.path, "", newTab ? "tab" : false);
+  }
+
+  /** xterm link provider: turn note references in Claude's output into clickable
+   *  links that open the matching .md note. Detects: (1) `[[wikilinks]]` (any
+   *  colour) and (2) CONTIGUOUS COLOURED runs (Claude renders bare references in a
+   *  non-default fg) that resolve to a note.
+   *
+   *  Handles names split across lines. Claude wraps long text ITSELF with real
+   *  newlines + a 2-space indent on the continuation (so the next row is NOT an
+   *  xterm soft-wrap / `isWrapped`), splitting a name at a word boundary. We
+   *  reconstruct the contiguous block of non-blank rows around `y` joined with a
+   *  single space (collapsing each row's indentation), match over the joined text,
+   *  and emit ONE single-row link per row a match touches — returning only the
+   *  segment on the queried row `y` (multi-row/off-line ranges break xterm). */
+  computeNoteLinks(term: Terminal, y: number): ILink[] | undefined {
+    if (!this.settings.linkifyNotes || !term) return undefined;
+    const buf = term.buffer.active;
+    const isBlank = (row: number) => {
+      const ln = buf.getLine(row - 1);
+      return !ln || ln.translateToString(true).trim() === "";
+    };
+    if (isBlank(y)) return undefined;
+
+    // Contiguous block of non-blank rows around y (bounded), to bridge the hard
+    // newlines Claude inserts when wrapping a long reference.
+    let top = y;
+    for (let r = y - 1; r >= 1 && y - r <= 6 && !isBlank(r); r--) top = r;
+    let bot = y;
+    for (let r = y + 1; r <= buf.length && r - y <= 6 && !isBlank(r); r++) bot = r;
+
+    // Reconstruct: row contents (indent + trailing spaces trimmed) joined by a
+    // single space. Track the cell column/row and colour of each char so matches
+    // map back to screen coordinates. The join space inherits the previous row's
+    // last column (so it merges into that row's segment) and is "coloured" only
+    // when both sides are, so a coloured name split across rows rejoins as one run.
+    let text = "";
+    const cx: number[] = [];
+    const cy: number[] = [];
+    const colored: boolean[] = [];
+    const isJoin: boolean[] = []; // true for the synthetic space inserted at a wrap
+    let havePrev = false;
+    let prevX = 0;
+    let prevRow = 0;
+    let prevColored = false;
+    for (let row = top; row <= bot; row++) {
+      const line = buf.getLine(row - 1);
+      if (!line) continue;
+      const rc: { ch: string; x: number; col: boolean }[] = [];
+      for (let x = 0; x < line.length; x++) {
+        const c = line.getCell(x);
+        if (!c || c.getWidth() === 0) continue;
+        const chars = c.getChars() || " ";
+        const col = !c.isFgDefault();
+        for (const ch of chars) rc.push({ ch, x, col });
+      }
+      let s = 0;
+      let e = rc.length - 1;
+      while (s <= e && rc[s].ch === " ") s++;
+      while (e >= s && rc[e].ch === " ") e--;
+      if (s > e) continue; // blank row
+      if (havePrev) {
+        text += " ";
+        cx.push(prevX);
+        cy.push(prevRow);
+        colored.push(prevColored && rc[s].col);
+        isJoin.push(true);
+      }
+      for (let k = s; k <= e; k++) {
+        text += rc[k].ch;
+        cx.push(rc[k].x);
+        cy.push(row);
+        colored.push(rc[k].col);
+        isJoin.push(false);
+      }
+      havePrev = true;
+      prevX = rc[e].x;
+      prevRow = row;
+      prevColored = rc[e].col;
+    }
+    if (!text.trim()) return undefined;
+
+    const links: ILink[] = [];
+    const taken: boolean[] = new Array(text.length).fill(false);
+    // Emit a match [s,e) as one single-row link per row it spans, keeping only the
+    // segment on the queried row y.
+    const add = (s: number, e: number, target: string) => {
+      for (let i = s; i < e; i++) if (taken[i]) return; // no overlaps
+      for (let i = s; i < e; i++) taken[i] = true;
+      let k = s;
+      while (k < e) {
+        const row = cy[k];
+        let j = k;
+        while (j < e && cy[j] === row) j++;
+        if (row === y) {
+          links.push({
+            text: target,
+            range: { start: { x: cx[k] + 1, y: row }, end: { x: cx[j - 1] + 1, y: row } },
+            decorations: { pointerCursor: true, underline: true },
+            activate: (ev: MouseEvent) => this.openNoteLink(target, ev),
+          });
+        }
+        k = j;
+      }
+    };
+
+    // Resolve a candidate over [s,e). Claude HARD-wraps at a fixed width, often
+    // mid-word, so the synthetic join spaces we inserted may or may not belong in
+    // the real name ("se|supone" needs the space; "inves|tigación" must not). Try
+    // the candidate as-is, then with each subset of its join spaces removed, and
+    // return the variant that resolves to an existing note (or null).
+    const resolveSpan = (s: number, e: number, raw: string): string | null => {
+      if (this.resolveNote(raw)) return raw;
+      const joins: number[] = [];
+      for (let i = s; i < e; i++) if (isJoin[i]) joins.push(i - s);
+      const n = joins.length;
+      if (!n || n > 4) return null; // cap the combinations
+      for (let mask = 1; mask < 1 << n; mask++) {
+        let v = "";
+        for (let k = 0; k < raw.length; k++) {
+          const ji = joins.indexOf(k);
+          if (ji >= 0 && mask & (1 << ji)) continue; // drop this join space
+          v += raw[k];
+        }
+        if (this.resolveNote(v)) return v;
+      }
+      return null;
+    };
+
+    // 1) [[wikilinks]] (resolve to an existing note) — colour-independent.
+    const wl = /\[\[([^\]\n]+?)\]\]/g;
+    let m: RegExpExecArray | null;
+    while ((m = wl.exec(text))) {
+      const s = m.index;
+      const e = m.index + m[0].length;
+      const target = resolveSpan(s, e, m[0]);
+      if (target) add(s, e, target);
+    }
+
+    // 2) Coloured runs → whole run, else separator-split pieces, with surrounding
+    //    punctuation trimmed.
+    const PUNCT = "\\s.,;:!¡¿?()\\[\\]{}\"'«»`*<>→·•|";
+    const leadRe = new RegExp("^[" + PUNCT + "]+");
+    const trailRe = new RegExp("[" + PUNCT + "]+$");
+    const matchPiece = (piece: string, baseOffset: number) => {
+      const lead = piece.match(leadRe)?.[0].length ?? 0;
+      const inner = piece.slice(lead).replace(trailRe, "");
+      if (!inner) return;
+      const s = baseOffset + lead;
+      const target = resolveSpan(s, s + inner.length, inner);
+      if (target) add(s, s + inner.length, target);
+    };
+    let i = 0;
+    while (i < text.length) {
+      if (!colored[i]) {
+        i++;
+        continue;
+      }
+      const runStart = i;
+      while (i < text.length && colored[i]) i++;
+      const runText = text.slice(runStart, i);
+      matchPiece(runText, runStart);
+      let off = 0;
+      for (const piece of runText.split(/([,;|·•]+)/)) {
+        if (!/^[,;|·•]+$/.test(piece)) matchPiece(piece, runStart + off);
+        off += piece.length;
+      }
+    }
+
+    return links.length ? links : undefined;
   }
 
   async loadSettings() {
@@ -2784,7 +3193,7 @@ class ClaudeCodeView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("claude-code-harness");
-    this.plugin.attachTo(root);
+    this.plugin.attachView(root);
     this.resizeObserver = new ResizeObserver(() => this.plugin.onContainerResize());
     this.resizeObserver.observe(root);
   }
@@ -2792,8 +3201,8 @@ class ClaudeCodeView extends ItemView {
   async onClose() {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
-    // Detach the terminal but leave the claude process running on the plugin.
-    this.plugin.detach();
+    // Detach the terminal but leave the claude processes running on the plugin.
+    this.plugin.detachView();
   }
 }
 
@@ -2858,7 +3267,7 @@ class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Skill")
       .setDesc(
-        "Claude Code skill invoked as /<name> when the session starts (after the startup commands). Skills live in ~/.claude/skills — add your own there, or pick one from the panel header."
+        "Default Claude Code skill invoked as /<name> when a new session starts (after the startup commands). Skills live in ~/.claude/skills — add your own there, or pick one per-session from the panel header."
       )
       .addDropdown((d) => {
         d.addOption("", "(none)");
@@ -2885,9 +3294,21 @@ class HarnessSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Clickable note links")
+      .setDesc(
+        "Turn coloured note references in Claude's output (and [[wikilinks]]) into clickable links that open the matching .md note. Hover to underline, click to open (Ctrl/Cmd-click for a new tab)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.linkifyNotes).onChange(async (v) => {
+          this.plugin.settings.linkifyNotes = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Claude accounts")
       .setDesc(
-        "Accounts are saved automatically when you log in with /login. Switch between them here or from the header — it hot-swaps ~/.claude/.credentials.json with no restart, so the running session keeps going and uses the new account on its next message. Saved under ~/.claude/cch-accounts (never committed)."
+        "Accounts are saved automatically when you log in with /login. Switch between them here or from the header — it hot-swaps ~/.claude/.credentials.json with no restart, so every running session keeps going and uses the new account on its next message. Saved under ~/.claude/cch-accounts (never committed)."
       )
       .setHeading();
 
@@ -2913,7 +3334,6 @@ class HarnessSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           this.plugin.updateAutoSwitchBtn();
           if (v) {
-            // Refresh + probe every account now (see the header toggle handler).
             void this.plugin.refreshUsage({ refreshTokens: true });
             if (this.plugin.listSavedAccounts().length < 2) {
               new Notice(
@@ -3169,7 +3589,7 @@ class HarnessSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("p", {
-      text: "Run 'Restart Claude Code session' from the command palette after changing these settings.",
+      text: "Open a new tab with the + button in the panel header to run several Claude sessions in parallel. Each tab is its own claude process over the vault; closing a tab kills that instance.",
       cls: "setting-item-description",
     });
   }

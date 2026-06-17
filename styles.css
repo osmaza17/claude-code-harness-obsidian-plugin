@@ -233,15 +233,85 @@
 .claude-code-harness .cch-header {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  flex-direction: column;
+  align-items: stretch;
   font-size: 13px;
   color: var(--text-muted);
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
 }
+/* Toolbar row: the buttons that act on the active session / global state. */
+.claude-code-harness .cch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+}
 .claude-code-harness .cch-spacer { flex: 1 1 auto; }
+
+/* Tab strip: one tab per parallel Claude session + a "new session" button. */
+.claude-code-harness .cch-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.claude-code-harness .cch-tabs::-webkit-scrollbar { height: 6px; }
+.claude-code-harness .cch-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: var(--background-secondary-alt, var(--background-secondary));
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.claude-code-harness .cch-tab:hover { color: var(--text-normal); }
+.claude-code-harness .cch-tab-active {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border-color: var(--background-modifier-border);
+}
+.claude-code-harness .cch-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.claude-code-harness .cch-tab-label.cch-tab-exited {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.claude-code-harness .cch-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+  opacity: 0.6;
+}
+.claude-code-harness .cch-tab-close:hover {
+  background: var(--background-modifier-hover);
+  opacity: 1;
+}
+.claude-code-harness .cch-tab-close svg { width: 13px; height: 13px; }
+.claude-code-harness .cch-tab-new {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
+.claude-code-harness .cch-tab-new svg { width: 16px; height: 16px; }
 .claude-code-harness .cch-btn {
   display: inline-flex;
   align-items: center;

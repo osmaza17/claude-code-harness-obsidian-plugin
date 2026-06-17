@@ -33,25 +33,47 @@ la comunidad -> recargar, o reiniciar Obsidian).
 
 ## Ciclo de vida (clave del diseño)
 
-La sesión (proceso ayudante + terminal xterm) **vive en la clase Plugin, no en
-la View**:
+**Varias instancias en paralelo.** Cada instancia de Claude Code es una
+**`Session`** (clase en `main.ts`): su propia `Terminal` xterm, su `host` DOM y su
+proceso forkeado pty-host (que lanza `claude`). El **plugin es el gestor**:
+mantiene `sessions: Session[]` + `activeIndex` y un único panel con una **barra de
+pestañas** (una por sesión). Solo la sesión activa está montada en el panel; el
+resto siguen corriendo y bufferizando su salida en xterm (igual que cuando el
+panel está cerrado). `pty-host.js` **no cambió**: una instancia = un fork (sin
+multiplexar, protocolo IPC intacto).
 
-- `onload()` -> `ensureSession()`: crea la `Terminal` xterm y forkea el pty-host
-  (que lanza `claude`).
-  Arranca al abrir Obsidian aunque el usuario no abra el panel; xterm bufferiza
-  toda la salida hasta que el panel se muestra.
-- La `View` (`ClaudeCodeView`) solo presenta la terminal: en `onOpen()` llama a
-  `plugin.attachTo(contentEl)` (mueve el `host` al panel; `term.open()` se llama
-  una sola vez), en `onClose()` llama a `plugin.detach()` (saca el `host` del DOM
-  **sin matar el proceso**).
-- `onunload()` (Obsidian se cierra o se desactiva el plugin): mata el PTY y
-  destruye la terminal.
-- Comando "Restart Claude Code session": mata y relanza `claude` en la misma
-  terminal (útil si `claude` sale).
+Reparto de responsabilidades:
 
-Por eso el `host` (el div donde xterm pinta) se conserva como campo del plugin y
-solo se mueve entre el holder detached y el `contentEl` de la view; `term.open()`
-nunca se llama dos veces (xterm no lo soporta).
+- **`Session`** (estado por-instancia): `term`/`host`/`child`/`fit`/`webgl`,
+  resize/fit, clipboard, el **data handler**, y los watchers **propios de su TUI**
+  (`maybeSendInitial`, `maybeConfirmModel`, remote-control: `toggleRemoteControl`/
+  `maybeAfterRemoteActive`/`maybeCaptureRemoteUrl`/`fireRemoteMenu`), más su
+  **config propia** (`skill`, `model`, `args`, `title`). `attachInto(parent)` monta
+  el host (llama `term.open()` una sola vez; luego solo mueve el host dentro/fuera
+  del DOM), `detachHost()` lo desmonta sin matar, `dispose()` mata y destruye.
+- **Plugin** (gestor + servicios globales): `newSession`/`closeSession`/
+  `setActive`/`activeSession`, `attachView`/`detachView`, y todo lo **compartido**
+  porque depende de las credenciales comunes: cuentas, usage/keep-alive,
+  auto-switch (decisión), navegador, tema, zoom y tamaño de rejilla. Los watchers
+  globales se alimentan de la salida de cada sesión:
+  `plugin.maybeAutoSwitch(session, chunk)` (usa el buffer **por-sesión**
+  `session.autoSwitchBuf` pero la decisión —cooldown, baseline, verify— es
+  **global**), `maybeAutoSaveAccount`, `maybeProbeOnActivity`.
+- `onload()` -> `ensureAtLeastOneSession()`: crea **una** `Session` (arranca aunque
+  no se abra el panel). Hay un único `css-change` registrado que re-tematiza todas
+  las sesiones (`s.applyTheme()`).
+- La `View` (`ClaudeCodeView`, un único `VIEW_TYPE`/leaf) solo presenta: `onOpen()`
+  -> `plugin.attachView(contentEl)` (construye cabecera+pestañas y monta el host de
+  la activa), `onClose()` -> `plugin.detachView()` (desmonta **sin matar**).
+- **Cierre de pestaña (×)** -> `closeSession()` mata esa instancia; si no queda
+  ninguna, crea una nueva (el panel nunca queda muerto). **Cerrar el panel** no
+  mata nada. `onunload()` mata **todas** las sesiones.
+- Comando "Restart Claude Code session" -> `activeSession().restart()`. Comando
+  **"New Claude Code session"** y el botón **+** de la barra -> `newSession({skill})`.
+
+Por eso cada `host` (el div donde xterm pinta) se conserva en su `Session` y solo
+se mueve entre fuera-del-DOM y el `contentEl` del panel; `term.open()` nunca se
+llama dos veces por sesión (xterm no lo soporta).
 
 ## Gotchas
 
@@ -125,8 +147,9 @@ nunca se llama dos veces (xterm no lo soporta).
   se re-aplica en el evento `css-change`.
 - **Zoom de fuente**: Ctrl + / Ctrl - / Ctrl 0, **Ctrl + rueda del ratón**
   (listener `wheel` en el `host`, `passive:false`, llama `zoomBy`), y botones en la
-  cabecera (persistido en `settings.fontSize`). `setFontSize()` solo cambia `fontSize` y hace
-  **un único `fit.fit()` + resize** (igual que el harness de referencia). NO se
+  cabecera (persistido en `settings.fontSize`). `setFontSize()` (plugin) es
+  **global**: persiste y recorre las sesiones llamando a `session.applyFontSize`,
+  que cambia `fontSize` y hace **un único `fit.fit()` + resize** por sesión. NO se
   llama a `clearTextureAtlas()` ni a `term.refresh()`: el renderer WebGL
   reconstruye su atlas de glifos al cambiar la fuente, y forzar un refresh a mitad
   del resize era justo lo que dejaba el frame duplicado/garabateado al hacer zoom.
@@ -136,26 +159,31 @@ nunca se llama dos veces (xterm no lo soporta).
 - **Ctrl+Z / Ctrl+Shift+Z**: Claude no tiene undo por carácter, asi que se mapean
   a su borrar-línea (0x15) y restaurar (0x19 = Ctrl+Y).
 - **Ctrl+Enter / Shift+Enter**: nueva línea (LF 0x0a) sin enviar.
-- **Cabecera** (`buildHeader`): botón @ en la esquina izquierda (enviar nota
-  activa), luego a la derecha: selector de modelo (menú Haiku 4.5 / Sonnet 4.6 /
-  Opus 4.8 -> envía `/model <id>`), selector de cuenta (icono `user-round`; guardar
-  cuenta actual / cambiar a una guardada), selector de skill (icono `sparkles`; menú con
-  las skills de `~/.claude/skills` **+ ítem "Open skills folder"** al final →
-  `openSkillsFolder()`; ya no hay botón de carpeta suelto), botón **toggle de
-  remote control** (icono `smartphone`;
-  `toggleRemoteControl()`), botón **toggle de auto-switch** (icono `repeat`;
-  verde si está activo; `openAutoSwitchMenu()` abre un menú para activar/desactivar
-  el auto-switch y elegir **modo** (Threshold / Rotate) y **porcentaje** con presets
-  —threshold: 70/80/85/90/95; rotate: +5/10/15/20/25— sin abrir ajustes; estado
-  reflejado por `updateAutoSwitchBtn()`, que también se llama desde los handlers de
-  la página de ajustes para mantenerlo en sync), zoom, ajustes del plugin (icono
-  `settings`; `openSettings()` → `app.setting.openTabById(manifest.id)`), reiniciar
-  (`restart()`). Cada botón (salvo ajustes y reiniciar) se puede **ocultar** desde
-  ajustes (`btnSendNote/btnAccount/btnModel/btnSkill/
-  btnRemote/btnAutoSwitch/btnZoom`); al cambiarlos, `refreshHeader()` reconstruye
-  la cabecera de los paneles abiertos sin reabrir. `buildHeader` resetea las refs a
-  null al empezar y hace `container.prepend(header)` para que la cabecera quede
-  como primer hijo tras un rebuild. No hay indicador de estado.
+- **Cabecera** (`buildHeader`): dos filas dentro de `.cch-header` (que ahora es
+  `flex-direction:column`):
+  1. **Barra de pestañas** (`.cch-tabs`): una pestaña `.cch-tab` por `Session`
+     (etiqueta = `session.title`, con × `.cch-tab-close` → `closeSession`; click en
+     la pestaña → `setActive(i)`; `.cch-tab-active` marca la activa; `.cch-tab-exited`
+     tacha la que salió). Al final, botón **+** (`.cch-tab-new`) → `openNewSessionMenu()`
+     (crea sesión con skill por defecto / sin skill / con una skill de `listSkills()`).
+  2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
+     de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
+     cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
+     skills de `~/.claude/skills` **+ "Open skills folder"** → `activeSession().selectSkill`),
+     **toggle remote control** (icono `smartphone`; `activeSession().toggleRemoteControl()`),
+     **toggle auto-switch** (icono `repeat`; **global**; `openAutoSwitchMenu()` con
+     modo Threshold/Rotate y presets —threshold 70/80/85/90/95; rotate +5/10/15/20/25—;
+     estado por `updateAutoSwitchBtn()`), zoom (**global**, aplica a todas), ajustes
+     (`openSettings()`), reiniciar (`activeSession().restart()`).
+  Los botones modelo/skill/remote reflejan la **sesión activa**
+  (`updateModelBtn`/`updateSkillBtn`/`updateRemoteBtn` leen `activeSession()`); cuenta
+  y auto-switch son globales. Cada botón (salvo ajustes/reiniciar) se oculta desde
+  ajustes (`btnSendNote/btnAccount/btnModel/btnSkill/btnRemote/btnAutoSwitch/btnZoom`).
+  `rebuildHeader()` (alias `refreshHeader()` para la página de ajustes) borra
+  `.cch-header` y la reconstruye **conservando el host montado** (es un hijo aparte
+  del contenedor); `buildHeader` resetea las refs a null y hace `container.prepend(header)`
+  para que la cabecera quede como primer hijo. Se rellama en cada `setActive`/
+  `newSession`/`closeSession` y al salir una sesión (para marcar la pestaña).
 - **Cambio de cuenta (hot-swap, sin reinicio)**: Claude Code guarda su auth en el
   fichero plano `~/.claude/.credentials.json` (`claudeAiOauth`) y los metadatos de
   cuenta en `~/.claude.json` (`oauthAccount`). El plugin snapshotea ambos por cuenta
@@ -278,6 +306,38 @@ nunca se llama dos veces (xterm no lo soporta).
   (`handleDrop`: lee `app.dragManager.draggable` para arrastres internos,
   `dataTransfer.files` para archivos del SO, y un fallback de `text/plain` que
   resuelve `[[wikilinks]]` vía `metadataCache.getFirstLinkpathDest`).
+- **Referencias a notas clicables** (`computeNoteLinks` + `term.registerLinkProvider`):
+  cada `Session` registra un link provider de xterm; en hover, `computeNoteLinks`
+  (en el plugin) crea `ILink`s para: (1) `[[wikilinks]]` (independiente del color) y
+  (2) **runs de celdas coloreadas** (fg no-default, `cell.isFgDefault()`) cuyo texto
+  resuelva a una nota `.md` existente (`resolveNote` →
+  `metadataCache.getFirstLinkpathDest`, filtra `extension==="md"`, quita
+  `[[ ]]`/`|alias`/`#heading`). Un run se prueba entero y partido por `,;|·•`,
+  recortando puntuación alrededor (`. , : ; ! ¿ ? ( ) [ ] { } " ' « » \` * < > →`;
+  NO `-` ni `_`).
+  **Nombres partidos por salto de línea (CLAVE):** la TUI de Claude envuelve el
+  texto **ella misma** con saltos reales + **sangría de 2 espacios** en la
+  continuación (la fila siguiente NO es `isWrapped`), partiendo un `[[wikilink]]`
+  largo en un límite de palabra. Por eso `computeNoteLinks` **reconstruye el bloque
+  contiguo de filas no vacías** alrededor de `y` (expande arriba/abajo hasta una
+  línea en blanco, tope ±6) **uniéndolas con un solo espacio** (recortando la
+  sangría y los espacios finales de cada fila), y guarda `cx`/`cy`/`colored` por
+  carácter. El espacio de unión hereda la columna/fila de la fila anterior (se funde
+  en su segmento) y es "coloreado" solo si ambos lados lo son (así un nombre
+  coloreado partido se reúne en un run). Se casa `[[...]]` + runs sobre el texto
+  unido, y `add(s,e)` **parte la coincidencia por fila** emitiendo un `ILink` de
+  **una sola fila** por cada fila que toca, devolviendo **solo el segmento de la
+  fila consultada `y`** (rangos multi-fila / fuera de `y` rompen el matching de
+  xterm). Así cada mitad de un nombre partido se resalta desde su propia consulta y
+  el clic en cualquiera abre la nota. **Corte a mitad de palabra:** Claude corta a
+  ancho fijo, a veces dentro de una palabra ("inves|tigación") y a veces en un
+  espacio ("se|supone"), así que el espacio de unión sintético puede sobrar o hacer
+  falta. `resolveSpan(s,e,raw)` prueba el candidato tal cual y, si no resuelve, con
+  cada subconjunto de sus **espacios de unión** (marcados en `isJoin[]`) eliminados,
+  devolviendo la variante que resuelve (tope 4 cortes). Al activar, `openNoteLink` abre con
+  `workspace.openLinkText(path)` (Ctrl/Cmd+clic = pestaña nueva). Ajuste
+  `settings.linkifyNotes` (por defecto on). Si el subrayado/clic sale desalineado,
+  revisar el off-by-one de `range` (1-based, `y` = índice de fila del buffer).
 - **Ctrl+R**: toggle del remote control. Hay un comando "Toggle remote control"
   con hotkey `Mod+R`; además el handler de teclas del terminal intercepta Ctrl+R
   (preventDefault + stopPropagation, para que no llegue al pty ni recargue la
@@ -327,16 +387,33 @@ nunca se llama dos veces (xterm no lo soporta).
     desconectaba). Cada pulsación se envía con un pequeño desfase para que el TUI
     las registre.
   Los tres watchers (`maybeAfterRemoteActive`, `maybeCaptureRemoteUrl`,
-  `maybeConfirmModel`) cuelgan del handler `data`. El estado `remoteOn` vive en el
-  plugin y se resetea en `restart()` y cuando claude sale; `updateRemoteBtn()`
-  refleja el estado en el botón (se reconstruye con la cabecera).
+  `maybeConfirmModel`) cuelgan del handler `data` de **cada `Session`**. `remoteOn`
+  vive en la `Session` y se resetea en `restart()` y cuando claude sale;
+  `plugin.updateRemoteBtn()` refleja el estado de la **sesión activa** en el botón
+  (se reconstruye con la cabecera). La regex de captura es
+  `https://claude\.ai/code/[\w-]+` (acepta cualquier id tras `/code/`, no solo
+  `session_…`, pero **sin `.` ni `/`**: el menú imprime las etiquetas de sus
+  opciones —"Disconnect this session", "Show QR code"— pegadas tras la URL al
+  quitar los ANSI, así que incluir `.` colaba `.Disconnectthissession…` en la URL
+  y la rompía; parar en `.` da la URL limpia). **Captura con reintentos** (`runRemoteMenuAttempt`,
+  bucle guardado por `remoteMenuLoopActive`/`remoteUrlCaptured`, hasta 6 intentos
+  cada ~3,5 s): el menú solo imprime la URL cuando la sesión ya está **conectada**,
+  cosa que puede tardar más que un único intento temprano —por eso antes hacía
+  falta pulsar Ctrl+R dos veces—; el bucle reabre el menú hasta que la URL aparece,
+  la captura, abre el navegador y cierra el menú con Esc para seguir conectado. Si
+  agota los intentos, avisa al usuario en vez de fallar en silencio. Hay logs
+  `[cch remote] …` (console) para diagnosticar el flujo toggle→menú→captura→abrir.
+  La URL capturada se abre **siempre en un navegador externo** (`openInBrowser` →
+  `launchBrowser`), elegido por cuenta/por defecto en ajustes.
 - **Selector de modelo** (`selectModel`): envía `\x15/model <id>\r` (el Ctrl+U
   inicial limpia cualquier borrador para que el comando vaya en su propia línea;
   restaurable con Ctrl+Y). Argumentos válidos comprobados: `haiku`, `sonnet`,
   `opus`.
-- **Comandos**: "Open Claude Code panel", "Restart Claude Code session",
-  "Send active note to Claude" (inserta `@<ruta>` de la nota activa), "Toggle
-  remote control" (hotkey `Mod+R`), "Save current Claude account", "Diagnose
+- **Comandos**: "Open Claude Code panel", **"New Claude Code session"** (abre el
+  panel y crea otra instancia con `newSession()`), "Restart Claude Code session"
+  (sobre la activa), "Send active note to Claude" (inserta `@<ruta>` de la nota
+  activa en la activa), "Toggle remote control" (hotkey `Mod+R`; sobre la activa),
+  "Save current Claude account", "Diagnose
   auto-switch (why no account change)" (`diagnoseAutoSwitch()`: muestra en un
   `Notice` el último resultado de la evaluación del auto-switch —motivo en
   lenguaje claro, `%`/fuente, baseline o threshold, cuenta activa vs. barra,
@@ -386,7 +463,8 @@ manifest.json        metadatos del plugin (id: claude-code-harness)
 package.json         deps + scripts
 esbuild.config.mjs   bundling (node-pty/obsidian/electron = external)
 tsconfig.json
-main.ts              todo el plugin: Plugin + ItemView + SettingTab
+main.ts              todo el plugin: Session (instancia) + Plugin (gestor) +
+                     ClaudeCodeView + SettingTab
 main.js              artefacto compilado (cargado por Obsidian)
 pty-host.js          proceso ayudante: corre node-pty fuera del renderer (NO se
                      empaqueta; se forkea con ELECTRON_RUN_AS_NODE)

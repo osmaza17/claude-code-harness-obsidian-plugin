@@ -11,30 +11,45 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 ## Características
 
 - **Terminal real de Claude Code** en un panel lateral, con `cwd` = tu vault.
+- **Varias instancias en paralelo**: una **barra de pestañas** en la cabecera; el
+  botón **+** abre una nueva instancia de `claude` (con su propia skill, elegible
+  desde el menú del +) corriendo a la vez sobre el mismo vault. Cambia de pestaña
+  para ver cada una; solo se muestra una, el resto siguen trabajando en segundo
+  plano. Cada pestaña es un proceso `claude` independiente con su propia
+  conversación; cerrar una pestaña (×) **mata** esa instancia. (Cuenta, uso y
+  auto-switch son **globales** —comparten credenciales—, así que cambiar de cuenta
+  afecta a todas las instancias.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de
   Obsidian (claro/oscuro) y se reaplican al cambiarlo.
-- **Sesión persistente**: arranca al abrir Obsidian aunque no abras el panel, y
-  no se cierra al cerrar el panel — solo al cerrar Obsidian o desactivar el
-  plugin.
+- **Sesiones persistentes**: arrancan al abrir Obsidian aunque no abras el panel,
+  y no se cierran al cerrar el panel — siguen vivas hasta que cierras su pestaña,
+  cierras Obsidian o desactivas el plugin.
 - **Comandos de inicio + skill** configurables: comandos slash que se ejecutan
   al arrancar (vacío por defecto) y una skill que se invoca después. Se envían se
   abra o no el panel.
 - **Selector de skills**: lista las skills de Claude Code en `~/.claude/skills`
   (cada subcarpeta con un `SKILL.md`) y la invoca como `/<nombre>`. Cámbiala desde
-  un botón (icono ✨) en la cabecera; por defecto `second-brain-assistant`. El
-  mismo menú tiene una opción **"Open skills folder"** que abre `~/.claude/skills`
-  y maximiza esa ventana del explorador.
-- **Selector de modelo** en la cabecera (Haiku 4.5 / Sonnet 4.6 / Opus 4.8):
-  ejecuta `/model <id>` y auto-confirma el diálogo "Switch model?".
+  un botón (icono ✨) en la cabecera **para la pestaña activa**; por defecto
+  `second-brain-assistant` (también es la skill por defecto de las pestañas
+  nuevas). El mismo menú tiene una opción **"Open skills folder"** que abre
+  `~/.claude/skills` y maximiza esa ventana del explorador.
+- **Selector de modelo** en la cabecera (Haiku 4.5 / Sonnet 4.6 / Opus 4.8) **de
+  la pestaña activa**: ejecuta `/model <id>` y auto-confirma el diálogo "Switch
+  model?".
 - **Enviar notas a Claude**: botón `@` (nota activa), entrada **"Send to Claude"**
   en el menú contextual del explorador (una o varias notas/carpetas), y
   **arrastrar y soltar** notas o imágenes sobre el terminal — todo inserta su
   `@<ruta>`.
+- **Referencias a notas clicables**: las menciones a notas en la salida de Claude
+  (el texto **coloreado** que coincide con el nombre de una nota `.md` del vault, y
+  los `[[wikilinks]]`) se vuelven **enlaces**: pasa el ratón para subrayarlas y haz
+  **clic** para abrir la nota (Ctrl/Cmd+clic = pestaña nueva). Funciona incluso si
+  el nombre queda **partido en varias líneas** (Claude lo corta a lo ancho, a veces
+  a mitad de palabra). Se puede desactivar en ajustes ("Clickable note links").
 - **Remote control (toggle)**: botón (icono 📱) o **`Ctrl+R`** que activa/desactiva
   `/remote-control`. Al activarlo se pone verde, copia al portapapeles el enlace
-  de la sesión (`https://claude.ai/code/session_…`) y lo abre en el navegador
-  (pestaña nueva) para entrar directo a la sesión remota; al desactivarlo,
-  desconecta la sesión.
+  de la sesión (`https://claude.ai/code/…`) y lo abre para entrar directo a la
+  sesión remota; al desactivarlo, desconecta la sesión.
 - **Navegador por cuenta**: como el enlace remoto solo funciona en el navegador
   donde está logueada la misma cuenta de Claude, puedes mapear en ajustes cada
   correo de cuenta a un navegador (Chrome / Firefox / Edge / Brave / Opera /
@@ -104,7 +119,8 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 3. En Obsidian: Ajustes → Complementos de la comunidad → activa
    **Claude Code Harness**.
 4. Abre el panel con el icono de terminal de la barra lateral o el comando
-   "Open Claude Code panel".
+   "Open Claude Code panel". Para más instancias en paralelo, usa el botón **+**
+   de la barra de pestañas o el comando **"New Claude Code session"**.
 
 ## Ajustes
 
