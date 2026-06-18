@@ -89,6 +89,17 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   muestra en un aviso el motivo de la última evaluación (p. ej. "in cooldown", "no
   usage % available yet", "at 72%; threshold is 90%").
   Detalle técnico completo en [`README_TECNICO.md`](README_TECNICO.md).
+- **Activar/desactivar cuentas**: el **menú del botón 👤** muestra **una sola
+  lista** de cuentas: cada fila tiene a la **izquierda un toggle** (verde =
+  habilitada; gris = deshabilitada) y, a la derecha, el **nombre de la cuenta** (con
+  su % de uso). Pulsa el toggle para habilitar/deshabilitar (puedes conmutar varias
+  sin que se cierre el menú) y **haz clic en el nombre para cambiarte a esa cuenta**.
+  Una cuenta **deshabilitada queda sombreada y totalmente inutilizable desde este
+  menú**: el auto-switch nunca la elige y, además, clicar su nombre **no** te cambia
+  a ella (hay que reactivar el toggle primero). Útil para cuentas de amigos, para no
+  gastar sus tokens sin querer. También puedes deshabilitarlas en ajustes ("Claude
+  accounts", botón 🔁/🚫 por cuenta); ahí el bloqueo solo afecta al cambio
+  automático.
 - **Aviso al terminar**: notifica (Obsidian Notice) cuando el terminal suena la
   campana, que Claude tiende a sonar al acabar una tarea larga (configurable).
 - **Cabecera configurable**: cada botón de la cabecera se puede ocultar desde
@@ -132,7 +143,7 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Skill | Skill de `~/.claude/skills` que se invoca como `/<nombre>` tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
-| Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, y auto-switch al superar un % de uso. |
+| Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, auto-switch al superar un % de uso, y **bloquear cuentas** (🔁/🚫) para que el auto-switch no las elija (p. ej. cuentas de amigos). |
 | Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, zoom). |
 | Default browser | Navegador para el control remoto cuando la cuenta activa no está mapeada. |
 | Browser per account | Correlación correo de cuenta → navegador (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada). |

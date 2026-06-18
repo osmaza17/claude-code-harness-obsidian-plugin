@@ -215,9 +215,36 @@ llama dos veces por sesión (xterm no lo soporta).
   baseline `rotateBaselinePct` capturado al activarse la cuenta; con low-water mark
   para resets de la ventana de 5h → reparte el gasto rotando). Elige destino con
   `pickNextAccount()` = **cuenta menos gastada** (menor % 5h sondeado, saltando las
-  de token muerto; fallback a round-robin por email si no hay datos frescos).
+  de token muerto **y las bloqueadas**; fallback a round-robin por email si no hay
+  datos frescos).
   Hot-swap sin reinicio → no corta el turno (la cuenta nueva aplica a la siguiente
   petición). Cooldown de 10 s evita bucles y deja que la barra se asiente.
+  - **Cuentas bloqueadas para auto-switch** (`settings.autoSwitchExcluded`, lista de
+    emails en minúscula; def. `[]`): cuentas que el auto-switch **nunca** elige como
+    destino —p. ej. cuentas de amigos, para no gastar sus tokens automáticamente—.
+    `isAccountEligible(email)`/`toggleAccountEligible(email)` consultan/alternan la
+    lista; `pickNextAccount()` las salta (en el camino "menos gastada" y en el
+    round-robin). UI: el menú 👤 (`openAccountMenu(anchor)`) ya **no** es un `Menu`
+    de Obsidian sino un **popup DOM propio** (clase `.cch-account-menu`,
+    `position:fixed`, montado en `document.body`, **clampeado al viewport** —mide
+    `getBoundingClientRect()` y corrige `left`/`top` con 8px de margen para no
+    salirse de pantalla—, cerrado por click-fuera/Escape vía `closeAccountMenu()`;
+    refs `accountPopup`/`accountPopupCleanup`, limpiado en `onunload`). Tiene **UNA
+    sola lista** de cuentas (no dos): cada fila `.cch-acct-row` lleva a la
+    **izquierda** un toggle `.cch-acct-toggle` (verde = habilitada; gris =
+    deshabilitada; `onclick` → `toggleAccountEligible` + actualiza `is-on` y la clase
+    `cch-acct-blocked` de la fila **sin cerrar** el popup, para conmutar varias) y,
+    a la derecha, la **etiqueta** `.cch-acct-label` (texto de `accountMenuTitle` si
+    `usageProbe`, si no el email; la cuenta activa lleva `.cch-acct-current` con ✓).
+    **Deshabilitación TOTAL en este popup**: una cuenta off recibe `cch-acct-blocked`
+    (sombreada + tachada) y su etiqueta es **inerte** —`switchToAccount` NO se llama
+    al clicarla; muestra un `Notice` pidiendo reactivar el toggle—, así que no se
+    puede ni usar manualmente desde aquí. Arriba, acciones "Save current account" y
+    "Refresh usage" (filas `.cch-acct-action`, estilo `menu-item`). NOTA: el flag
+    sigue siendo `autoSwitchExcluded`; fuera del popup (página de ajustes, botón
+    `repeat`/`ban`) el bloqueo solo afecta al auto-switch (el cambio manual desde
+    ajustes sigue funcionando). Si todas las demás cuentas están bloqueadas,
+    `requestSwitch` avisa una vez ("every other account is blocked").
   - **El watcher corre SIEMPRE** (no solo con autoSwitch), porque también: lee el
     **email de la barra** (filtrado contra `knownAccountEmails()`) para anclar el
     %↔cuenta, **etiquetar el botón 👤 en vivo** y **verificar el swap**

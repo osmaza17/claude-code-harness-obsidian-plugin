@@ -76,6 +76,10 @@ interface HarnessSettings {
   // Advanced: regex (source) used to scrape the 5h usage % from the status line.
   // Must have a capture group with the number. Empty = built-in default.
   autoSwitchUsageRegex: string;
+  // Saved-account emails (lowercased) BLOCKED as auto-switch destinations — e.g.
+  // accounts that belong to friends, so the plugin never spends their tokens on
+  // its own. Manual switching from the menu is always allowed regardless.
+  autoSwitchExcluded: string[];
   // Read the real 5h/7d usage % from the Anthropic API (rate-limit headers)
   // instead of only scraping the status bar. Makes tiny per-account calls.
   usageProbe: boolean;
@@ -110,6 +114,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   autoSwitchThreshold: 90,
   autoSwitchDelta: 10,
   autoSwitchUsageRegex: "",
+  autoSwitchExcluded: [],
   usageProbe: true,
   usageProbeModel: "",
   btnSendNote: true,
@@ -1321,6 +1326,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   onunload() {
+    this.closeAccountMenu();
     for (const s of this.sessions) s.dispose();
     this.sessions = [];
     this.viewRoot = null;
@@ -1497,6 +1503,149 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.autoSwitchBtn.title = on
       ? "Auto-switch ON (" + detail + ") — click to configure"
       : "Auto-switch OFF — click to enable";
+  }
+
+  /** Header 👤 menu: save / refresh / switch accounts, plus a section to allow or
+   *  block each saved account as an AUTO-switch destination. Blocking an account
+   *  (e.g. a friend's) stops the percentage-based auto-switch from ever spending
+   *  its tokens; you can still switch to it manually from the list above. */
+  /** Currently-open account popup, so re-opening / closing is idempotent. */
+  private accountPopup: HTMLElement | null = null;
+  private accountPopupCleanup: (() => void) | null = null;
+
+  closeAccountMenu() {
+    this.accountPopupCleanup?.();
+    this.accountPopup?.remove();
+    this.accountPopup = null;
+    this.accountPopupCleanup = null;
+  }
+
+  /**
+   * Account popup: a SINGLE list of saved accounts. Each row has a toggle on the
+   * left (allow/block as an auto-switch destination) plus the account label;
+   * clicking the label switches to that account. No more two separate lists.
+   */
+  openAccountMenu(anchor: HTMLElement) {
+    this.closeAccountMenu();
+    if (this.settings.usageProbe) void this.refreshUsage({});
+    const cur = this.currentAccountEmail();
+
+    const pop = document.createElement("div");
+    pop.className = "menu cch-account-menu";
+    document.body.appendChild(pop);
+    this.accountPopup = pop;
+
+    const headerItem = (
+      title: string,
+      icon: string,
+      onClick: () => void
+    ) => {
+      const row = pop.createDiv({ cls: "menu-item cch-acct-action" });
+      const ic = row.createDiv({ cls: "menu-item-icon" });
+      setIcon(ic, icon);
+      row.createDiv({ cls: "menu-item-title", text: title });
+      row.onclick = () => {
+        this.closeAccountMenu();
+        onClick();
+      };
+    };
+
+    headerItem("Save current account", "save", () => this.saveCurrentAccount());
+    if (this.settings.usageProbe) {
+      headerItem("Refresh usage", "refresh-cw", () => void this.refreshUsage({}));
+    }
+    pop.createDiv({ cls: "menu-separator" });
+
+    const saved = this.listSavedAccounts();
+    if (!saved.length) {
+      pop.createDiv({
+        cls: "menu-item cch-acct-empty",
+        text: "No saved accounts",
+      });
+    } else {
+      pop.createDiv({
+        cls: "cch-acct-hint",
+        text: "Toggle = allow auto-switch · click name to use",
+      });
+      const emailWidth = Math.max(...saved.map((a) => a.email.length));
+      for (const a of saved) {
+        const row = pop.createDiv({ cls: "cch-acct-row" });
+        const eligible = this.isAccountEligible(a.email);
+        if (!eligible) row.addClass("cch-acct-blocked");
+
+        // Left toggle: allow (on) / block (off) this account. A blocked account
+        // is fully unusable — dimmed AND not switchable by clicking its name.
+        const toggle = row.createDiv({
+          cls: "cch-acct-toggle" + (eligible ? " is-on" : ""),
+        });
+        toggle.createDiv({ cls: "cch-acct-knob" });
+        toggle.setAttr(
+          "aria-label",
+          eligible ? "Enabled" : "Disabled"
+        );
+        toggle.onclick = async (e) => {
+          e.stopPropagation();
+          await this.toggleAccountEligible(a.email);
+          const nowOn = this.isAccountEligible(a.email);
+          toggle.toggleClass("is-on", nowOn);
+          row.toggleClass("cch-acct-blocked", !nowOn);
+          toggle.setAttr("aria-label", nowOn ? "Enabled" : "Disabled");
+        };
+
+        // Label: click to switch the live session to this account (unless
+        // blocked, in which case it's inert — re-enable it with the toggle).
+        const label = row.createDiv({ cls: "cch-acct-label" });
+        if (cur === a.email.trim().toLowerCase())
+          label.addClass("cch-acct-current");
+        if (this.settings.usageProbe) {
+          label.appendChild(this.accountMenuTitle(a.email, emailWidth));
+        } else {
+          label.setText(a.email);
+        }
+        label.onclick = () => {
+          if (!this.isAccountEligible(a.email)) {
+            new Notice(
+              "This account is disabled. Turn its toggle on to use it."
+            );
+            return;
+          }
+          this.closeAccountMenu();
+          this.switchToAccount(a.email);
+        };
+      }
+    }
+
+    // Position under the anchor, clamped to the viewport, and dismiss on
+    // outside click / Escape.
+    const r = anchor.getBoundingClientRect();
+    const margin = 8;
+    const rect = pop.getBoundingClientRect();
+    // Sit a bit to the left of the anchor (the button is near the right edge),
+    // then clamp so it never leaves the viewport.
+    let left = r.left - 180;
+    let top = r.bottom + 2;
+    if (left + rect.width > window.innerWidth - margin)
+      left = window.innerWidth - rect.width - margin;
+    left = Math.max(margin, left);
+    if (top + rect.height > window.innerHeight - margin)
+      top = Math.max(margin, window.innerHeight - rect.height - margin);
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+    const onDown = (e: MouseEvent) => {
+      if (!pop.contains(e.target as Node) && e.target !== anchor)
+        this.closeAccountMenu();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") this.closeAccountMenu();
+    };
+    setTimeout(() => {
+      document.addEventListener("mousedown", onDown, true);
+      document.addEventListener("keydown", onKey, true);
+    }, 0);
+    this.accountPopupCleanup = () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
   }
 
   /** Menu to toggle auto-switch and pick its mode + percentage from the header. */
@@ -1896,6 +2045,23 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
+  /** Is this saved account allowed as an AUTO-switch destination? Friends'
+   *  accounts can be blocked so the plugin never spends their tokens on its own;
+   *  manual switching from the menu is always allowed regardless. */
+  isAccountEligible(email: string): boolean {
+    return !this.settings.autoSwitchExcluded.includes(email.trim().toLowerCase());
+  }
+
+  /** Allow/block an account as an auto-switch destination (persisted). */
+  async toggleAccountEligible(email: string) {
+    const lower = email.trim().toLowerCase();
+    const list = this.settings.autoSwitchExcluded;
+    const i = list.indexOf(lower);
+    if (i >= 0) list.splice(i, 1);
+    else list.push(lower);
+    await this.saveSettings();
+  }
+
   /** Auto-snapshot the active account whenever it changes (throttled to ~10s). */
   maybeAutoSaveAccount() {
     const now = Date.now();
@@ -1928,7 +2094,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const saved = this.listSavedAccounts().map((a) => a.email);
     if (saved.length < 2) return null;
     const cur = this.currentAccountEmail();
-    const others = saved.filter((e) => e.trim().toLowerCase() !== cur);
+    const others = saved.filter(
+      (e) => e.trim().toLowerCase() !== cur && this.isAccountEligible(e)
+    );
     if (!others.length) return null;
 
     let best: string | null = null;
@@ -1952,6 +2120,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     for (let i = 0; i < saved.length; i++) {
       const cand = saved[(start + i) % saved.length];
       if (cand.trim().toLowerCase() === cur) continue;
+      if (!this.isAccountEligible(cand)) continue;
       if (this.accountUsage.get(cand.trim().toLowerCase())?.error === "auth") continue;
       return cand;
     }
@@ -2493,7 +2662,15 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (!next) {
       if (!this.warnedNoAccounts) {
         this.warnedNoAccounts = true;
-        new Notice("Auto-switch: save at least 2 accounts (log in with /login).");
+        const eligible = this.listSavedAccounts().filter(
+          (a) => a.email.trim().toLowerCase() !== this.currentAccountEmail() &&
+            this.isAccountEligible(a.email)
+        ).length;
+        new Notice(
+          eligible === 0 && this.listSavedAccounts().length >= 2
+            ? "Auto-switch: every other account is blocked — allow one in the 👤 menu."
+            : "Auto-switch: save at least 2 accounts (log in with /login)."
+        );
       }
       return;
     }
@@ -2715,46 +2892,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       accountBtn.title = "Account: " + (curEmail || "unknown");
       accountBtn.onclick = (e) => {
         e.preventDefault();
-        if (this.settings.usageProbe) void this.refreshUsage({});
-        const menu = new Menu();
-        const cur = this.currentAccountEmail();
-        menu.addItem((item) =>
-          item
-            .setTitle("Save current account")
-            .setIcon("save")
-            .onClick(() => this.saveCurrentAccount())
-        );
-        if (this.settings.usageProbe) {
-          menu.addItem((item) =>
-            item
-              .setTitle("Refresh usage")
-              .setIcon("refresh-cw")
-              .onClick(() => void this.refreshUsage({}))
-          );
-        }
-        menu.addSeparator();
-        const saved = this.listSavedAccounts();
-        if (!saved.length) {
-          menu.addItem((item) =>
-            item.setTitle("No saved accounts").setDisabled(true)
-          );
-        } else {
-          const emailWidth = Math.max(...saved.map((a) => a.email.length));
-          for (const a of saved) {
-            menu.addItem((item) => {
-              if (this.settings.usageProbe) {
-                item.setTitle(this.accountMenuTitle(a.email, emailWidth));
-              } else {
-                item.setTitle(a.email);
-              }
-              item
-                .setChecked(cur === a.email.trim().toLowerCase())
-                .onClick(() => this.switchToAccount(a.email));
-            });
-          }
-        }
-        const r = accountBtn.getBoundingClientRect();
-        menu.showAtPosition({ x: r.left, y: r.bottom });
+        this.openAccountMenu(accountBtn);
       };
     }
 
@@ -3449,8 +3587,27 @@ class HarnessSettingTab extends PluginSettingTab {
       const name = this.plugin.settings.usageProbe
         ? a.email + " — " + this.plugin.usageLabel(a.email)
         : a.email;
+      const eligible = this.plugin.isAccountEligible(a.email);
       new Setting(containerEl)
         .setName(name)
+        .setDesc(
+          eligible
+            ? "Auto-switch: allowed"
+            : "Auto-switch: blocked (e.g. a friend's account — its tokens won't be spent automatically)"
+        )
+        .addExtraButton((b) =>
+          b
+            .setIcon(eligible ? "repeat" : "ban")
+            .setTooltip(
+              eligible
+                ? "Eligible for auto-switch — click to block"
+                : "Blocked from auto-switch — click to allow"
+            )
+            .onClick(async () => {
+              await this.plugin.toggleAccountEligible(a.email);
+              this.display();
+            })
+        )
         .addButton((b) =>
           b.setButtonText("Switch").onClick(() => this.plugin.switchToAccount(a.email))
         )
