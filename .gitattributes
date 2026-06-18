@@ -1,0 +1,9 @@
+# Normaliza los finales de línea: el repo guarda LF y la copia de trabajo se
+# mantiene en LF en todas las plataformas (eol=lf tiene prioridad sobre la
+# config local core.autocrlf, así que no hay conversión LF<->CRLF ni warning).
+* text=auto eol=lf
+
+# Binarios: nunca tocar finales de línea.
+*.node binary
+*.png binary
+*.ico binary
