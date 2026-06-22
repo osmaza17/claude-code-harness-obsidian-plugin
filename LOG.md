@@ -5,6 +5,25 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-19
 
+- **Keep-alive: la cuenta activa ya no se refresca desde el plugin (cierra la
+  carrera del refresh token).** Las cuentas caían a `expired`/`/login` de forma
+  aleatoria: el plugin y el propio `claude` refrescaban a la vez el token de la
+  cuenta **activa** usando el mismo refresh token, que **rota** en cada uso, así
+  que uno invalidaba al del otro (→ 401 → login).
+  - `refreshAccount` ahora **salta la cuenta activa** (`if (isActive) return true`):
+    de ella se ocupa solo `claude` (re-lee `.credentials.json` y rota perezosamente
+    por petición). El plugin sigue mantieniendo vivas solo las cuentas **inactivas**,
+    donde no hay carrera.
+  - Coste asumido: la barra de uso de la activa puede mostrar `expired` un instante
+    tras caducar su access token, hasta el siguiente mensaje (falso positivo benigno).
+- **Logs de diagnóstico del keep-alive** (`[cch keepalive] …` en DevTools): cada
+  refresco emite `skip active` / `refreshing` / `refreshed … ok` / `refresh FAILED`,
+  y `oauthRefresh` registra la causa de cada fallo (`token endpoint HTTP <status>`
+  —401 token muerto, 429 rate-limit—, `network error`, `timeout`). Permite saber
+  con certeza por qué cae una cuenta en vez de adivinar.
+  - Docs: CLAUDE.md actualizado (sección "Keep-alive de tokens"; cierra el
+    "RIESGO RESIDUAL").
+
 - **Menú de cuentas (botón 👤): una sola lista con toggle por cuenta.** Antes
   había dos listas (una para cambiar de cuenta, otra para permitir/bloquear el
   auto-switch). Ahora es **una única lista**.

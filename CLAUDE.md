@@ -166,6 +166,51 @@ llama dos veces por sesión (xterm no lo soporta).
      la pestaña → `setActive(i)`; `.cch-tab-active` marca la activa; `.cch-tab-exited`
      tacha la que salió). Al final, botón **+** (`.cch-tab-new`) → `openNewSessionMenu()`
      (crea sesión con skill por defecto / sin skill / con una skill de `listSkills()`).
+     - **Reordenar (drag interactivo, estilo Chrome)**: NO usa HTML5 DnD (no anima
+       los hermanos). Cada `.cch-tab` engancha `pointerdown` → `beginTabDrag(e, tabs, i)`:
+       umbral de 4px para distinguir clic de arrastre (un clic sin mover llama
+       `setActive(from)`); al arrastrar, la pestaña sigue al puntero con
+       `translateX(dx)` (clase `.cch-tab-dragging`, elevada) y **los hermanos se
+       deslizan** (con transición) para abrir el hueco donde caerá (cada uno se
+       desplaza ±`slot` = ancho de la arrastrada + gap 4px). El índice destino `to`
+       = nº de pestañas que deben quedar **antes** de la arrastrada: cada vecino
+       reacciona cuando el centro visual de la arrastrada cruza un punto a `frac`
+       (0.25) dentro de él desde el borde que mira al arrastre (umbral pequeño =
+       se aparta antes; 0.5 sería el punto medio). Al soltar (`pointerup`),
+       `moveSession(from, to)` hace splice del
+       array `sessions` (= orden de pestañas) dejándola en el índice final `to` y
+       **conservando la sesión activa** (re-localiza por referencia). El rebuild de
+       la cabecera limpia los estilos inline del drag.
+     - **Auto-título** (precedencia `manual(3) > osc(2) > prompt(1) > default(0)`,
+       campo `Session.titleRank` + `setTitleFrom(raw, source)`): el nombre se
+       actualiza solo para distinguir pestañas. Fuente primaria = **título de
+       terminal que Claude emite por OSC** (`term.onTitleChange` → `"osc"`, sigue
+       vivo según la tarea; `setTitleFrom` recorta el glifo de estado inicial
+       —✳/✶/✻…— que Claude antepone a su título OSC, porque el heartbeat ya indica
+       eso, e **ignora títulos OSC genéricos** —"Claude", "Claude Code" o el nombre
+       del vault— para que NO bloqueen el respaldo: en la práctica el título OSC de
+       Claude suele ser genérico, así que el nombre real de la pestaña casi siempre
+       sale del primer prompt). Respaldo = **primer prompt que escribes**
+       (`captureFirstPrompt` en `term.onData`: acumula la primera línea, commit en
+       Enter como `"prompt"`, una sola vez vía `firstPromptDone`; ignora ctrl/escapes,
+       maneja backspace; los comandos de arranque/skill van por `pasteToPty`, NO por
+       `onData`, así que no contaminan el título). **Doble clic** en la etiqueta →
+       `startTabRename()` (input inline, Enter/blur = `"manual"`, Escape cancela);
+       el rango manual gana a las fuentes automáticas. `setTitleFrom` limpia control
+       chars + colapsa espacios + trunca a 40, y refresca con `refreshTabTitles()`
+       (actualiza solo los `.cch-tab-label` in situ, sin rebuild completo).
+     - **Heartbeat por pestaña** (`.cch-tab-dot`, estados `is-busy`/`is-idle`/
+       `is-exited`): un punto sólido (sin animación) que indica si Claude está
+       **trabajando** (amarillo) o **ha terminado/inactivo** (verde); gris si la
+       sesión salió. Se infiere de la **actividad del PTY**:
+       `markActivity()` (en `case "data"`) marca `busy=true` y rearma un timer de
+       hueco silencioso (1200 ms) que lo devuelve a idle —Claude emite tokens /
+       anima su spinner de forma continua mientras piensa o responde, y enmudece al
+       devolver el control—. Para no pulsar mientras **tú** escribes, ignora la
+       salida que llega <600 ms tras una pulsación (eco de teclado; `lastKeyAt` se
+       fija en `term.onData`). `setBusy()` refresca vía `refreshTabStatus()` (actualiza
+       solo los `.cch-tab-dot` in situ). El `case "exit"` y `dispose()` apagan el
+       timer; salir asienta el punto.
   2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
@@ -306,7 +351,7 @@ llama dos veces por sesión (xterm no lo soporta).
   (`https://platform.claude.com/v1/oauth/token`) con `{grant_type:"refresh_token",
   refresh_token, client_id: OAUTH_CLIENT_ID}` (endpoint y client_id verificados
   extrayéndolos del binario `claude.exe`; pueden cambiar con futuras versiones del
-  CLI). En cada tick de 3 min se **revisa** cada cuenta (incl. la activa) pero solo
+  CLI). En cada tick de 3 min se **revisa** cada cuenta **inactiva** pero solo
   se refresca de verdad si está caducada o le quedan <`REFRESH_SKEW_MS` (30 min);
   ese throttle mantiene el ritmo de refresco cercano al de `claude` (~1 por vida de
   token) y evita machacar el endpoint de tokens, que **limita por tasa con dureza
@@ -315,11 +360,21 @@ llama dos veces por sesión (xterm no lo soporta).
   solo toca el fichero en **HTTP 200** (cualquier error → credenciales intactas, el
   refresh token viejo sigue válido) y escribe **atómico** (`writeJsonAtomic`),
   fusionando los tokens nuevos sin perder los demás campos (`scopes`,
-  `subscriptionType`…) y conservando la unidad de `expiresAt` (ms aquí). RIESGO
-  RESIDUAL: refrescar la cuenta **activa** puede competir con el refresco perezoso
-  del propio `claude` por el mismo refresh token (ventana pequeña y rara, porque el
-  throttle hace que solo coincidan cerca de la caducidad; `claude` re-lee
-  `.credentials.json` por petición, así que en el caso normal adopta el token nuevo).
+  `subscriptionType`…) y conservando la unidad de `expiresAt` (ms aquí).
+  **La cuenta ACTIVA NO se refresca desde el plugin**: `refreshAccount` la salta
+  (`if (isActive) return true`) y deja que de ella se ocupe el propio `claude`,
+  que re-lee `.credentials.json` y rota su refresh token de forma perezosa en cada
+  petición. Antes el plugin también la refrescaba, lo que **competía** por el mismo
+  refresh token (si el plugin rotaba RT1→RT2 mientras `claude` aún tenía RT1, el
+  siguiente refresco de `claude` usaba un token muerto → 401 → `/login`); ese era
+  el "riesgo residual" que provocaba caducidades aleatorias, ahora eliminado. Coste
+  asumido: la barra de uso de la cuenta activa puede mostrar `expired` un instante
+  tras caducar su access token, hasta el siguiente mensaje (falso positivo benigno).
+  **Diagnóstico**: todos los refrescos emiten logs `[cch keepalive] …` en la
+  consola de DevTools (`skip active`, `refreshing`, `refreshed … ok`,
+  `refresh FAILED`, y la causa HTTP/red: `token endpoint HTTP <status>` —401 token
+  muerto, 429 rate-limit—, `network error`, `timeout`), para saber con certeza por
+  qué cae una cuenta sin tener que adivinar.
 - **Escrituras atómicas** (`writeJsonAtomic`): `switchToAccount`/`saveCurrentAccount`
   escriben a temp + `rename` para que la `claude` viva nunca lea un
   `.credentials.json`/`.claude.json` a medio escribir. `switchToAccount` valida que

@@ -286,6 +286,41 @@
   text-overflow: ellipsis;
   font-size: 12px;
 }
+/* Interactive reorder (Chrome-style): the dragged tab is lifted and follows
+   the pointer while siblings slide out of the way (animated inline in JS). */
+.claude-code-harness .cch-tab-dragging {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+  cursor: grabbing;
+  opacity: 0.95;
+}
+/* Heartbeat dot: shows whether Claude is working (pulsing) or idle/done. */
+.claude-code-harness .cch-tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-faint);
+}
+.claude-code-harness .cch-tab-dot.is-idle {
+  background: var(--color-green, #3fb950);
+}
+.claude-code-harness .cch-tab-dot.is-busy {
+  background: var(--color-yellow, #d29922);
+}
+.claude-code-harness .cch-tab-dot.is-exited {
+  background: var(--text-faint);
+  opacity: 0.45;
+}
+.claude-code-harness .cch-tab-rename {
+  width: 120px;
+  height: 20px;
+  padding: 0 4px;
+  font-size: 12px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
 .claude-code-harness .cch-tab-label.cch-tab-exited {
   text-decoration: line-through;
   opacity: 0.6;

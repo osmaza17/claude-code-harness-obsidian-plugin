@@ -310,6 +310,21 @@ class Session {
   private rafFit: number | null = null; // pending per-frame display fit during a drag
   private initialSent = false; // whether the startup steps were inserted this session
 
+  // Tab auto-title. Precedence: manual(3) > osc(2) > prompt(1) > default(0). A
+  // higher-ranked source replaces a lower one; OSC also keeps updating itself
+  // live as Claude changes the terminal title to reflect the current task.
+  titleRank = 0;
+  private firstPromptBuf = ""; // accumulates the first line you type (fallback)
+  private firstPromptDone = false; // stop after the first committed prompt
+
+  // Tab heartbeat: is Claude actively working in this session? Inferred from PTY
+  // activity — Claude streams tokens / animates its spinner continuously while
+  // thinking or responding, then goes silent when it hands control back. `busy`
+  // drives the tab dot; the timer flips it back to idle after a quiet gap.
+  busy = false;
+  private busyTimer: number | null = null;
+  private lastKeyAt = 0; // when the user last typed (to ignore keystroke echo)
+
   // Remote control toggle (/remote-control). remoteOn drives the button's green
   // state; while awaiting the menu we scrape the session URL to the clipboard.
   remoteOn = false;
@@ -372,8 +387,16 @@ class Session {
     this.host = document.createElement("div");
     this.host.addClass("cch-term");
 
-    // Forward keystrokes to the pty host.
-    this.term.onData((d: string) => this.send({ t: "input", d }));
+    // Forward keystrokes to the pty host (and sniff the first line for a title).
+    this.term.onData((d: string) => {
+      this.lastKeyAt = Date.now();
+      this.captureFirstPrompt(d);
+      this.send({ t: "input", d });
+    });
+
+    // Claude updates the terminal title (OSC) to describe the current task; use
+    // it as the live tab name. This is the primary auto-title source.
+    this.term.onTitleChange((t: string) => this.setTitleFrom(t, "osc"));
 
     // Claude rings the bell (\x07) when a long task finishes / needs attention.
     this.term.onBell(() => {
@@ -391,6 +414,80 @@ class Session {
 
     this.setupClipboard();
     this.startHost();
+  }
+
+  /** Set the tab title from an automatic source, respecting precedence
+   *  (manual > osc > prompt > default). Cleans control chars and truncates. */
+  setTitleFrom(raw: string, source: "prompt" | "osc" | "manual") {
+    const rank = source === "manual" ? 3 : source === "osc" ? 2 : 1;
+    if (rank < this.titleRank) return; // a stronger source already owns the title
+    let clean = raw
+      .replace(/[\x00-\x1f\x7f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (source === "osc") {
+      // Claude prepends an animated status glyph (✳ ✶ ✻ …) to its terminal
+      // title; the heartbeat dot already conveys that, so strip leading symbols.
+      clean = clean.replace(/^[^\p{L}\p{N}]+/u, "").trim();
+      // Claude's terminal title is usually just a generic "Claude Code" (or the
+      // cwd), which tells the tabs apart from nothing. Ignore those so the
+      // first-prompt fallback can name the tab after the actual conversation;
+      // only a genuinely descriptive OSC title is allowed to take over.
+      const low = clean.toLowerCase();
+      const vault = this.plugin.app.vault.getName().toLowerCase();
+      if (!clean || low === "claude" || low === "claude code" || low === vault) {
+        return;
+      }
+    }
+    clean = clean.slice(0, 40);
+    if (!clean) return;
+    if (clean === this.title && rank === this.titleRank) return;
+    this.title = clean;
+    this.titleRank = rank;
+    this.plugin.refreshTabTitles();
+  }
+
+  /** Fallback title: gather the first line you type and commit it on Enter,
+   *  unless a stronger source (OSC title / manual rename) already took over. */
+  private captureFirstPrompt(d: string) {
+    if (this.firstPromptDone || this.titleRank >= 2) return;
+    if (d === "\r" || d === "\n") {
+      const t = this.firstPromptBuf.trim();
+      if (t) {
+        this.setTitleFrom(t, "prompt");
+        this.firstPromptDone = true;
+      }
+      this.firstPromptBuf = "";
+      return;
+    }
+    if (d === "\x7f" || d === "\b") {
+      this.firstPromptBuf = this.firstPromptBuf.slice(0, -1);
+      return;
+    }
+    if (d.charCodeAt(0) < 0x20 || d.startsWith("\x1b")) return; // ctrl / escapes
+    if (this.firstPromptBuf.length < 80) this.firstPromptBuf += d;
+  }
+
+  /** Tab heartbeat. Each chunk of PTY output (other than keystroke echo) marks
+   *  the session busy and re-arms a quiet-gap timer; when the gap elapses with no
+   *  output, Claude has handed control back and the session goes idle. Output
+   *  within ~600ms of a keystroke is treated as echo (so the dot doesn't pulse
+   *  just because YOU are typing). */
+  private markActivity() {
+    if (this.exited) return;
+    if (Date.now() - this.lastKeyAt < 600) return; // keystroke echo, not Claude
+    this.setBusy(true);
+    if (this.busyTimer != null) window.clearTimeout(this.busyTimer);
+    this.busyTimer = window.setTimeout(() => {
+      this.busyTimer = null;
+      this.setBusy(false);
+    }, 1200);
+  }
+
+  private setBusy(b: boolean) {
+    if (this.busy === b) return;
+    this.busy = b;
+    this.plugin.refreshTabStatus();
   }
 
   /** Re-apply the Obsidian theme to this terminal (called on css-change). */
@@ -1041,6 +1138,10 @@ class Session {
       cancelAnimationFrame(this.rafFit);
       this.rafFit = null;
     }
+    if (this.busyTimer != null) {
+      window.clearTimeout(this.busyTimer);
+      this.busyTimer = null;
+    }
     this.killChild();
     try {
       this.term?.dispose();
@@ -1121,6 +1222,7 @@ class Session {
           break;
         case "data":
           this.term.write(msg.d);
+          this.markActivity(); // tab heartbeat: Claude is producing output
           // Per-session watchers (this terminal's TUI).
           this.maybeSendInitial();
           this.maybeConfirmModel(msg.d);
@@ -1134,6 +1236,11 @@ class Session {
           break;
         case "exit":
           this.exited = true; // stop sending resizes to the dead pty
+          this.setBusy(false); // settle the heartbeat dot
+          if (this.busyTimer != null) {
+            window.clearTimeout(this.busyTimer);
+            this.busyTimer = null;
+          }
           this.term.writeln(
             "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"
           );
@@ -1368,6 +1475,109 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.activeIndex = i;
     this.rebuildHeader();
     if (this.viewRoot) this.activeSession()?.attachInto(this.viewRoot);
+  }
+
+  /** Reorder tabs. Moves the session at `from` so it ends up at index `to` in
+   *  the reordered array (0-based, final position). Keeps whatever session was
+   *  active still active. */
+  moveSession(from: number, to: number) {
+    if (from < 0 || from >= this.sessions.length) return;
+    to = Math.max(0, Math.min(to, this.sessions.length - 1));
+    if (from === to) return;
+    const active = this.activeSession();
+    const [moved] = this.sessions.splice(from, 1);
+    this.sessions.splice(to, 0, moved);
+    this.activeIndex = active ? this.sessions.indexOf(active) : this.activeIndex;
+    this.rebuildHeader();
+  }
+
+  /** Interactive Chrome-style tab drag. The dragged tab follows the pointer
+   *  (translateX) while the other tabs slide to open a slot for it; on release
+   *  the session order is committed. A press with no movement is a plain click
+   *  that just activates the tab. Uses pointer events (HTML5 DnD can't animate
+   *  the siblings smoothly). */
+  private beginTabDrag(e: PointerEvent, tabsEl: HTMLElement, from: number) {
+    if (e.button !== 0) return; // left button only
+    const t0 = e.target as HTMLElement;
+    if (t0.closest(".cch-tab-close") || t0.closest("input.cch-tab-rename")) return;
+
+    const tabEls = Array.from(tabsEl.querySelectorAll<HTMLElement>(".cch-tab"));
+    const dragged = tabEls[from];
+    if (!dragged) return;
+    const rects = tabEls.map((t) => t.getBoundingClientRect());
+    const startX = e.clientX;
+    const draggedRect = rects[from];
+    const gap = 4; // matches .cch-tabs gap in styles.css
+    const slot = draggedRect.width + gap; // space the dragged tab leaves behind
+    let started = false;
+    let to = from;
+
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      if (!started) {
+        if (Math.abs(dx) < 4) return; // movement threshold → still a click
+        started = true;
+        dragged.addClass("cch-tab-dragging");
+        dragged.style.position = "relative";
+        dragged.style.zIndex = "5";
+        dragged.style.transition = "none";
+      }
+      ev.preventDefault();
+      dragged.style.transform = `translateX(${dx}px)`;
+      // The dragged tab's current visual centre.
+      const center = draggedRect.left + draggedRect.width / 2 + dx;
+      // New index = how many OTHER tabs should end up before the dragged one. A
+      // neighbour reacts as soon as the dragged centre crosses TRIGGER — a small
+      // fraction `frac` into that neighbour from the edge facing the drag — so a
+      // smaller `frac` makes neighbours slide out of the way sooner.
+      const frac = 0.25;
+      let idx = 0;
+      for (let j = 0; j < tabEls.length; j++) {
+        if (j === from) continue;
+        const r = rects[j];
+        if (j < from) {
+          // Left neighbour: stays "before" until the drag pushes past its right.
+          if (center >= r.left + (1 - frac) * r.width) idx++;
+        } else {
+          // Right neighbour: becomes "before" once the drag passes its left.
+          if (center > r.left + frac * r.width) idx++;
+        }
+      }
+      to = idx;
+      // Slide the siblings to open the slot where the dragged tab will land.
+      for (let j = 0; j < tabEls.length; j++) {
+        if (j === from) continue;
+        let shift = 0;
+        if (to > from && j > from && j <= to) shift = -slot;
+        else if (to < from && j >= to && j < from) shift = slot;
+        tabEls[j].style.transition = "transform 0.15s ease";
+        tabEls[j].style.transform = shift ? `translateX(${shift}px)` : "";
+      }
+    };
+
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      if (started) {
+        // Always clear the inline drag styles first: if the index didn't change
+        // (e.g. dragged a corner tab past the edge) moveSession is a no-op and
+        // won't rebuild, so without this the tab would stay where the cursor
+        // left it instead of snapping back into its slot.
+        for (const t of tabEls) {
+          t.style.transform = "";
+          t.style.transition = "";
+          t.style.zIndex = "";
+          t.style.position = "";
+        }
+        dragged.removeClass("cch-tab-dragging");
+        if (to !== from) this.moveSession(from, to); // rebuilds the header
+      } else {
+        this.setActive(from); // it was a click, not a drag
+      }
+    };
+
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
   }
 
   /** Close a tab: kill that instance's claude process and drop it. Keeps at
@@ -1732,8 +1942,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   // --- Skills -------------------------------------------------------------
 
-  /** Claude Code's personal skills folder (~/.claude/skills). */
+  /** The vault's local skills folder (<vault>/.claude/skills). The plugin runs
+   *  claude with cwd = vault root, so these project-local skills are the ones in
+   *  scope; falls back to the global ~/.claude/skills if the vault path is
+   *  unavailable. */
   skillsDir(): string {
+    const base = this.vaultPath();
+    if (base) return path.join(base, ".claude", "skills");
     const os = nodeRequire("os");
     return path.join(os.homedir(), ".claude", "skills");
   }
@@ -2157,6 +2372,16 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const fs = nodeRequire("fs");
     const lower = email.trim().toLowerCase();
     const isActive = lower === this.currentAccountEmail();
+    // The ACTIVE account is refreshed by `claude` itself (it re-reads
+    // .credentials.json and rotates the refresh token lazily on each request).
+    // Refreshing it from here too would race against that rotation: if we rotate
+    // RT1→RT2 while claude still holds RT1, claude's next refresh uses a dead
+    // token → 401 → forced /login. So we leave the active account to claude and
+    // only keep INACTIVE accounts (which claude never touches) alive from here.
+    if (isActive) {
+      console.log("[cch keepalive] skip active", lower, "(claude owns refresh)");
+      return true; // let refreshUsage probe with the live token as-is
+    }
     const file = isActive
       ? this.credsPath()
       : path.join(this.accountsDir(), this.accountFileName(email));
@@ -2175,8 +2400,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const prevMs = prev > 0 && prev < 1e12 ? prev * 1000 : prev;
     if (prevMs && prevMs - Date.now() > REFRESH_SKEW_MS) return true; // still alive
 
+    console.log("[cch keepalive] refreshing", lower);
     const resp = await this.oauthRefresh(refreshToken);
-    if (!resp) return false; // network/HTTP error → keep old creds intact
+    if (!resp) {
+      console.warn("[cch keepalive] refresh FAILED", lower, "(see cause above)");
+      return false; // network/HTTP error → keep old creds intact
+    }
 
     const ttl = resp.expires_in || 0;
     const expiresAt =
@@ -2200,6 +2429,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     } catch {
       return false;
     }
+    console.log("[cch keepalive] refreshed", lower, "ok");
     return true;
   }
 
@@ -2244,7 +2474,17 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           let data = "";
           res.on("data", (c: any) => (data += c));
           res.on("end", () => {
-            if (status !== 200) return finish(null);
+            if (status !== 200) {
+              // 401 = refresh token dead/rotated out from under us; 429 = the
+              // token endpoint rate-limited us (it limits hard). Either way the
+              // old creds are kept intact by the caller.
+              console.warn(
+                "[cch keepalive] token endpoint HTTP",
+                status,
+                String(data).slice(0, 200)
+              );
+              return finish(null);
+            }
             try {
               const j = JSON.parse(data);
               finish(j?.access_token ? j : null);
@@ -2254,8 +2494,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           });
         }
       );
-      req.on("error", () => finish(null));
+      req.on("error", (e: any) => {
+        console.warn("[cch keepalive] token endpoint network error", e?.message || e);
+        finish(null);
+      });
       req.on("timeout", () => {
+        console.warn("[cch keepalive] token endpoint timeout");
         req.destroy();
         finish(null);
       });
@@ -2809,13 +3053,18 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const tab = tabs.createDiv({
         cls: "cch-tab" + (i === this.activeIndex ? " cch-tab-active" : ""),
       });
-      tab.createSpan({
+      const dotCls = sess.exited ? "is-exited" : sess.busy ? "is-busy" : "is-idle";
+      const dot = tab.createSpan({ cls: "cch-tab-dot " + dotCls });
+      dot.setAttr("aria-label", sess.exited ? "Exited" : sess.busy ? "Working…" : "Idle");
+      const label = tab.createSpan({
         cls: "cch-tab-label" + (sess.exited ? " cch-tab-exited" : ""),
         text: sess.title || "Claude",
       });
-      tab.onclick = (e) => {
+      // Double-click the label to rename the tab manually (overrides auto-title).
+      label.ondblclick = (e) => {
         e.preventDefault();
-        this.setActive(i);
+        e.stopPropagation();
+        this.startTabRename(tab, label, sess);
       };
       const close = tab.createSpan({ cls: "cch-tab-close" });
       setIcon(close, "x");
@@ -2825,6 +3074,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         e.stopPropagation();
         this.closeSession(sess);
       };
+      // Pointer-based interactive reorder (Chrome-style: siblings slide out of
+      // the way as you drag). A plain click (no drag) activates the tab.
+      tab.addEventListener("pointerdown", (e) => this.beginTabDrag(e, tabs, i));
     });
     const add = tabs.createEl("button", { cls: "cch-btn cch-tab-new" });
     setIcon(add, "plus");
@@ -2911,7 +3163,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         const skills = this.listSkills();
         if (!skills.length) {
           menu.addItem((item) =>
-            item.setTitle("No skills in ~/.claude/skills").setDisabled(true)
+            item.setTitle("No skills in .claude/skills").setDisabled(true)
           );
         } else {
           for (const sk of skills) {
@@ -3014,6 +3266,61 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   refreshHeader() {
     this.rebuildHeader();
+  }
+
+  /** Update just the tab labels in place (cheap; avoids a full header rebuild on
+   *  every auto-title change). Labels are in session order, so index aligns. */
+  refreshTabTitles() {
+    if (!this.viewRoot) return;
+    const labels = this.viewRoot.findAll(".cch-tabs .cch-tab-label");
+    this.sessions.forEach((sess, i) => labels[i]?.setText(sess.title || "Claude"));
+  }
+
+  /** Update the per-tab heartbeat dot in place (busy / idle / exited) without a
+   *  full header rebuild. Dots are in session order, so index aligns. */
+  refreshTabStatus() {
+    if (!this.viewRoot) return;
+    const dots = this.viewRoot.findAll(".cch-tabs .cch-tab-dot");
+    this.sessions.forEach((sess, i) => {
+      const dot = dots[i];
+      if (!dot) return;
+      dot.removeClasses(["is-busy", "is-idle", "is-exited"]);
+      const state = sess.exited ? "is-exited" : sess.busy ? "is-busy" : "is-idle";
+      dot.addClass(state);
+      dot.setAttr("aria-label", sess.exited ? "Exited" : sess.busy ? "Working…" : "Idle");
+    });
+  }
+
+  /** Inline-edit a tab title (double-click). Commits on Enter/blur as a "manual"
+   *  title (which outranks the auto sources), cancels on Escape. */
+  private startTabRename(tab: HTMLElement, label: HTMLElement, sess: Session) {
+    if (tab.querySelector("input.cch-tab-rename")) return; // already editing
+    tab.setAttr("draggable", "false"); // don't fight text selection while editing
+    const input = document.createElement("input");
+    input.type = "text";
+    input.addClass("cch-tab-rename");
+    input.value = sess.title || "";
+    label.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (save: boolean) => {
+      if (done) return;
+      done = true;
+      if (save && input.value.trim()) sess.setTitleFrom(input.value, "manual");
+      this.rebuildHeader();
+    };
+    input.onkeydown = (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commit(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        commit(false);
+      }
+    };
+    input.onblur = () => commit(true);
   }
 
   // --- Node / paths -------------------------------------------------------
@@ -3405,7 +3712,7 @@ class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Skill")
       .setDesc(
-        "Default Claude Code skill invoked as /<name> when a new session starts (after the startup commands). Skills live in ~/.claude/skills — add your own there, or pick one per-session from the panel header."
+        "Default Claude Code skill invoked as /<name> when a new session starts (after the startup commands). Skills live in the vault's .claude/skills — add your own there, or pick one per-session from the panel header."
       )
       .addDropdown((d) => {
         d.addOption("", "(none)");
