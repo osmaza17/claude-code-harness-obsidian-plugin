@@ -131,6 +131,19 @@ llama dos veces por sesión (xterm no lo soporta).
      rejilla alineada (box-drawing, cursor).
   El fit inicial es una cascada (rAF x2, 60ms, 240ms, `document.fonts.ready`),
   toda deduplicada por `fitNow()`.
+  4. **Scroll congelado tras cambiar de pestaña (`resyncAfterReattach`)**. Solo la
+     sesión activa está montada; al cambiar de pestaña `setActive` hace
+     `detachHost()` (saca el host del DOM) + `attachInto()` (lo re-mete). Como el
+     panel NO cambia de tamaño, `fitNow()`/`fit.fit()` son **no-op** y xterm nunca
+     recalcula la **altura scrollable de su viewport** → la rueda/scrollbar se
+     quedan **congeladas** (no subes ni bajas) hasta que la siguiente escritura del
+     pty fuerza un render; pulsar una tecla saltaba al fondo (scroll-on-input de
+     xterm), que parecía la única forma de "desbloquearlo". Fix: `attachInto`
+     detecta el re-montaje (`reattach = this.opened`) y llama `resyncAfterReattach()`
+     (en el rAF y a 120ms), que fuerza el recálculo con un **round-trip de resize
+     `rows-1 → rows` sobre xterm SOLO** (nunca manda `{t:"resize"}` al pty, así que
+     Claude no repinta su banner; el tamaño intermedio no llega a pintarse porque
+     ambos resizes corren en el mismo frame) + `refresh()`.
 - node-pty 1.1.0 es **N-API**: el prebuilt de `prebuilds/win32-x64/*.node` carga
   sin recompilar. No usar electron-rebuild.
 - xterm + addon-fit **sí** se empaquetan en `main.js` (son JS puro).

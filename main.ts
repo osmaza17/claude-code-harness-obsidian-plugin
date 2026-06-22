@@ -718,6 +718,9 @@ class Session {
   /** Mount this session's terminal host into a container (the panel body). */
   attachInto(parent: HTMLElement) {
     if (!this.host || !this.term) return;
+    // `opened` already true => the host was detached and is now coming back
+    // (a tab switch), so the terminal needs a scroll-area/renderer resync.
+    const reattach = this.opened;
     parent.appendChild(this.host);
     if (!this.opened) {
       this.fit = new FitAddon();
@@ -750,11 +753,13 @@ class Session {
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         this.scheduleFit();
+        if (reattach) this.resyncAfterReattach();
         this.term?.focus();
       })
     );
     window.setTimeout(() => this.scheduleFit(), 120);
     window.setTimeout(() => this.scheduleFit(), 400);
+    if (reattach) window.setTimeout(() => this.resyncAfterReattach(), 120);
     document.fonts?.ready?.then(() => this.scheduleFit()).catch(() => {
       /* noop */
     });
@@ -768,6 +773,32 @@ class Session {
       this.rafFit = null;
     }
     this.host?.remove();
+  }
+
+  /** Re-sync xterm's scroll area + renderer after the host was detached and
+   *  reattached (tab switch). Without this the mouse wheel / scrollbar can stay
+   *  frozen — you can't scroll up or down — until the next pty write forces a
+   *  render; pressing a key then jumps to the bottom (xterm's scroll-on-input),
+   *  which is what made it feel like the only way to "unstick" it.
+   *
+   *  Why a plain fit()/refresh() isn't enough: on a tab switch the panel size is
+   *  unchanged, so fit() is a no-op and never tells xterm to recompute its
+   *  viewport's scrollable height. We force that recompute with a rows -1 -> rows
+   *  resize round-trip on xterm ONLY (we never send {t:"resize"} to the pty, so
+   *  Claude doesn't reprint its banner); the intermediate size never paints
+   *  because both resizes run in the same frame. */
+  resyncAfterReattach() {
+    if (!this.term || !this.host?.isConnected) return;
+    try {
+      const { cols, rows } = this.term;
+      if (cols >= 2 && rows >= 3) {
+        this.term.resize(cols, rows - 1);
+        this.term.resize(cols, rows);
+      }
+      this.term.refresh(0, Math.max(0, this.term.rows - 1));
+    } catch {
+      /* not laid out yet */
+    }
   }
 
   /** Apply a new font size to this terminal and resize the pty (the persistence
