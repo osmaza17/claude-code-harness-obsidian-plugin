@@ -31,6 +31,9 @@ interface HarnessSettings {
   // binary ignores ELECTRON_RUN_AS_NODE), so we fork the system Node. Empty =
   // auto-detect.
   nodePath: string;
+  // Path to a python.exe used to launch the bundled Token Dashboard. Empty =
+  // auto-detect (settings -> known locations -> `where python` / `where py`).
+  pythonPath: string;
   // Last fitted grid size. We spawn claude at this size so the first fit when
   // the panel opens doesn't change it (a resize makes claude repaint and stack
   // its banner). Persisted across sessions. Shared by all instances.
@@ -92,12 +95,14 @@ interface HarnessSettings {
   btnSkillsFolder: boolean;
   btnRemote: boolean;
   btnAutoSwitch: boolean;
+  btnTokenDashboard: boolean;
   btnZoom: boolean;
 }
 
 const DEFAULT_SETTINGS: HarnessSettings = {
   command: "claude",
   nodePath: "",
+  pythonPath: "",
   cols: 100,
   rows: 30,
   fontSize: 14,
@@ -124,6 +129,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   btnSkillsFolder: true,
   btnRemote: true,
   btnAutoSwitch: true,
+  btnTokenDashboard: true,
   btnZoom: true,
 };
 
@@ -1378,6 +1384,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
   private remoteBtn: HTMLElement | null = null;
   private tempImages: string[] = []; // temp PNGs from image paste, cleaned on unload
+  // Bundled Token Dashboard server process (null when not running).
+  tokenDashboardChild: any = null;
 
   // --- Global account / auto-switch / usage state (shared by all sessions,
   // because every claude process reads the same ~/.claude/.credentials.json). ---
@@ -1474,6 +1482,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       callback: () => this.diagnoseAutoSwitch(),
     });
 
+    this.addCommand({
+      id: "open-token-dashboard",
+      name: "Open Token Dashboard",
+      callback: () => void this.launchTokenDashboard(),
+    });
+
     // Right-click a file/folder in the explorer -> "Send to Claude" (@-mention).
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file: TAbstractFile) => {
@@ -1531,6 +1545,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.fontLink?.remove();
     this.fontLink = null;
     this.cleanupTempImages();
+    if (this.tokenDashboardChild) {
+      try {
+        this.tokenDashboardChild.kill();
+      } catch {
+        /* best-effort */
+      }
+      this.tokenDashboardChild = null;
+    }
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
 
@@ -3302,6 +3324,19 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       this.updateAutoSwitchBtn();
     }
 
+    // Token Dashboard: launch the bundled local usage dashboard and open it in
+    // the default browser (global; equivalent to the old "Lanzar Token Dashboard.bat").
+    if (s.btnTokenDashboard) {
+      const tdBtn = bar.createEl("button", { cls: "cch-btn" });
+      setIcon(tdBtn, "bar-chart-3");
+      tdBtn.setAttr("aria-label", "Token Dashboard");
+      tdBtn.title = "Open Token Dashboard (token usage)";
+      tdBtn.onclick = (e) => {
+        e.preventDefault();
+        void this.launchTokenDashboard();
+      };
+    }
+
     if (s.btnZoom) {
       iconBtn("minus", "Zoom out (Ctrl -)", () => this.zoomBy(-1));
       const zl = bar.createEl("button", {
@@ -3463,6 +3498,191 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       "plugins",
       "claude-code-harness"
     );
+  }
+
+  /**
+   * Resolve a python interpreter to run the bundled Token Dashboard. Modeled on
+   * resolveNodePath(): manual setting -> known install locations -> `where
+   * python` / `where py` (Windows launcher) -> bare command on PATH.
+   */
+  resolvePythonPath(): string {
+    const isWin = process.platform === "win32";
+    let fs: any;
+    try {
+      fs = nodeRequire("fs");
+    } catch {
+      return isWin ? "python" : "python3";
+    }
+    const set = this.settings.pythonPath?.trim();
+    if (set && fs.existsSync(set)) return set;
+
+    const expand = (p: string) =>
+      p.replace(/%([^%]+)%/g, (_, v) => (process.env as any)[v] || "");
+
+    if (isWin) {
+      const bases = [
+        expand("%LOCALAPPDATA%\\Programs\\Python"),
+        "C:\\Program Files\\Python",
+        "C:\\",
+      ];
+      for (const base of bases) {
+        try {
+          if (!base || !fs.existsSync(base)) continue;
+          for (const name of fs.readdirSync(base)) {
+            if (!/^Python3?\d*/i.test(name)) continue;
+            const exe = path.join(base, name, "python.exe");
+            if (fs.existsSync(exe)) return exe;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    } else {
+      for (const c of ["/usr/local/bin/python3", "/usr/bin/python3", "/opt/homebrew/bin/python3"]) {
+        try {
+          if (fs.existsSync(c)) return c;
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    try {
+      const cp = nodeRequire("child_process");
+      const cmds = isWin ? ["where python", "where py"] : ["command -v python3", "command -v python"];
+      for (const cmd of cmds) {
+        try {
+          const found = cp
+            .execSync(cmd, { encoding: "utf8" })
+            .split(/\r?\n/)[0]
+            .trim();
+          if (found && fs.existsSync(found)) return found;
+          // `where py` returns the launcher path; if found but odd, still usable.
+          if (found && /\bpy(\.exe)?$/i.test(found)) return found;
+        } catch {
+          /* try next */
+        }
+      }
+    } catch {
+      /* not found via PATH */
+    }
+    return isWin ? "python" : "python3";
+  }
+
+  /**
+   * Start the bundled Token Dashboard (Python stdlib HTTP server on
+   * 127.0.0.1:8080) and open it in the default browser. Equivalent to the old
+   * "Lanzar Token Dashboard.bat". Reuses an already-running server if present.
+   */
+  async launchTokenDashboard() {
+    const url = "http://127.0.0.1:8080/";
+    const openBrowser = () => {
+      try {
+        nodeRequire("electron")?.shell?.openExternal(url);
+      } catch {
+        /* best-effort */
+      }
+    };
+
+    // Server already running from a previous click — just open a tab.
+    if (this.tokenDashboardChild && this.tokenDashboardChild.exitCode === null) {
+      openBrowser();
+      return;
+    }
+
+    let cp: any;
+    try {
+      cp = nodeRequire("child_process");
+    } catch (e: any) {
+      new Notice("Token Dashboard: failed to load child_process: " + (e?.message ?? e));
+      return;
+    }
+
+    const cwd = path.join(this.pluginDir(), "token-dashboard");
+    const python = this.resolvePythonPath();
+
+    let child: any;
+    try {
+      // -u keeps Python's stdout unbuffered so we see the "listening" line
+      // promptly (otherwise it's buffered when piped and the browser only
+      // opens via the slower HTTP-poll fallback).
+      child = cp.spawn(python, ["-u", "cli.py", "dashboard", "--no-open"], {
+        cwd,
+        env: process.env,
+        detached: true,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e: any) {
+      new Notice(
+        "Token Dashboard: could not start Python (" +
+          python +
+          "). Install Python or set its path in settings.\n" +
+          (e?.message ?? e)
+      );
+      return;
+    }
+
+    this.tokenDashboardChild = child;
+    new Notice("Token Dashboard: starting… (the first run scans sessions, ~1 min)");
+
+    let opened = false;
+    const openOnce = () => {
+      if (opened) return;
+      opened = true;
+      openBrowser();
+    };
+
+    child.on("error", (e: any) => {
+      if (e?.code === "ENOENT") {
+        new Notice(
+          "Token Dashboard: Python not found (" +
+            python +
+            "). Install Python or set its path in plugin settings."
+        );
+      } else {
+        new Notice("Token Dashboard error: " + (e?.message ?? e));
+      }
+      this.tokenDashboardChild = null;
+    });
+
+    child.on("exit", () => {
+      this.tokenDashboardChild = null;
+    });
+
+    // Open the browser as soon as the server reports it is listening.
+    child.stdout?.setEncoding?.("utf8");
+    child.stdout?.on("data", (d: string) => {
+      if (/listening on/i.test(String(d))) openOnce();
+    });
+
+    // Surface fatal startup errors (e.g. missing module) to the user.
+    let errBuf = "";
+    child.stderr?.setEncoding?.("utf8");
+    child.stderr?.on("data", (d: string) => {
+      errBuf = (errBuf + String(d)).slice(-2000);
+    });
+    child.on("exit", (code: number) => {
+      if (!opened && code && code !== 0) {
+        new Notice(
+          "Token Dashboard exited (code " + code + ").\n" + (errBuf.trim() || "")
+        );
+      }
+    });
+
+    // Fallback: poll the port for up to ~90s in case stdout is buffered.
+    const http = nodeRequire("http");
+    const started = Date.now();
+    const poll = () => {
+      if (opened || Date.now() - started > 90000) return;
+      const req = http.get(url, (res: any) => {
+        res.destroy?.();
+        openOnce();
+      });
+      req.on("error", () => setTimeout(poll, 1500));
+      req.setTimeout?.(2000, () => req.destroy());
+    };
+    setTimeout(poll, 2000);
   }
 
   /** Terminal theme derived from the active Obsidian theme. */
@@ -4030,6 +4250,7 @@ class HarnessSettingTab extends PluginSettingTab {
         | "btnSkill"
         | "btnRemote"
         | "btnAutoSwitch"
+        | "btnTokenDashboard"
         | "btnZoom"
     ) =>
       new Setting(containerEl).setName(name).addToggle((t) =>
@@ -4045,6 +4266,7 @@ class HarnessSettingTab extends PluginSettingTab {
     buttonToggle("Skill selector", "btnSkill");
     buttonToggle("Remote control", "btnRemote");
     buttonToggle("Auto-switch toggle", "btnAutoSwitch");
+    buttonToggle("Token Dashboard", "btnTokenDashboard");
     buttonToggle("Zoom controls", "btnZoom");
 
     new Setting(containerEl)
@@ -4145,6 +4367,21 @@ class HarnessSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.nodePath)
           .onChange(async (value) => {
             this.plugin.settings.nodePath = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Python path")
+      .setDesc(
+        "Optional. Full path to python.exe used by the Token Dashboard button. Leave empty to auto-detect (PATH / py launcher)."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe")
+          .setValue(this.plugin.settings.pythonPath)
+          .onChange(async (value) => {
+            this.plugin.settings.pythonPath = value.trim();
             await this.plugin.saveSettings();
           })
       );

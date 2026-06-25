@@ -100,6 +100,14 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   gastar sus tokens sin querer. También puedes deshabilitarlas en ajustes ("Claude
   accounts", botón 🔁/🚫 por cuenta); ahí el bloqueo solo afecta al cambio
   automático.
+- **Token Dashboard**: botón en la cabecera (icono 📊) que abre un **panel local
+  de consumo de tokens** en el navegador (`http://127.0.0.1:8080`). Arranca un
+  pequeño servidor Python (incluido en `token-dashboard/`, solo stdlib) que escanea
+  tus sesiones de `~/.claude/projects` y muestra totales, prompts más caras,
+  sesiones, proyectos, skills y consejos. La primera vez tarda ~1 min escaneando;
+  luego el botón reusa el servidor ya arrancado. Requiere **Python** en el sistema
+  (autodetectado; ruta configurable en ajustes). El proceso se cierra al desactivar
+  el plugin. (También disponible como comando "Open Token Dashboard".)
 - **Aviso al terminar**: notifica (Obsidian Notice) cuando el terminal suena la
   campana, que Claude tiende a sonar al acabar una tarea larga (configurable).
 - **Cabecera configurable**: cada botón de la cabecera se puede ocultar desde
@@ -118,6 +126,8 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - Obsidian de escritorio (Windows / macOS / Linux).
 - **Node.js** instalado en el sistema (configurable en ajustes: "Node.js path").
 - El binario **`claude`** (Claude Code CLI) accesible en el `PATH`.
+- **Python** instalado en el sistema (opcional; solo para el botón **Token
+  Dashboard**; configurable en ajustes: "Python path").
 
 ## Instalación (manual)
 
@@ -144,10 +154,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
 | Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, auto-switch al superar un % de uso, y **bloquear cuentas** (🔁/🚫) para que el auto-switch no las elija (p. ej. cuentas de amigos). |
-| Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, zoom). |
+| Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, token dashboard, zoom). |
 | Default browser | Navegador para el control remoto cuando la cuenta activa no está mapeada. |
 | Browser per account | Correlación correo de cuenta → navegador (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada). |
 | Node.js path | Ruta a `node.exe` real (autodetectada si se deja vacía). |
+| Python path | Ruta a `python.exe` para el botón Token Dashboard (autodetectada si se deja vacía). |
 
 ## Cómo funciona (resumen)
 

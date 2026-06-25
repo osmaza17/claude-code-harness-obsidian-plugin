@@ -551,6 +551,18 @@ llama dos veces por sesión (xterm no lo soporta).
   F11 real para el Explorador; se maximiza la ventana exacta localizada por su ruta
   con `Shell.Application` + `ShowWindowAsync`/`SetForegroundWindow`). (No hay
   migración del antiguo sistema de "Initial Prompts": el campo viejo se ignora.)
+- **Token Dashboard** (botón `bar-chart-3` en la cabecera, a la derecha del de
+  auto-switch; toggle `btnTokenDashboard`; comando "Open Token Dashboard"):
+  sustituye al `.bat` "Lanzar Token Dashboard". `launchTokenDashboard()` hace
+  `spawn(python, ["-u","cli.py","dashboard","--no-open"], {cwd:<pluginDir>/token-dashboard,
+  detached, windowsHide})`, espera la línea `listening on` por stdout (o sondea
+  `http://127.0.0.1:8080/` hasta 90 s como respaldo) y abre la URL en el navegador
+  **por defecto** (`shell.openExternal`). Si ya hay server vivo
+  (`tokenDashboardChild.exitCode === null`) solo abre otra pestaña. `resolvePythonPath()`
+  (espejo de `resolveNodePath`): ajuste `pythonPath` → `%LOCALAPPDATA%\Programs\Python\*`
+  / `C:\Program Files\Python\*` → `where python`/`where py` → `python`. El proceso se
+  mata en `onunload`. El programa Python (stdlib, sin deps) vive en `token-dashboard/`
+  y escanea `~/.claude/projects` a una SQLite `~/.claude/token-dashboard.db`.
 - **Limpieza**: los PNG temporales del pegado se registran y se borran en
   `onunload`; al cargar se barren los `cch-paste-*.png` viejos (`sweepTempImages`).
 - Todos los atajos hacen `stopPropagation` para que Obsidian no se los quede.
@@ -578,5 +590,8 @@ main.js              artefacto compilado (cargado por Obsidian)
 pty-host.js          proceso ayudante: corre node-pty fuera del renderer (NO se
                      empaqueta; se forkea con ELECTRON_RUN_AS_NODE)
 styles.css           xterm.css + layout del panel
+token-dashboard/     programa Python (stdlib) del Token Dashboard, copiado de
+                     ~/.token-dashboard (cli.py + token_dashboard/ + web/ +
+                     pricing.json). Lo lanza el botón de la cabecera.
 node_modules/        incluye node-pty con su prebuild win32-x64
 ```
