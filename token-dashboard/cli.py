@@ -1,4 +1,7 @@
-"""Token Dashboard CLI entrypoint."""
+"""Token Dashboard CLI entrypoint.
+
+Token Dashboard — developed by osmaza17.
+"""
 from __future__ import annotations
 
 import argparse
