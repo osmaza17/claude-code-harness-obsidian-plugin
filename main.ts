@@ -139,6 +139,13 @@ const MAX_FONT = 40;
 // Default pattern to scrape the 5h usage % from Claude's status line
 // ("5h:[▓▓░] 23% (3 31m)"). Overridable via settings.autoSwitchUsageRegex.
 const DEFAULT_USAGE_RE = "5h:[^\\n]{0,40}?(\\d{1,3})\\s*%";
+// Hard ceiling: the active account must never go past this 5h usage % while there
+// is somewhere with room to go. At ≥90% the plugin always tries to switch to the
+// least-used eligible account that is still BELOW 90% (keeping a 10% margin),
+// OVERRIDING the configured mode/threshold. The single exception is when every
+// other account is already ≥90% (or none is eligible): then it stays on the
+// current account and runs it to the limit, since switching would buy no margin.
+const SWITCH_CEILING_PCT = 90;
 // Best-effort patterns (the exact text Claude prints may change — tune if needed).
 // LIMIT_RE: explicit "limit reached" message → fallback trigger to switch.
 const LIMIT_RE =
@@ -2455,6 +2462,66 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return best; // may be null
   }
 
+  /** Least-used eligible account (not the current one) whose FRESH 5h usage is
+   *  strictly below `maxPct`. Returns null when none qualifies — no fresh
+   *  reading, all blocked, or every candidate is already at/over `maxPct` (so
+   *  switching there would not buy any margin). This is what enforces the
+   *  "always jump to a less-spent account, keep a 10% margin" rule. */
+  private leastUsedBelow(maxPct: number): { email: string; pct: number } | null {
+    const cur = this.currentAccountEmail();
+    let best: string | null = null;
+    let bestPct = Infinity;
+    for (const a of this.listSavedAccounts()) {
+      const lower = a.email.trim().toLowerCase();
+      if (lower === cur) continue;
+      if (!this.isAccountEligible(a.email)) continue;
+      const u = this.accountUsage.get(lower);
+      if (!u || u.error === "auth" || u.pct5h == null) continue;
+      if (Date.now() - u.checkedAt >= USAGE_FRESH_MS) continue;
+      if (u.pct5h >= maxPct) continue; // no room → keep the 10% margin elsewhere
+      if (u.pct5h < bestPct) {
+        bestPct = u.pct5h;
+        best = a.email;
+      }
+    }
+    return best ? { email: best, pct: bestPct } : null;
+  }
+
+  /** True if at least one eligible non-current account has a FRESH 5h reading
+   *  (whatever its value). Lets us tell "every other account is maxed out" apart
+   *  from "we simply have no usage data yet" when deciding whether to stay. */
+  private haveFreshUsageData(): boolean {
+    const cur = this.currentAccountEmail();
+    for (const a of this.listSavedAccounts()) {
+      const lower = a.email.trim().toLowerCase();
+      if (lower === cur) continue;
+      if (!this.isAccountEligible(a.email)) continue;
+      const u = this.accountUsage.get(lower);
+      if (u && !u.error && u.pct5h != null && Date.now() - u.checkedAt < USAGE_FRESH_MS) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** One-shot notice when an auto-switch is wanted but there is genuinely no
+   *  destination (only one account saved, or every other one is blocked). NOT
+   *  shown when the reason is "everyone is maxed" — that is a normal stay. */
+  private maybeWarnNoAccounts() {
+    if (this.warnedNoAccounts) return;
+    this.warnedNoAccounts = true;
+    const eligible = this.listSavedAccounts().filter(
+      (a) =>
+        a.email.trim().toLowerCase() !== this.currentAccountEmail() &&
+        this.isAccountEligible(a.email)
+    ).length;
+    new Notice(
+      eligible === 0 && this.listSavedAccounts().length >= 2
+        ? "Auto-switch: every other account is blocked — allow one in the 👤 menu."
+        : "Auto-switch: save at least 2 accounts (log in with /login)."
+    );
+  }
+
   // --- Live usage probe (API rate-limit headers) --------------------------
 
   /** OAuth access token for an account: live creds for the active account,
@@ -2944,6 +3011,42 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           ? "no usable % — status bar shows another account and no fresh API reading"
           : "no usage % available yet (status bar not scraped and no fresh API reading)";
       }
+      // Destination that keeps the 10% margin: least-used eligible account still
+      // BELOW the ceiling. Falls back to plain round-robin ONLY when we have no
+      // fresh usage data at all (can't compare) — if we DO have data but every
+      // other account is ≥90%, there is deliberately no target (we stay put).
+      const pickMargined = (): string | null => {
+        const t = this.leastUsedBelow(SWITCH_CEILING_PCT);
+        if (t) return t.email;
+        if (!this.haveFreshUsageData()) return this.pickNextAccount();
+        return null;
+      };
+      // Switch to the margined destination, or explain why we stay. `wantReason`
+      // is the human reason for the switch; `stayReason` describes staying.
+      const switchOrStay = (wantReason: string, stayReason: string): string => {
+        const next = pickMargined();
+        if (next) {
+          this.triggerSwitch(next, wantReason);
+          return `switching now — ${wantReason} → ${next}`;
+        }
+        // No destination: warn only if it's a real config problem (no/blocked
+        // accounts), stay quietly if it's just "everyone is maxed".
+        if (this.pickNextAccount() == null) this.maybeWarnNoAccounts();
+        return stayReason;
+      };
+
+      // --- Hard 90% ceiling — overrides the mode/threshold settings. ----------
+      // At ≥90% we must move to preserve the 10% margin, but ONLY toward an
+      // account that still has room (<90%). If every other account is ≥90% (or
+      // none is eligible) we stay and run THIS account to the limit.
+      if (pct >= SWITCH_CEILING_PCT) {
+        return switchOrStay(
+          `at ${pct}% (≥${SWITCH_CEILING_PCT}% cap)`,
+          `at ${pct}% (${src}) — every other account is ≥${SWITCH_CEILING_PCT}% (or none eligible); staying to max it out`
+        );
+      }
+
+      // --- Below 90% — the configured mode/threshold drives the timing. -------
       if (this.settings.autoSwitchMode === "rotate") {
         const delta = this.settings.autoSwitchDelta || 10;
         if (this.rotateBaselinePct === null) {
@@ -2958,13 +3061,17 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         if (pct < target) {
           return `at ${pct}% (${src}); need ${target}% to rotate (baseline ${this.rotateBaselinePct} +${delta})`;
         }
-        this.requestSwitch(`at ${pct}%`);
-        return `switching now — rose to ${pct}% ≥ ${target}% (baseline ${this.rotateBaselinePct} +${delta})`;
+        return switchOrStay(
+          `at ${pct}%`,
+          `at ${pct}% — would rotate but no account has margin (<${SWITCH_CEILING_PCT}%); staying`
+        );
       }
       const th = this.settings.autoSwitchThreshold;
       if (pct < th) return `at ${pct}% (${src}); threshold is ${th}%`;
-      this.requestSwitch(`at ${pct}%`);
-      return `switching now — ${pct}% ≥ threshold ${th}%`;
+      return switchOrStay(
+        `at ${pct}%`,
+        `at ${pct}% ≥ threshold ${th}% — but no account has margin (<${SWITCH_CEILING_PCT}%); staying`
+      );
     };
 
     const reason = decide();
@@ -3013,22 +3120,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     console.log("[cch auto-switch] diagnose", d);
   }
 
-  /** Pick the next account and switch, or warn once if there aren't ≥2 saved. */
+  /** Pick the next account and switch, or warn once if there aren't ≥2 saved.
+   *  Used by the emergency paths (limit-reached / auth-failure) that must move to
+   *  any working account regardless of the 10% margin. */
   private requestSwitch(reason: string) {
     const next = this.pickNextAccount();
     if (!next) {
-      if (!this.warnedNoAccounts) {
-        this.warnedNoAccounts = true;
-        const eligible = this.listSavedAccounts().filter(
-          (a) => a.email.trim().toLowerCase() !== this.currentAccountEmail() &&
-            this.isAccountEligible(a.email)
-        ).length;
-        new Notice(
-          eligible === 0 && this.listSavedAccounts().length >= 2
-            ? "Auto-switch: every other account is blocked — allow one in the 👤 menu."
-            : "Auto-switch: save at least 2 accounts (log in with /login)."
-        );
-      }
+      this.maybeWarnNoAccounts();
       return;
     }
     this.triggerSwitch(next, reason);

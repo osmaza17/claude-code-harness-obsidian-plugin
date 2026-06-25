@@ -277,15 +277,30 @@ llama dos veces por sesión (xterm no lo soporta).
   activa: **primero el scraping** de la barra de estado
   (`/5h:[^\n]{0,40}?(\d{1,3})\s*%/`, con la guarda de anclaje) y, si no hay lectura
   raspable, **fallback a la API** (`usagePct()`, ver "Live usage" abajo), para que
-  el cambio de cuenta siga funcionando aunque algún día se oculte la barra. Dos
-  modos (`settings.autoSwitchMode`):
-  **threshold** (cambia al cruzar `autoSwitchThreshold`, def. 90) y **rotate**
-  (cambia cada vez que el % sube `autoSwitchDelta` puntos, def. 10, desde el
-  baseline `rotateBaselinePct` capturado al activarse la cuenta; con low-water mark
-  para resets de la ventana de 5h → reparte el gasto rotando). Elige destino con
-  `pickNextAccount()` = **cuenta menos gastada** (menor % 5h sondeado, saltando las
-  de token muerto **y las bloqueadas**; fallback a round-robin por email si no hay
-  datos frescos).
+  el cambio de cuenta siga funcionando aunque algún día se oculte la barra.
+  - **Techo duro del 90 % (`SWITCH_CEILING_PCT`, siempre 10 % de margen)**: regla
+    **absoluta** que **prevalece sobre los modos/threshold**. En cuanto la cuenta
+    activa llega a **≥90 %**, el plugin intenta saltar a la **cuenta elegible menos
+    gastada que siga por debajo del 90 %**. **Única excepción**: si **todas** las
+    demás cuentas están **≥90 %** (o ninguna es elegible), **se queda** en la cuenta
+    actual y la apura hasta el límite —saltar no ganaría margen—. Implementado en
+    `decide()` con `leastUsedBelow(90)` (destino con hueco) + `haveFreshUsageData()`
+    (distingue "todas maxeadas" de "aún sin datos"): si no hay **ningún** dato
+    fresco de uso cae a `pickNextAccount()` (round-robin) para no quedarse clavado
+    en setups sin sondeo; si hay datos pero nadie baja del 90 %, se queda a propósito.
+  - **Por debajo del 90 %** mandan los **modos** (`settings.autoSwitchMode`):
+    **threshold** (intenta cambiar al cruzar `autoSwitchThreshold`, def. 90 → con el
+    techo del 90 % coincide; pon un valor menor, p. ej. 70, para cambiar antes) y
+    **rotate** (cada vez que el % sube `autoSwitchDelta` puntos, def. 10, desde el
+    baseline `rotateBaselinePct` capturado al activarse la cuenta; con low-water mark
+    para resets de la ventana de 5h → reparte el gasto rotando). En **ambos** modos
+    el salto pasa por el mismo guard de margen (`leastUsedBelow(90)`): nunca aterriza
+    en una cuenta ≥90 %, así que un threshold puesto por encima de 90 queda **capado
+    de hecho al 90 %**. Si el modo pide cambiar pero ninguna cuenta tiene margen, se
+    queda (diagnóstico en `lastDiagInfo`/"Diagnose auto-switch").
+  Destino base = `pickNextAccount()` = **cuenta menos gastada** (menor % 5h sondeado,
+  saltando las de token muerto **y las bloqueadas**; fallback a round-robin por email
+  si no hay datos frescos); el techo/guard del 90 % lo restringe a las que tienen hueco.
   Hot-swap sin reinicio → no corta el turno (la cuenta nueva aplica a la siguiente
   petición). Cooldown de 10 s evita bucles y deja que la barra se asiente.
   - **Cuentas bloqueadas para auto-switch** (`settings.autoSwitchExcluded`, lista de
