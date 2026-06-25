@@ -254,6 +254,66 @@ const BROWSERS: Record<
     alias: "opera",
     proc: "opera",
   },
+  zen: {
+    label: "Zen",
+    exes: [
+      "%PROGRAMFILES%\\Zen Browser\\zen.exe",
+      "%LOCALAPPDATA%\\Programs\\Zen Browser\\zen.exe",
+      "%LOCALAPPDATA%\\zen\\zen.exe",
+    ],
+    alias: "zen",
+    proc: "zen",
+  },
+  // Helium (by imput) is Chromium-based: its launcher keeps the chrome.exe name,
+  // living in Application\ (the versioned subfolder only holds helper exes). The
+  // running process is therefore chrome.exe, so proc collides with Chrome's.
+  helium: {
+    label: "Helium",
+    exes: [
+      "%LOCALAPPDATA%\\imput\\Helium\\Application\\chrome.exe",
+      "%PROGRAMFILES%\\imput\\Helium\\Application\\chrome.exe",
+    ],
+    alias: "helium",
+    proc: "chrome",
+  },
+  vivaldi: {
+    label: "Vivaldi",
+    exes: [
+      "%LOCALAPPDATA%\\Vivaldi\\Application\\vivaldi.exe",
+      "%PROGRAMFILES%\\Vivaldi\\Application\\vivaldi.exe",
+    ],
+    alias: "vivaldi",
+    proc: "vivaldi",
+  },
+  waterfox: {
+    label: "Waterfox",
+    exes: [
+      "%PROGRAMFILES%\\Waterfox\\waterfox.exe",
+      "%PROGRAMFILES(X86)%\\Waterfox\\waterfox.exe",
+    ],
+    alias: "waterfox",
+    proc: "waterfox",
+  },
+  floorp: {
+    label: "Floorp",
+    exes: [
+      "%PROGRAMFILES%\\Ablaze Floorp\\floorp.exe",
+      "%PROGRAMFILES%\\Floorp\\floorp.exe",
+    ],
+    alias: "floorp",
+    proc: "floorp",
+  },
+  // Mullvad Browser is Tor-Browser-based (Firefox/Gecko). Per-user install puts the
+  // launcher in %LOCALAPPDATA%\Mullvad\MullvadBrowser\Release\mullvadbrowser.exe.
+  mullvad: {
+    label: "Mullvad Browser",
+    exes: [
+      "%LOCALAPPDATA%\\Mullvad\\MullvadBrowser\\Release\\mullvadbrowser.exe",
+      "%PROGRAMFILES%\\Mullvad Browser\\mullvadbrowser.exe",
+    ],
+    alias: "mullvadbrowser",
+    proc: "mullvadbrowser",
+  },
 };
 
 // 16 ANSI colours for dark vs light surfaces (from the reference harness).
@@ -4001,6 +4061,12 @@ class HarnessSettingTab extends PluginSettingTab {
       brave: "Brave",
       opera: "Opera",
       operagx: "Opera GX",
+      zen: "Zen",
+      helium: "Helium",
+      vivaldi: "Vivaldi",
+      waterfox: "Waterfox",
+      floorp: "Floorp",
+      mullvad: "Mullvad Browser",
     };
 
     new Setting(containerEl)

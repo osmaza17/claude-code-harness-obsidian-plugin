@@ -264,6 +264,13 @@
   align-items: center;
   gap: 4px;
   max-width: 180px;
+  /* Compress instead of scrolling, and keep EVERY tab the same width at all
+     times: flex:1 1 0 (zero basis + equal grow/shrink) splits the strip
+     evenly across all tabs. They shrink together down to a floor wide enough
+     to ALWAYS show the × close button (left padding + dot + gap + close +
+     right padding ≈ 50px; the label ellipsises away first), and grow together
+     up to max-width. Only past the floor does .cch-tabs scroll. */
+  min-width: 52px;
   height: 28px;
   padding: 0 6px 0 10px;
   border: 1px solid var(--background-modifier-border);
@@ -273,7 +280,7 @@
   color: var(--text-muted);
   cursor: pointer;
   white-space: nowrap;
-  flex: 0 0 auto;
+  flex: 1 1 0;
 }
 .claude-code-harness .cch-tab:hover { color: var(--text-normal); }
 .claude-code-harness .cch-tab-active {
@@ -285,6 +292,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 12px;
+  /* Allow the label to shrink to zero inside a flex tab so the dot and × stay
+     visible when tabs are compressed. */
+  min-width: 0;
+  flex: 0 1 auto;
 }
 /* Interactive reorder (Chrome-style): the dragged tab is lifted and follows
    the pointer while siblings slide out of the way (animated inline in JS). */

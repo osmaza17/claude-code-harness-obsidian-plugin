@@ -3,6 +3,48 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-06-25
+
+- **Pestañas: ancho uniforme y compresión en vez de scroll lateral.** Cuando hay
+  muchas instancias, la barra de pestañas ya no muestra scroll horizontal: las
+  pestañas se **comprimen** y todas mantienen **el mismo ancho** entre sí.
+  - `styles.css`: `.cch-tab` pasa de `flex: 0 0 auto` a `flex: 1 1 0` (basis cero +
+    grow/shrink iguales → reparte el strip a partes iguales). `min-width: 52px` como
+    piso, suficiente para mostrar **siempre** el punto de heartbeat + el botón ×
+    (el dot y `.cch-tab-close` son `flex: 0 0 auto`, no encogen). Solo si ni a ese
+    piso caben todas, `.cch-tabs` (`overflow-x: auto`) recurre al scroll.
+  - `.cch-tab-label` ahora `flex: 0 1 auto; min-width: 0` para que la etiqueta se
+    recorte (ellipsis) hasta cero antes de tocar el dot/×.
+  - El drag de reorden (`beginTabDrag`) no se tocó: mide anchos reales con
+    `getBoundingClientRect()`, así que opera sobre el ancho comprimido.
+
+## 2026-06-24
+
+- **Zen y Helium como navegadores nativos del `browserMap`.** Antes solo se
+  reconocían Chrome/Firefox/Edge/Brave/Opera/Opera GX de forma nativa; Zen y
+  Helium había que meterlos como `custom` con la ruta del `.exe`.
+  - `BROWSERS` (registro de rutas): añadidas las entradas `zen`
+    (`%PROGRAMFILES%\Zen Browser\zen.exe` + fallbacks de instalación por usuario,
+    `proc: "zen"`) y `helium`
+    (`%LOCALAPPDATA%\imput\Helium\Application\chrome.exe`, `proc: "chrome"`).
+  - `browserOptions` (desplegables de ajustes: "Default browser" y el mapeo por
+    cuenta): añadidas las opciones `Zen` y `Helium`.
+  - Notas: el ejecutable de Helium se llama `chrome.exe` (es Chromium) y vive en
+    `Application\`, no en la subcarpeta de versión (que solo tiene helpers); por eso
+    la entrada `custom` previa (que apuntaba a la carpeta de versión) no lanzaba nada.
+    Como su proceso es `chrome.exe`, `proc` colisiona con el de Chrome, así que
+    `focusFullscreen` podría enfocar una ventana de Chrome en vez de Helium
+    (best-effort, sin arreglo limpio porque el proceso es realmente chrome.exe).
+- **Vivaldi, Waterfox, Floorp y Mullvad Browser como navegadores nativos.**
+  Instalados en el equipo con winget (`Vivaldi.Vivaldi`, `Waterfox.Waterfox`,
+  `Ablaze.Floorp`, `MullvadVPN.MullvadBrowser`) y añadidos a `BROWSERS` +
+  `browserOptions` para tener más slots de cuenta (un navegador por cuenta).
+  - Rutas: Vivaldi `%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe`; Waterfox
+    `%PROGRAMFILES%\Waterfox\waterfox.exe`; Floorp `%PROGRAMFILES%\Ablaze Floorp\floorp.exe`;
+    Mullvad `%LOCALAPPDATA%\Mullvad\MullvadBrowser\Release\mullvadbrowser.exe`.
+  - CAVEAT Mullvad: está basado en Tor Browser; verificar que la sesión de Claude
+    persiste entre reinicios (las defaults anti-persistencia podrían borrar el login).
+
 ## 2026-06-19
 
 - **Keep-alive: la cuenta activa ya no se refresca desde el plugin (cierra la

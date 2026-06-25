@@ -179,6 +179,17 @@ llama dos veces por sesión (xterm no lo soporta).
      la pestaña → `setActive(i)`; `.cch-tab-active` marca la activa; `.cch-tab-exited`
      tacha la que salió). Al final, botón **+** (`.cch-tab-new`) → `openNewSessionMenu()`
      (crea sesión con skill por defecto / sin skill / con una skill de `listSkills()`).
+     - **Compresión + ancho uniforme (no scroll lateral por defecto)**: todas las
+       pestañas tienen **el mismo ancho** en todo momento y se **encogen** juntas
+       al abrir más (`.cch-tab` = `flex: 1 1 0`: basis cero + grow/shrink iguales,
+       reparte el strip a partes iguales; crecen juntas hasta `max-width:180px`) en
+       vez de aparecer un scroll horizontal. El piso es
+       `min-width:52px`, suficiente para mostrar **siempre** el punto + el × (la
+       etiqueta `.cch-tab-label` es `flex:0 1 auto; min-width:0` y se recorta con
+       ellipsis primero; el dot y `.cch-tab-close` son `flex:0 0 auto`, no encogen).
+       Solo si ni a ese piso caben todas, `.cch-tabs` (`overflow-x:auto`) hace
+       scroll. El drag de reorden sigue intacto: `beginTabDrag` mide los anchos
+       reales con `getBoundingClientRect()`, así que opera sobre el ancho comprimido.
      - **Reordenar (drag interactivo, estilo Chrome)**: NO usa HTML5 DnD (no anima
        los hermanos). Cada `.cch-tab` engancha `pointerdown` → `beginTabDrag(e, tabs, i)`:
        umbral de 4px para distinguir clic de arrastre (un clic sin mover llama
@@ -461,8 +472,11 @@ llama dos veces por sesión (xterm no lo soporta).
     al hacer `/login`). `openInBrowser` busca ese email en `settings.browserMap`
     (`{email, browser, path}[]`); si no hay match usa `settings.defaultBrowser`
     (por defecto `chrome`). `launchBrowser(browser, customPath, url)` lanza Chrome/
-    Firefox/Edge/Brave/Opera/Opera GX (rutas conocidas por `BROWSERS`, con
-    `%VARS%` expandidas; si no
+    Firefox/Edge/Brave/Opera/Opera GX/Zen/Helium/Vivaldi/Waterfox/Floorp/Mullvad
+    (rutas conocidas por `BROWSERS`,
+    con `%VARS%` expandidas; OJO: Helium es Chromium y su exe se llama `chrome.exe`,
+    en `…\imput\Helium\Application\`, así que su `proc` colisiona con el de Chrome
+    en `focusFullscreen`; si no
     existe el `.exe`, `cmd /c start <alias>`), una ruta `custom`, o `default`
     (`shell.openExternal`); cualquier fallo cae a `shell.openExternal`. Devuelve un
     label para el `Notice`. La correlación email→navegador se edita en ajustes
