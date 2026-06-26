@@ -427,6 +427,51 @@ llama dos veces por sesión (xterm no lo soporta).
   (`handleDrop`: lee `app.dragManager.draggable` para arrastres internos,
   `dataTransfer.files` para archivos del SO, y un fallback de `text/plain` que
   resuelve `[[wikilinks]]` vía `metadataCache.getFirstLinkpathDest`).
+- **Autocompletado `[[` → referencia `@`** (suggester estilo Obsidian dentro del
+  terminal; ajuste `wikilinkPicker`, on por defecto): al escribir **`[[`** en el
+  input se abre un **desplegable flotante** (`.cch-wikilink-menu`, mismo patrón DOM
+  que `openAccountMenu`: `div` en `document.body`, `position:fixed`, anclado al
+  **cursor del terminal** y clampeado al viewport, cierre por click-fuera) con las
+  notas más parecidas a lo que vas escribiendo. Flechas mueven la selección,
+  Enter/Tab/click eligen, Escape cancela. Al elegir, lo tecleado (`[[consulta`) se
+  **sustituye por `@<ruta> `** (formato de `mention()`), NO por un `[[wikilink]]`.
+  - Estado y métodos viven en `Session` (`wlActive`/`wlQuery`/`wlBracketRun`/
+    `wlPopup`/`wlItems`/`wlSel`): `feedWikilink` (máquina de estados del trigger),
+    `openWikilinkPicker`/`closeWikilinkPicker`, `searchWikilink`, `queryNotes`,
+    `renderWikilinkResults`/`highlightWikilink`/`moveWikilinkSel`, `acceptWikilink`,
+    `positionWikilinkPopup`.
+  - **Fuente de sugerencias = el suggester NATIVO de Obsidian** (los MISMOS
+    resultados que escribir `[[` en una nota), NO OmniSearch: `queryNotes` usa
+    `metadataCache.getLinkSuggestions()` (todo archivo enlazable + sus alias, igual
+    que el popup `[[` del editor) y los ranquea con `prepareFuzzySearch(q)` (el mismo
+    matcher fuzzy de Obsidian, orden por score desc). Para el `@`-ref se usa la ruta
+    real del `TFile`; el texto mostrado es el alias / link path nativo. Con consulta
+    vacía muestra la lista nativa tal cual (como `[[` antes de teclear). Fallback a
+    `vault.getMarkdownFiles()` si la API interna `getLinkSuggestions` no existiera.
+    (Históricamente se probó OmniSearch, pero da resultados/orden distintos a `[[`.)
+  - **Insensible a acentos** (`stripDiacritics`, helper a nivel de módulo): el
+    `prepareFuzzySearch` nativo de Obsidian es **sensible a diacríticos**, así que
+    `queryNotes` normaliza (NFD → quita `\p{Diacritic}` → NFC) **tanto la consulta
+    como el texto del candidato** antes de casar — `[[energia` encuentra "Energía".
+    El nombre mostrado conserva sus tildes; solo el matching es sin acentos (imita
+    el comportamiento de OmniSearch). OJO: esto solo afecta a ESTE picker del
+    terminal; el `[[` nativo del editor y el Quick Switcher (Ctrl+O) de Obsidian
+    siguen siendo sensibles a acentos (limitación del núcleo, sin ajuste nativo).
+  - **Inline como Obsidian**: el `[[` y la consulta SÍ se reenvían a Claude (eco
+    inline). Al aceptar, `acceptWikilink` **borra con `\x7f` × (2 + wlQuery.length)**
+    y manda `@<ruta> `. El contador es exacto porque cada char tecleado pasa por
+    `feedWikilink` (que controla el reenvío y el `wlQuery`). LIMITACIÓN: emojis /
+    grafemas multi-celda en la consulta podrían desincronizar el conteo de
+    backspaces; las notas rara vez los llevan.
+  - **GOTCHA teclado internacional (CLAVE):** en el teclado español `[` llega por
+    la **rama AltGr** de `attachCustomKeyEventHandler` (`Ctrl+Alt`), que envía el
+    char y `return false` → **nunca pasa por `onData`**. Por eso `feedWikilink` se
+    llama desde **ambas** rutas: `onData` (`alreadySent=false`) y la rama AltGr
+    (`alreadySent=true`, no reenvía, solo actualiza estado). Las teclas de
+    navegación/aceptar/cancelar se capturan al principio del key handler (con
+    `wlActive`), las de texto caen a `onData`/`feedWikilink`.
+  - El popup es **puramente visual** (no roba foco; xterm mantiene el foco). Se
+    cierra en `detachHost`/`dispose`/`case "exit"` para no quedar huérfano.
 - **Referencias a notas clicables** (`computeNoteLinks` + `term.registerLinkProvider`):
   cada `Session` registra un link provider de xterm; en hover, `computeNoteLinks`
   (en el plugin) crea `ILink`s para: (1) `[[wikilinks]]` (independiente del color) y

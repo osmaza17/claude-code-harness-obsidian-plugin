@@ -40,6 +40,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   en el menú contextual del explorador (una o varias notas/carpetas), y
   **arrastrar y soltar** notas o imágenes sobre el terminal — todo inserta su
   `@<ruta>`.
+- **Autocompletado `[[` → referencia `@`**: al escribir `[[` en el input de Claude
+  aparece un **desplegable** anclado al cursor (estilo Obsidian) con las notas más
+  parecidas (mismas sugerencias que el `[[` de una nota, **ignorando acentos**).
+  Flechas para moverte, Enter/Tab/clic para elegir, Escape para cancelar; al elegir,
+  lo tecleado se sustituye por la referencia `@<ruta>` de Claude Code. Se puede
+  desactivar en ajustes ("[[ note suggester").
 - **Referencias a notas clicables**: las menciones a notas en la salida de Claude
   (el texto **coloreado** que coincide con el nombre de una nota `.md` del vault, y
   los `[[wikilinks]]`) se vuelven **enlaces**: pasa el ratón para subrayarlas y haz

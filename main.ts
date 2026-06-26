@@ -6,7 +6,9 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
+  prepareFuzzySearch,
   setIcon,
+  sortSearchResults,
   Setting,
   TAbstractFile,
   TFile,
@@ -21,6 +23,12 @@ import * as path from "path";
 // Electron exposes Node's require on the window in the renderer. We use it to
 // reach child_process without esbuild trying to bundle it.
 const nodeRequire: NodeRequire = (window as any).require;
+
+/** Remove diacritics (á→a, ñ→n) so the [[ note picker matches accent-insensitively
+ *  (Obsidian's prepareFuzzySearch is accent-sensitive by default). */
+function stripDiacritics(s: string): string {
+  return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").normalize("NFC");
+}
 
 export const VIEW_TYPE = "claude-code-harness-view";
 
@@ -60,6 +68,10 @@ interface HarnessSettings {
   // Turn coloured note references in Claude's output (and [[wikilinks]]) into
   // clickable links that open the matching .md note in the vault.
   linkifyNotes: boolean;
+  // Typing [[ in the terminal opens Obsidian's native note suggester anchored at
+  // the cursor (same candidates + fuzzy ranking as [[ in a note); picking one
+  // replaces [[query with an @<path> reference (Claude Code's file-ref syntax).
+  wikilinkPicker: boolean;
   // Remote control: which browser opens the session URL per Claude account. The
   // URL only works in the browser where that same account is logged in, so the
   // active account (read from ~/.claude.json) picks the browser. browser is one
@@ -112,6 +124,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   model: "opus",
   notifyOnBell: true,
   linkifyNotes: true,
+  wikilinkPicker: true,
   browserMap: [],
   defaultBrowser: "chrome",
   autoSwitch: false,
@@ -424,6 +437,21 @@ class Session {
   // DECISION state (cooldown, baseline, verify) is global, on the plugin.
   autoSwitchBuf = "";
 
+  // [[ note suggester (Obsidian-style). When you type [[ in the terminal we open
+  // a floating picker anchored at the cursor and capture the query you type;
+  // picking a note replaces "[[query" with an "@<path> " reference. The typed
+  // text (the two brackets + the query) IS forwarded to Claude so it echoes
+  // inline like Obsidian; on accept we erase it with backspaces (2 + query.length)
+  // and send the @path. wlBracketRun counts consecutive "[" to detect "[[".
+  private wlActive = false;
+  private wlQuery = "";
+  private wlBracketRun = 0;
+  private wlPopup: HTMLElement | null = null;
+  private wlCleanup: (() => void) | null = null;
+  private wlItems: { path: string; basename: string }[] = [];
+  private wlSel = 0;
+  private wlSearchSeq = 0; // discard stale async OmniSearch responses
+
   constructor(
     plugin: ClaudeCodeHarnessPlugin,
     opts?: { skill?: string; model?: string; args?: string; title?: string }
@@ -464,6 +492,11 @@ class Session {
     this.term.onData((d: string) => {
       this.lastKeyAt = Date.now();
       this.captureFirstPrompt(d);
+      // The [[ note suggester intercepts typed text: it forwards what should be
+      // echoed (the brackets + query) itself and returns true to mean "handled,
+      // don't forward again". Navigation/accept/cancel keys are caught earlier in
+      // the key handler and never reach onData.
+      if (this.feedWikilink(d, false)) return;
       this.send({ t: "input", d });
     });
 
@@ -592,6 +625,249 @@ class Session {
     this.term?.focus();
   }
 
+  // --- [[ note suggester ---------------------------------------------------
+  //
+  // Mirrors Obsidian's wikilink autocomplete inside the terminal: typing "[[" opens
+  // a floating picker anchored at the cursor with the SAME suggestions as [[ in a
+  // note (Obsidian's own getLinkSuggestions + prepareFuzzySearch — see queryNotes);
+  // picking a note replaces "[[query" with an "@<path> " reference (Claude's syntax).
+  //
+  // The typed text (the two "[" and the query) IS forwarded to Claude so it echoes
+  // inline like Obsidian. On accept we erase exactly what we forwarded with
+  // backspaces (2 + query.length) and send the @path. Because every forwarded char
+  // passes through here, that count stays exact even with mid-query backspaces.
+  // LIMITATION: a query containing emoji / multi-cell graphemes could desync the
+  // per-char backspace count vs Claude's per-grapheme delete; note names rarely
+  // contain those, so it's acceptable.
+
+  /** Ingest one typed char for the [[ suggester. Returns true when consumed (the
+   *  onData caller must then NOT forward it again). `alreadySent` = the caller
+   *  already wrote the char to the pty (the AltGr key-handler path), so we only
+   *  update state here and never re-forward. */
+  private feedWikilink(d: string, alreadySent: boolean): boolean {
+    if (!this.plugin.settings.wikilinkPicker) return false;
+    if (!this.wlActive) {
+      // Detect "[[": two consecutive "[" (the brackets are still forwarded so
+      // Claude echoes "[[" inline).
+      if (d === "[") {
+        this.wlBracketRun++;
+        if (this.wlBracketRun >= 2) {
+          this.wlBracketRun = 0;
+          this.openWikilinkPicker();
+        }
+        return false;
+      }
+      this.wlBracketRun = 0;
+      return false;
+    }
+    // Picker open. Backspace shrinks the query (and, once empty, the next
+    // backspace deletes the 2nd "[" and exits the picker).
+    if (d === "\x7f" || d === "\b") {
+      if (this.wlQuery.length > 0) {
+        this.wlQuery = this.wlQuery.slice(0, -1);
+        if (!alreadySent) this.send({ t: "input", d });
+        void this.searchWikilink();
+        return true;
+      }
+      this.closeWikilinkPicker();
+      if (!alreadySent) this.send({ t: "input", d });
+      return true;
+    }
+    // A single printable char extends the query (letters, digits, space, accents).
+    if (d.length === 1 && d.charCodeAt(0) >= 0x20) {
+      this.wlQuery += d;
+      if (!alreadySent) this.send({ t: "input", d });
+      void this.searchWikilink();
+      return true;
+    }
+    // Anything else while open (an escape sequence that slipped through, a paste
+    // with newlines…) cancels the picker and flows normally.
+    this.closeWikilinkPicker();
+    return false;
+  }
+
+  private openWikilinkPicker() {
+    this.closeWikilinkPicker(); // safety: never two popups
+    this.wlActive = true;
+    this.wlQuery = "";
+    this.wlItems = [];
+    this.wlSel = 0;
+    const pop = document.createElement("div");
+    pop.className = "menu cch-wikilink-menu";
+    document.body.appendChild(pop);
+    this.wlPopup = pop;
+    // Dismiss on click outside the popup (clicking the terminal cancels too).
+    const onDown = (e: MouseEvent) => {
+      if (this.wlPopup && !this.wlPopup.contains(e.target as Node))
+        this.closeWikilinkPicker();
+    };
+    setTimeout(() => document.addEventListener("mousedown", onDown, true), 0);
+    this.wlCleanup = () =>
+      document.removeEventListener("mousedown", onDown, true);
+    void this.searchWikilink();
+  }
+
+  closeWikilinkPicker() {
+    this.wlActive = false;
+    this.wlQuery = "";
+    this.wlBracketRun = 0;
+    this.wlSearchSeq++; // invalidate any in-flight search
+    if (this.wlCleanup) {
+      this.wlCleanup();
+      this.wlCleanup = null;
+    }
+    if (this.wlPopup) {
+      this.wlPopup.remove();
+      this.wlPopup = null;
+    }
+    this.wlItems = [];
+  }
+
+  /** Run the current query and re-render. */
+  private searchWikilink() {
+    this.wlSearchSeq++; // (kept for parity; native search is synchronous)
+    this.wlItems = this.queryNotes(this.wlQuery).slice(0, 8);
+    this.wlSel = 0;
+    if (this.wlActive) this.renderWikilinkResults();
+  }
+
+  /** Suggestions that mirror Obsidian's native [[ autocomplete: SAME candidate
+   *  source (`metadataCache.getLinkSuggestions()` — every linkable file + its
+   *  aliases, exactly what the editor's [[ popup uses), matched on the FILENAME /
+   *  alias (not the full path — that's what makes native feel relevant) with the
+   *  SAME fuzzy matcher (`prepareFuzzySearch`) and ranked with Obsidian's own
+   *  `sortSearchResults`. Falls back to the markdown file list if the internal API
+   *  is ever unavailable. `path` (for the @ reference) is always the file's real
+   *  vault path; the shown name is the alias / basename. */
+  private queryNotes(q: string): { path: string; basename: string }[] {
+    const app = this.plugin.app as any;
+    type Cand = { file: TFile; alias?: string };
+    let cands: Cand[];
+    const native = app.metadataCache?.getLinkSuggestions?.();
+    if (Array.isArray(native)) {
+      cands = native
+        .filter((s: any) => s.file instanceof TFile)
+        .map((s: any) => ({ file: s.file as TFile, alias: s.alias as string | undefined }));
+    } else {
+      cands = this.plugin.app.vault.getMarkdownFiles().map((f) => ({ file: f }));
+    }
+    // Empty query: native shows the suggestion list as-is (recent / ordered).
+    if (!q.trim()) {
+      return cands
+        .slice(0, 8)
+        .map((c) => ({ path: c.file.path, basename: c.alias || c.file.basename }));
+    }
+    // Match the filename/alias (what native ranks on), and sort with Obsidian's
+    // own sorter so the order matches the editor's [[ popup. Strip diacritics on
+    // BOTH the query and the candidate so the match is accent-insensitive (típing
+    // "energia" finds "Energía") — Obsidian's prepareFuzzySearch is accent-SENSITIVE
+    // by default; we normalise to mirror OmniSearch's diacritic-insensitive search.
+    const match = prepareFuzzySearch(stripDiacritics(q));
+    const results: {
+      match: ReturnType<typeof match>;
+      path: string;
+      display: string;
+    }[] = [];
+    for (const c of cands) {
+      const display = c.alias || c.file.basename;
+      const m = match(stripDiacritics(display));
+      if (m) results.push({ match: m, path: c.file.path, display });
+    }
+    sortSearchResults(results as any);
+    return results.slice(0, 8).map((r) => ({ path: r.path, basename: r.display }));
+  }
+
+  private renderWikilinkResults() {
+    const pop = this.wlPopup;
+    if (!pop) return;
+    pop.empty();
+    if (!this.wlItems.length) {
+      pop.createDiv({
+        cls: "cch-wikilink-empty",
+        text: this.wlQuery.trim() ? "No matches" : "Type to search…",
+      });
+    } else {
+      this.wlItems.forEach((it, i) => {
+        const row = pop.createDiv({
+          cls: "cch-wikilink-item" + (i === this.wlSel ? " is-selected" : ""),
+        });
+        row.createDiv({ cls: "cch-wikilink-name", text: it.basename });
+        const dir = it.path.replace(/[^/]*$/, "").replace(/\/$/, "");
+        if (dir) row.createDiv({ cls: "cch-wikilink-path", text: dir });
+        row.addEventListener("mousemove", () => {
+          if (this.wlSel !== i) {
+            this.wlSel = i;
+            this.highlightWikilink();
+          }
+        });
+        // mousedown (not click): preventDefault keeps terminal focus and beats
+        // the outside-close listener; the row is inside the popup so it won't close.
+        row.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          this.acceptWikilink(i);
+        });
+      });
+    }
+    this.positionWikilinkPopup();
+  }
+
+  private highlightWikilink() {
+    const pop = this.wlPopup;
+    if (!pop) return;
+    const rows = Array.from(pop.querySelectorAll(".cch-wikilink-item"));
+    rows.forEach((r, i) => (r as HTMLElement).toggleClass("is-selected", i === this.wlSel));
+  }
+
+  private moveWikilinkSel(delta: number) {
+    if (!this.wlItems.length) return;
+    const n = this.wlItems.length;
+    this.wlSel = (this.wlSel + delta + n) % n;
+    this.highlightWikilink();
+    const row = this.wlPopup?.querySelectorAll(".cch-wikilink-item")[
+      this.wlSel
+    ] as HTMLElement | undefined;
+    row?.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Replace the typed "[[query" with an "@<path> " reference. */
+  private acceptWikilink(i: number) {
+    const item = this.wlItems[i];
+    const erase = 2 + this.wlQuery.length; // "[[" + the inline-echoed query
+    this.closeWikilinkPicker();
+    if (!item) return;
+    const back = "\x7f".repeat(erase);
+    this.send({ t: "input", d: back + "@" + item.path + " " });
+    this.term?.focus();
+  }
+
+  /** Anchor the popup at the terminal cursor (below it, flipping above if it
+   *  would overflow), clamped to the viewport — same idea as openAccountMenu. */
+  private positionWikilinkPopup() {
+    const pop = this.wlPopup;
+    const term = this.term as any;
+    if (!pop || !term || !term.element) return;
+    const rect = (term.element as HTMLElement).getBoundingClientRect();
+    const buf = term.buffer.active;
+    const cell = term._core?._renderService?.dimensions?.css?.cell;
+    const cw = cell?.width || rect.width / term.cols;
+    const ch = cell?.height || rect.height / term.rows;
+    const curX = rect.left + buf.cursorX * cw;
+    const curYTop = rect.top + buf.cursorY * ch;
+    const margin = 8;
+    const pr = pop.getBoundingClientRect();
+    let left = curX;
+    if (left + pr.width > window.innerWidth - margin)
+      left = window.innerWidth - pr.width - margin;
+    left = Math.max(margin, left);
+    let top = curYTop + ch + 2; // below the cursor line
+    if (top + pr.height > window.innerHeight - margin) {
+      const above = curYTop - pr.height - 2; // flip above
+      top = above >= margin ? above : Math.max(margin, window.innerHeight - pr.height - margin);
+    }
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+  }
+
   /** Wire copy/paste. With the WebGL renderer there is no DOM text, so native
    *  copy can't see the selection — route it through the clipboard manually:
    *    Ctrl+C with a selection -> copy (without one it stays SIGINT)
@@ -644,6 +920,33 @@ class Session {
 
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown") return true;
+      // [[ note suggester open: own the navigation / accept / cancel keys so they
+      // drive the picker instead of going to the pty (text keys still fall through
+      // to onData -> feedWikilink, which builds the query).
+      if (this.wlActive) {
+        if (ev.key === "ArrowDown") {
+          ev.preventDefault();
+          this.moveWikilinkSel(1);
+          return false;
+        }
+        if (ev.key === "ArrowUp") {
+          ev.preventDefault();
+          this.moveWikilinkSel(-1);
+          return false;
+        }
+        if (ev.key === "Enter" || ev.key === "Tab") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.acceptWikilink(this.wlSel);
+          return false;
+        }
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.closeWikilinkPicker();
+          return false;
+        }
+      }
       // Ctrl+Enter / Shift+Enter -> insert a newline (LF) in Claude's input
       // instead of submitting (Enter alone sends CR = submit).
       if (
@@ -661,6 +964,9 @@ class Session {
       // xterm mangles these as control combos, so deliver the literal char.
       if (ev.ctrlKey && ev.altKey && !ev.metaKey && ev.key.length === 1) {
         this.send({ t: "input", d: ev.key });
+        // On international keyboards "[" arrives here (AltGr), bypassing onData —
+        // so feed it to the [[ detector too (the char is already sent above).
+        this.feedWikilink(ev.key, true);
         ev.preventDefault();
         ev.stopPropagation();
         return false;
@@ -845,6 +1151,7 @@ class Session {
       cancelAnimationFrame(this.rafFit);
       this.rafFit = null;
     }
+    this.closeWikilinkPicker(); // don't leave the [[ popup floating
     this.host?.remove();
   }
 
@@ -1246,6 +1553,7 @@ class Session {
       window.clearTimeout(this.busyTimer);
       this.busyTimer = null;
     }
+    this.closeWikilinkPicker();
     this.killChild();
     try {
       this.term?.dispose();
@@ -1340,6 +1648,7 @@ class Session {
           break;
         case "exit":
           this.exited = true; // stop sending resizes to the dead pty
+          this.closeWikilinkPicker();
           this.setBusy(false); // settle the heartbeat dot
           if (this.busyTimer != null) {
             window.clearTimeout(this.busyTimer);
@@ -4155,6 +4464,18 @@ class HarnessSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.linkifyNotes).onChange(async (v) => {
           this.plugin.settings.linkifyNotes = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("[[ note suggester")
+      .setDesc(
+        "Type [[ in the terminal to open Obsidian's note picker at the cursor — the same suggestions you'd get typing [[ in a note. Arrows to move, Enter/Tab/click to pick, Escape to cancel. Picking a note replaces [[query with an @<path> reference (Claude Code's file-reference syntax)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.wikilinkPicker).onChange(async (v) => {
+          this.plugin.settings.wikilinkPicker = v;
           await this.plugin.saveSettings();
         })
       );

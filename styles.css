@@ -491,3 +491,45 @@
   cursor: not-allowed;
   text-decoration: line-through;
 }
+
+/* [[ note suggester: floating picker anchored at the terminal cursor. Same DOM
+   pattern as the account menu (position:fixed, clamped to the viewport). */
+.cch-wikilink-menu {
+  position: fixed;
+  padding: 4px;
+  min-width: 220px;
+  max-width: min(480px, 96vw);
+  max-height: 50vh;
+  overflow-y: auto;
+  z-index: 60;
+}
+.cch-wikilink-menu .cch-wikilink-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: default;
+}
+.cch-wikilink-menu .cch-wikilink-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 10px;
+  border-radius: var(--radius-s, 4px);
+  cursor: pointer;
+}
+.cch-wikilink-menu .cch-wikilink-item.is-selected {
+  background: var(--background-modifier-hover);
+}
+.cch-wikilink-menu .cch-wikilink-name {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cch-wikilink-menu .cch-wikilink-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -3,6 +3,26 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-06-26
+
+- **Autocompletado `[[` → referencia `@` en el terminal.** Al escribir `[[` en el
+  input de Claude se abre un desplegable flotante anclado al cursor (estilo
+  Obsidian) con las notas más parecidas; al elegir, `[[consulta` se sustituye por
+  una referencia `@<ruta> ` (la sintaxis de archivos de Claude Code), no por un
+  `[[wikilink]]`. Flechas mueven, Enter/Tab/click eligen, Escape cancela.
+  - Sugerencias del **suggester nativo de Obsidian** (`metadataCache.getLinkSuggestions()`
+    + `prepareFuzzySearch` + `sortSearchResults`) → los **mismos resultados** que el
+    `[[` de una nota. Estado y métodos nuevos en `Session` (`feedWikilink`,
+    `openWikilinkPicker`/`closeWikilinkPicker`, `searchWikilink`, `queryNotes`,
+    `renderWikilinkResults`, `acceptWikilink`, `positionWikilinkPopup`); CSS
+    `.cch-wikilink-*`; ajuste `wikilinkPicker` (on por defecto).
+  - **Insensible a acentos** (`stripDiacritics`): se normaliza consulta y candidato
+    (NFD → quita `\p{Diacritic}` → NFC) antes de casar, porque el `prepareFuzzySearch`
+    nativo es sensible a tildes; así `[[energia` encuentra "Energía".
+  - **Gotcha teclado internacional:** en el teclado español `[` llega por la rama
+    AltGr del key handler y **nunca pasa por `onData`**, así que `feedWikilink` se
+    alimenta desde ambas rutas para detectar `[[` y construir la consulta.
+
 ## 2026-06-25
 
 - **Pestañas: ancho uniforme y compresión en vez de scroll lateral.** Cuando hay
