@@ -29,7 +29,7 @@ export async function api(path, opts) {
   return r.json();
 }
 
-export const state = { plan: 'api', pricing: null };
+export const state = { plan: 'api', pricing: null, ready: false };
 
 const ROUTES = {
   '/overview': () => import('/web/routes/overview.js'),
@@ -111,6 +111,15 @@ async function boot() {
   state.pricing = planResp.pricing;
   $('#plan-pill').textContent = state.plan;
 
+  // Until the initial token scan finishes, routes render an empty skeleton.
+  // Fail open: if the status check breaks, treat it as ready so we never get
+  // stuck on the loading state.
+  try {
+    state.ready = !!(await api('/api/status')).ready;
+  } catch {
+    state.ready = true;
+  }
+
   await firstRun();
 
   window.addEventListener('hashchange', render);
@@ -130,7 +139,15 @@ async function boot() {
     es.onmessage = ev => {
       try {
         const evt = JSON.parse(ev.data);
-        if (evt.type === 'scan') render();
+        if (evt.type === 'ready') {
+          // Initial analysis done — fill the charts, once.
+          state.ready = true;
+          render();
+        } else if (evt.type === 'scan' && state.ready) {
+          // Live updates after the first scan; ignored while still analyzing
+          // so the dashboard doesn't flicker through partial data.
+          render();
+        }
       } catch {}
     };
   } catch {}

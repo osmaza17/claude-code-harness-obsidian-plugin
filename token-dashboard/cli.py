@@ -76,8 +76,6 @@ def cmd_tips(args):
 def cmd_dashboard(args):
     db = _db_path(args)
     init_db(db)
-    if not args.no_scan:
-        scan_dir(_projects(args), db)
     from token_dashboard.server import run
 
     host = os.environ.get("HOST", "127.0.0.1")
@@ -86,7 +84,10 @@ def cmd_dashboard(args):
     if not args.no_open:
         webbrowser.open(url)
     print(f"Token Dashboard listening on {url}")
-    run(host, port, db, _projects(args))
+    # The initial scan now runs in the background (server._scan_loop) so the
+    # page opens immediately with empty charts and fills in once the token
+    # analysis finishes, instead of blocking here for ~1 min first.
+    run(host, port, db, _projects(args), initial_scan=not args.no_scan)
 
 
 def main():

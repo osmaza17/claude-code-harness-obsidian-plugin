@@ -30,18 +30,30 @@ function withSince(url, since) {
   return url + (url.includes('?') ? '&' : '?') + 'since=' + encodeURIComponent(since);
 }
 
+const EMPTY_TOTALS = {
+  sessions: 0, turns: 0, input_tokens: 0, output_tokens: 0,
+  cache_read_tokens: 0, cache_create_5m_tokens: 0, cache_create_1h_tokens: 0,
+  cost_usd: 0,
+};
+
 export default async function (root) {
   const range = readRange();
   const since = sinceIso(range);
 
-  const [totals, projects, sessions, tools, daily, byModel] = await Promise.all([
-    api(withSince('/api/overview', since)),
-    api(withSince('/api/projects', since)),
-    api(withSince('/api/sessions?limit=10', since)),
-    api(withSince('/api/tools', since)),
-    api(withSince('/api/daily', since)),
-    api(withSince('/api/by-model', since)),
-  ]);
+  // While the initial token analysis is still running, render the full layout
+  // but with empty charts and a quiet "analyzing" note — no data is fetched
+  // until it completes, so nothing flickers through partial results.
+  const analyzing = !state.ready;
+  const [totals, projects, sessions, tools, daily, byModel] = analyzing
+    ? [EMPTY_TOTALS, [], [], [], [], []]
+    : await Promise.all([
+        api(withSince('/api/overview', since)),
+        api(withSince('/api/projects', since)),
+        api(withSince('/api/sessions?limit=10', since)),
+        api(withSince('/api/tools', since)),
+        api(withSince('/api/daily', since)),
+        api(withSince('/api/by-model', since)),
+      ]);
 
   const cacheCreate =
     (totals.cache_create_5m_tokens || 0) +
@@ -62,6 +74,7 @@ export default async function (root) {
     <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Overview</h2>
       <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'}</span>
+      ${analyzing ? '<span class="analyzing">Analyzing your usage…</span>' : ''}
       <div class="spacer"></div>
       ${rangeTabs}
     </div>

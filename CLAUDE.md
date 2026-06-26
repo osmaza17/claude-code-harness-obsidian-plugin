@@ -625,6 +625,20 @@ llama dos veces por sesión (xterm no lo soporta).
   / `C:\Program Files\Python\*` → `where python`/`where py` → `python`. El proceso se
   mata en `onunload`. El programa Python (stdlib, sin deps) vive en `token-dashboard/`
   y escanea `~/.claude/projects` a una SQLite `~/.claude/token-dashboard.db`.
+  - **Carga sin parpadeo (gráficas vacías hasta listo)**: el **escaneo inicial**
+    (~1 min) ya **no bloquea** `cmd_dashboard`; el servidor arranca al instante (la
+    línea `listening on` sale enseguida → el navegador abre de inmediato) y el primer
+    escaneo corre en el hilo de fondo `_scan_loop`. `server.py` mantiene una bandera
+    `READY` (`threading.Event`), expone `GET /api/status` (`{ready}`) y, al terminar
+    ese primer escaneo, emite **un** evento SSE `{"type":"ready"}` (si falla, marca
+    `ready` igual para no clavar la UI). El frontend (`web/app.js`) guarda
+    `state.ready` (consultado al arrancar, fail-open) y solo **rellena las gráficas
+    al llegar `ready`**, ignorando los eventos `scan` mientras tanto;
+    `web/routes/overview.js` dibuja el layout con **KPIs en 0 + gráficas vacías** y
+    el aviso `.analyzing` ("Analyzing your usage…") hasta entonces. Así, durante el
+    procesado se ven las gráficas vacías y se rellenan **una sola vez** al acabar.
+    `run(..., initial_scan=not no_scan)` (la flag `--no-scan` salta el escaneo de
+    arranque y marca `ready` al instante).
 - **Limpieza**: los PNG temporales del pegado se registran y se borran en
   `onunload`; al cargar se barren los `cch-paste-*.png` viejos (`sweepTempImages`).
 - Todos los atajos hacen `stopPropagation` para que Obsidian no se los quede.

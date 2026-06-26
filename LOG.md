@@ -3,6 +3,26 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-06-27
+
+- **Token Dashboard: gráficas vacías mientras corre el primer escaneo.** Antes,
+  durante el ~1 min del análisis inicial el dashboard parpadeaba re-renderizando
+  con datos parciales. Ahora muestra el layout con las **gráficas vacías** y un
+  aviso discreto "Analyzing your usage…", y solo las rellena **una vez**, cuando
+  el escaneo termina.
+  - `cli.py cmd_dashboard`: se quitó el `scan_dir` bloqueante previo a `run()`;
+    el servidor arranca al instante (el navegador abre de inmediato).
+  - `server.py`: el escaneo inicial pasó al hilo de fondo `_scan_loop`. Bandera
+    `READY` (threading.Event), endpoint `/api/status` (`{ready}`) y evento SSE
+    one-off `{"type":"ready"}` al terminar el primer escaneo. Si ese escaneo
+    falla, igual marca `ready` para no dejar la UI clavada en "analizando".
+    `run(..., initial_scan=not no_scan)`.
+  - `web/app.js`: `state.ready`; se consulta `/api/status` al arrancar (fail-open).
+    El handler SSE rellena las gráficas solo al llegar `ready`; ignora los
+    eventos `scan` mientras no esté listo.
+  - `web/routes/overview.js`: mientras `!ready` no pide datos y dibuja KPIs en 0
+    + gráficas vacías; estilo `.analyzing` (punto pulsante) en `web/style.css`.
+
 ## 2026-06-26
 
 - **Autocompletado `[[` → referencia `@` en el terminal.** Al escribir `[[` en el

@@ -199,6 +199,27 @@ body.privacy-on .blur-sensitive { filter: blur(6px); }
 .modal p { color: var(--muted); margin: 0 0 16px; }
 .modal .actions { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
 
+/* analyzing (initial scan in progress) */
+.analyzing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.analyzing::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, #4A9EFF);
+  animation: analyzing-pulse 1.1s ease-in-out infinite;
+}
+@keyframes analyzing-pulse {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 1; }
+}
+
 /* utility */
 .muted { color: var(--muted); }
 .flex { display: flex; align-items: center; gap: 8px; }

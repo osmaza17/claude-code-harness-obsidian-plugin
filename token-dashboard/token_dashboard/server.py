@@ -26,6 +26,11 @@ PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
 EVENTS: "queue.Queue[dict]" = queue.Queue()
 
+# Set once the first (full) scan finishes. The frontend keeps the charts empty
+# until then, so the dashboard never flickers through partial data while the
+# initial token analysis is still running.
+READY = threading.Event()
+
 MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
 
@@ -144,6 +149,8 @@ def build_handler(db_path: str, projects_dir: str):
             if path == "/api/scan":
                 n = scan_dir(projects_dir, db_path)
                 return _send_json(self, n)
+            if path == "/api/status":
+                return _send_json(self, {"ready": READY.is_set()})
             if path == "/api/stream":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -190,19 +197,44 @@ def build_handler(db_path: str, projects_dir: str):
     return H
 
 
-def _scan_loop(db_path: str, projects_dir: str, interval: float = 30.0):
+def _scan_loop(db_path: str, projects_dir: str, interval: float = 30.0,
+               initial_scan: bool = True):
+    # The first iteration is the heavy initial scan; the server is already
+    # serving (empty) pages while it runs. We flip READY and emit a one-off
+    # "ready" event when it finishes so the frontend fills the charts exactly
+    # once, instead of flickering on every intermediate update.
+    first = True
+    if not initial_scan:
+        READY.set()
+        EVENTS.put({"type": "ready", "ts": time.time()})
+        first = False
     while True:
         try:
             n = scan_dir(projects_dir, db_path)
-            if n["messages"] > 0:
+            if first:
+                READY.set()
+                EVENTS.put({"type": "ready", "n": n, "ts": time.time()})
+                first = False
+            elif n["messages"] > 0:
                 EVENTS.put({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
-            EVENTS.put({"type": "error", "message": str(e)})
+            if first:
+                # Don't strand the UI on the loading state if the first scan
+                # fails — let it render whatever is already in the DB.
+                READY.set()
+                EVENTS.put({"type": "ready", "error": str(e), "ts": time.time()})
+                first = False
+            else:
+                EVENTS.put({"type": "error", "message": str(e)})
         time.sleep(interval)
 
 
-def run(host: str, port: int, db_path: str, projects_dir: str):
-    threading.Thread(target=_scan_loop, args=(db_path, projects_dir), daemon=True).start()
+def run(host: str, port: int, db_path: str, projects_dir: str,
+        initial_scan: bool = True):
+    threading.Thread(
+        target=_scan_loop, args=(db_path, projects_dir),
+        kwargs={"initial_scan": initial_scan}, daemon=True,
+    ).start()
     H = build_handler(db_path, projects_dir)
     httpd = http.server.ThreadingHTTPServer((host, port), H)
     httpd.serve_forever()
