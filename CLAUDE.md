@@ -439,24 +439,26 @@ llama dos veces por sesión (xterm no lo soporta).
     `wlPopup`/`wlItems`/`wlSel`): `feedWikilink` (máquina de estados del trigger),
     `openWikilinkPicker`/`closeWikilinkPicker`, `searchWikilink`, `queryNotes`,
     `renderWikilinkResults`/`highlightWikilink`/`moveWikilinkSel`, `acceptWikilink`,
-    `positionWikilinkPopup`.
-  - **Fuente de sugerencias = el suggester NATIVO de Obsidian** (los MISMOS
-    resultados que escribir `[[` en una nota), NO OmniSearch: `queryNotes` usa
-    `metadataCache.getLinkSuggestions()` (todo archivo enlazable + sus alias, igual
-    que el popup `[[` del editor) y los ranquea con `prepareFuzzySearch(q)` (el mismo
-    matcher fuzzy de Obsidian, orden por score desc). Para el `@`-ref se usa la ruta
-    real del `TFile`; el texto mostrado es el alias / link path nativo. Con consulta
-    vacía muestra la lista nativa tal cual (como `[[` antes de teclear). Fallback a
-    `vault.getMarkdownFiles()` si la API interna `getLinkSuggestions` no existiera.
-    (Históricamente se probó OmniSearch, pero da resultados/orden distintos a `[[`.)
-  - **Insensible a acentos** (`stripDiacritics`, helper a nivel de módulo): el
-    `prepareFuzzySearch` nativo de Obsidian es **sensible a diacríticos**, así que
-    `queryNotes` normaliza (NFD → quita `\p{Diacritic}` → NFC) **tanto la consulta
-    como el texto del candidato** antes de casar — `[[energia` encuentra "Energía".
-    El nombre mostrado conserva sus tildes; solo el matching es sin acentos (imita
-    el comportamiento de OmniSearch). OJO: esto solo afecta a ESTE picker del
-    terminal; el `[[` nativo del editor y el Quick Switcher (Ctrl+O) de Obsidian
-    siguen siendo sensibles a acentos (limitación del núcleo, sin ajuste nativo).
+    `positionWikilinkPopup`. `searchWikilink` es **async** (OmniSearch lo es) con
+    `wlSearchSeq` para descartar respuestas obsoletas / picker ya cerrado.
+  - **Fuente de sugerencias = OmniSearch** (`app.plugins.plugins.omnisearch.api.search(q)`):
+    full-text (busca también el **contenido** de las notas, no solo el título) y con
+    los **mismos resultados que la ventana de OmniSearch**, ya **insensible a acentos**
+    por su propio ajuste. `queryNotes` mapea cada resultado a `{path, basename}` (path
+    = ruta de vault para el `@`-ref). **Fallback = `nativeNotes`** (el suggester nativo
+    de Obsidian: `metadataCache.getLinkSuggestions()` + `prepareFuzzySearch` +
+    `sortSearchResults`, con `stripDiacritics`) cuando OmniSearch no está instalado/
+    activo o falla, **y para la consulta vacía** (OmniSearch no tiene qué buscar antes
+    de teclear → muestra la lista nativa reciente). HISTORIA: primero fue OmniSearch,
+    luego se cambió al nativo para "igualar el `[[` de una nota", y finalmente se
+    devolvió a OmniSearch a petición del usuario (quería full-text + igual que su
+    ventana de búsqueda).
+  - **Insensible a acentos**: con OmniSearch lo da su propio motor. El fallback
+    nativo (`nativeNotes`) usa `stripDiacritics` (helper a nivel de módulo: NFD →
+    quita `\p{Diacritic}` → NFC, sobre consulta y candidato) porque el
+    `prepareFuzzySearch` nativo es **sensible a diacríticos**. OJO: esto solo afecta a
+    ESTE picker del terminal; el `[[` nativo del editor y el Quick Switcher (Ctrl+O)
+    de Obsidian siguen siendo sensibles a acentos (limitación del núcleo, sin ajuste).
   - **Inline como Obsidian**: el `[[` y la consulta SÍ se reenvían a Claude (eco
     inline). Al aceptar, `acceptWikilink` **borra con `\x7f` × (2 + wlQuery.length)**
     y manda `@<ruta> `. El contador es exacto porque cada char tecleado pasa por

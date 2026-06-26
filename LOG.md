@@ -19,6 +19,12 @@ documentado aquí; el LOG arranca en esta entrada.
   - **Insensible a acentos** (`stripDiacritics`): se normaliza consulta y candidato
     (NFD → quita `\p{Diacritic}` → NFC) antes de casar, porque el `prepareFuzzySearch`
     nativo es sensible a tildes; así `[[energia` encuentra "Energía".
+  - **Fuente de sugerencias = OmniSearch** (cambio posterior, mismo día): el picker
+    pasó del suggester nativo a la API de OmniSearch (`omnisearch.api.search`) →
+    full-text (busca también el contenido) e insensible a acentos por sí misma,
+    iguala la ventana de OmniSearch. El nativo (`nativeNotes`) queda como **fallback**
+    (OmniSearch ausente/falla) y para la consulta vacía. `searchWikilink` pasa a
+    async con `wlSearchSeq` para descartar respuestas obsoletas.
   - **Gotcha teclado internacional:** en el teclado español `[` llega por la rama
     AltGr del key handler y **nunca pasa por `onData`**, así que `feedWikilink` se
     alimenta desde ambas rutas para detectar `[[` y construir la consulta.

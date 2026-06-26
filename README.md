@@ -42,10 +42,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   `@<ruta>`.
 - **Autocompletado `[[` → referencia `@`**: al escribir `[[` en el input de Claude
   aparece un **desplegable** anclado al cursor (estilo Obsidian) con las notas más
-  parecidas (mismas sugerencias que el `[[` de una nota, **ignorando acentos**).
-  Flechas para moverte, Enter/Tab/clic para elegir, Escape para cancelar; al elegir,
-  lo tecleado se sustituye por la referencia `@<ruta>` de Claude Code. Se puede
-  desactivar en ajustes ("[[ note suggester").
+  parecidas, vía **OmniSearch** (búsqueda full-text, **ignorando acentos**; mismas
+  sugerencias que su ventana de búsqueda). Flechas para moverte, Enter/Tab/clic para
+  elegir, Escape para cancelar; al elegir, lo tecleado se sustituye por la referencia
+  `@<ruta>` de Claude Code. Si OmniSearch no está, cae al suggester nativo de
+  Obsidian. Se puede desactivar en ajustes ("[[ note suggester").
 - **Referencias a notas clicables**: las menciones a notas en la salida de Claude
   (el texto **coloreado** que coincide con el nombre de una nota `.md` del vault, y
   los `[[wikilinks]]`) se vuelven **enlaces**: pasa el ratón para subrayarlas y haz

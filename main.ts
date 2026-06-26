@@ -723,23 +723,49 @@ class Session {
     this.wlItems = [];
   }
 
-  /** Run the current query and re-render. */
-  private searchWikilink() {
-    this.wlSearchSeq++; // (kept for parity; native search is synchronous)
-    this.wlItems = this.queryNotes(this.wlQuery).slice(0, 8);
+  /** Run the current query and re-render. Tagged with a sequence number so a slow
+   *  OmniSearch response can't clobber a newer query (or a closed picker). */
+  private async searchWikilink() {
+    const seq = ++this.wlSearchSeq;
+    const items = await this.queryNotes(this.wlQuery);
+    if (seq !== this.wlSearchSeq || !this.wlActive) return; // stale or closed
+    this.wlItems = items.slice(0, 8);
     this.wlSel = 0;
-    if (this.wlActive) this.renderWikilinkResults();
+    this.renderWikilinkResults();
   }
 
-  /** Suggestions that mirror Obsidian's native [[ autocomplete: SAME candidate
-   *  source (`metadataCache.getLinkSuggestions()` — every linkable file + its
-   *  aliases, exactly what the editor's [[ popup uses), matched on the FILENAME /
-   *  alias (not the full path — that's what makes native feel relevant) with the
-   *  SAME fuzzy matcher (`prepareFuzzySearch`) and ranked with Obsidian's own
-   *  `sortSearchResults`. Falls back to the markdown file list if the internal API
-   *  is ever unavailable. `path` (for the @ reference) is always the file's real
-   *  vault path; the shown name is the alias / basename. */
-  private queryNotes(q: string): { path: string; basename: string }[] {
+  /** Suggestions = OmniSearch (full-text, same results as its own search window,
+   *  and diacritic-insensitive on its own). Falls back to Obsidian's native [[
+   *  suggester (`nativeNotes`) when OmniSearch isn't available, and for the empty
+   *  query (OmniSearch has nothing to search before you type). `path` (for the @
+   *  reference) is the file's vault-relative path. */
+  private async queryNotes(
+    q: string
+  ): Promise<{ path: string; basename: string }[]> {
+    const app = this.plugin.app as any;
+    const omni = app.plugins?.plugins?.omnisearch?.api;
+    if (q.trim() && omni?.search) {
+      try {
+        const res = await omni.search(q);
+        if (Array.isArray(res)) {
+          return res.slice(0, 8).map((r: any) => ({
+            path: r.path,
+            basename: r.basename ?? (r.path.split("/").pop() || r.path),
+          }));
+        }
+      } catch {
+        /* OmniSearch failed/indexing — fall through to the native suggester */
+      }
+    }
+    return this.nativeNotes(q);
+  }
+
+  /** Fallback suggester that mirrors Obsidian's native [[ autocomplete: SAME
+   *  candidate source (`metadataCache.getLinkSuggestions()` — every linkable file +
+   *  its aliases), matched on the FILENAME / alias with the SAME fuzzy matcher
+   *  (`prepareFuzzySearch`) + `sortSearchResults`, diacritic-insensitive via
+   *  `stripDiacritics`. Used when OmniSearch is unavailable and for the empty query. */
+  private nativeNotes(q: string): { path: string; basename: string }[] {
     const app = this.plugin.app as any;
     type Cand = { file: TFile; alias?: string };
     let cands: Cand[];
