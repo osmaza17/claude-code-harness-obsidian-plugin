@@ -5,6 +5,16 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-27
 
+- **Sonido al terminar: esperar 1 minuto en verde (fix de sobre-sonido).** La
+  primera versión sonaba en cada transición amarillo→verde, y Claude pasa a verde
+  varias veces a mitad de tarea (pausas >1200 ms esperando herramienta o
+  pensando), así que sonaba sin parar. Ahora solo suena cuando la sesión lleva
+  **un minuto entero en verde** sin volver a amarillo.
+  - Campo nuevo `Session.idleChimeTimer` (60 s): se arma en `setBusy(false)` y se
+    cancela en cualquier cambio de estado; el "ding" solo suena si el timer llega
+    al final (sesión aún en verde y `!exited`).
+  - Limpieza del timer en `case "exit"` y `dispose()`.
+
 - **Sonido cuando una sesión termina (heartbeat amarillo→verde).** Hasta ahora el
   punto de la pestaña pasaba de amarillo (trabajando) a verde (terminado) en
   silencio; ahora suena un aviso para volver al ordenador estando lejos.

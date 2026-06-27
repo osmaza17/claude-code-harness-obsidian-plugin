@@ -234,13 +234,17 @@ llama dos veces por sesión (xterm no lo soporta).
        salida que llega <600 ms tras una pulsación (eco de teclado; `lastKeyAt` se
        fija en `term.onData`). `setBusy()` refresca vía `refreshTabStatus()` (actualiza
        solo los `.cch-tab-dot` in situ). El `case "exit"` y `dispose()` apagan el
-       timer; salir asienta el punto. En la transición **amarillo→verde**
-       (`busy → idle`, no al salir), `setBusy` dispara `plugin.playIdleChime()` si
-       `settings.notifyOnIdle` (por defecto on): un "ding" de dos notas sintetizado
-       con la Web Audio API (un único `AudioContext` reutilizado, throttle de 300 ms
-       para no solapar varias sesiones que acaban a la vez), para avisar de que
-       Claude terminó aunque estés lejos de la pantalla. El `AudioContext` se cierra
-       en `onunload`.
+       timer; salir asienta el punto. **Sonido al terminar** (`settings.notifyOnIdle`,
+       por defecto on): cuando el punto pasa a verde, `setBusy` arma un timer
+       (`idleChimeTimer`, 60 s) que dispara `plugin.playIdleChime()` SOLO si la
+       sesión sigue en verde al cumplirse el minuto. Cualquier cambio de estado
+       (volver a amarillo) cancela el timer: así NO suena en los bajones a verde a
+       mitad de tarea (Claude pausa >1200 ms esperando una herramienta o pensando),
+       solo cuando de verdad ha terminado y lleva un minuto quieto. `playIdleChime`
+       es un "ding" de dos notas sintetizado con la Web Audio API (un único
+       `AudioContext` reutilizado, throttle de 300 ms para no solapar varias
+       sesiones; cerrado en `onunload`). El `case "exit"` y `dispose()` también
+       apagan `idleChimeTimer`, y el callback comprueba `!exited` antes de sonar.
   2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
@@ -524,9 +528,12 @@ llama dos veces por sesión (xterm no lo soporta).
   true), muestra un `Notice` cuando el terminal suena la campana (`\x07`), que
   Claude tiende a sonar al terminar una tarea larga.
 - **Sonido al terminar (heartbeat)** (`playIdleChime`, ajuste `notifyOnIdle`, por
-  defecto on): reproduce un "ding" sintetizado (Web Audio) en cada transición del
-  punto de pestaña de **amarillo→verde** (`setBusy(false)` con `!exited`), o sea
-  cuando una sesión deja de trabajar y vuelve a esperarte. Más fiable que el bell
+  defecto on): reproduce un "ding" sintetizado (Web Audio) cuando el punto de la
+  pestaña lleva **un minuto entero en verde** (`idleChimeTimer` de 60 s armado en
+  `setBusy(false)`, cancelado si vuelve a amarillo), o sea cuando una sesión ha
+  terminado de verdad y se ha asentado. El retardo evita los falsos avisos de los
+  bajones a verde a mitad de tarea (Claude pausa >1200 ms esperando herramienta o
+  pensando, lo que devolvía el punto a verde un instante). Más fiable que el bell
   (que Claude no siempre suena) porque se ata al heartbeat por hueco de silencio.
   Independiente de `notifyOnBell`. Toggle en ajustes ("Notify when a session
   finishes (sound)").

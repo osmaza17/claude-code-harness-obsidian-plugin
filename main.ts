@@ -418,6 +418,10 @@ class Session {
   // drives the tab dot; the timer flips it back to idle after a quiet gap.
   busy = false;
   private busyTimer: number | null = null;
+  // Fires the "session finished" chime only once the dot has stayed idle (green)
+  // for a full minute — so the brief busy→idle dips mid-task (Claude pausing for a
+  // tool / thinking) don't ring. Re-arming busy cancels it.
+  private idleChimeTimer: number | null = null;
   private lastKeyAt = 0; // when the user last typed (to ignore keystroke echo)
 
   // Remote control toggle (/remote-control). remoteOn drives the button's green
@@ -603,11 +607,19 @@ class Session {
     if (this.busy === b) return;
     this.busy = b;
     this.plugin.refreshTabStatus();
-    // Busy→idle (yellow→green): Claude handed control back. Chime so the user,
-    // away from the screen, knows a session finished. Skip on exit (dot is grey,
-    // not green; `exited` is set before setBusy(false) in the "exit" handler).
+    // Sound only when the session has *settled*: stayed idle (green) for a full
+    // minute, not on the brief busy→idle dips that happen mid-task (Claude pausing
+    // for a tool / thinking). Any change cancels a pending chime; going busy again
+    // means it wasn't really finished. Skip on exit (dot is grey, not green).
+    if (this.idleChimeTimer != null) {
+      window.clearTimeout(this.idleChimeTimer);
+      this.idleChimeTimer = null;
+    }
     if (!b && !this.exited && this.plugin.settings.notifyOnIdle) {
-      this.plugin.playIdleChime();
+      this.idleChimeTimer = window.setTimeout(() => {
+        this.idleChimeTimer = null;
+        if (!this.exited) this.plugin.playIdleChime();
+      }, 60000);
     }
   }
 
@@ -1594,6 +1606,10 @@ class Session {
       window.clearTimeout(this.busyTimer);
       this.busyTimer = null;
     }
+    if (this.idleChimeTimer != null) {
+      window.clearTimeout(this.idleChimeTimer);
+      this.idleChimeTimer = null;
+    }
     this.closeWikilinkPicker();
     this.killChild();
     try {
@@ -1694,6 +1710,10 @@ class Session {
           if (this.busyTimer != null) {
             window.clearTimeout(this.busyTimer);
             this.busyTimer = null;
+          }
+          if (this.idleChimeTimer != null) {
+            window.clearTimeout(this.idleChimeTimer);
+            this.idleChimeTimer = null;
           }
           this.term.writeln(
             "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"

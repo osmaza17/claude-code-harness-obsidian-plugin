@@ -118,8 +118,9 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - **Aviso al terminar**: notifica (Obsidian Notice) cuando el terminal suena la
   campana, que Claude tiende a sonar al acabar una tarea larga (configurable).
 - **Sonido al terminar una sesión**: reproduce un "ding" suave cuando el punto de
-  la pestaña pasa de amarillo (Claude trabajando) a verde (terminado, esperándote),
-  para avisarte de que vuelvas al ordenador. Configurable (por defecto activado).
+  la pestaña lleva **un minuto en verde** (Claude terminó y se ha asentado), para
+  avisarte de que vuelvas al ordenador. El minuto de espera evita falsos avisos por
+  las pausas a mitad de tarea. Configurable (por defecto activado).
 - **Cabecera configurable**: cada botón de la cabecera se puede ocultar desde
   ajustes.
 - **Zoom de fuente**: `Ctrl +` / `Ctrl -` / `Ctrl 0`, **`Ctrl + rueda del ratón`** y
@@ -163,7 +164,7 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Skill | Skill de `~/.claude/skills` que se invoca como `/<nombre>` tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
-| Notify when a session finishes (sound) | Reproducir un sonido cuando el punto de la pestaña pasa de amarillo (trabajando) a verde (terminado) (por defecto activado). |
+| Notify when a session finishes (sound) | Reproducir un sonido cuando el punto de la pestaña lleva un minuto en verde (terminado) (por defecto activado). |
 | Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, auto-switch al superar un % de uso, y **bloquear cuentas** (🔁/🚫) para que el auto-switch no las elija (p. ej. cuentas de amigos). |
 | Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, token dashboard, zoom). |
 | Default browser | Navegador para el control remoto cuando la cuenta activa no está mapeada. |
