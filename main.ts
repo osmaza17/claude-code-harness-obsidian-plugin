@@ -65,6 +65,9 @@ interface HarnessSettings {
   // Fire an Obsidian notice when the terminal rings the bell (\x07) — Claude
   // tends to ring it when a long task finishes / needs attention.
   notifyOnBell: boolean;
+  // Play a short chime when a session's heartbeat dot goes from busy (yellow) to
+  // idle (green) — i.e. Claude stopped working and is waiting for you again.
+  notifyOnIdle: boolean;
   // Turn coloured note references in Claude's output (and [[wikilinks]]) into
   // clickable links that open the matching .md note in the vault.
   linkifyNotes: boolean;
@@ -123,6 +126,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   startupCommands: "",
   model: "opus",
   notifyOnBell: true,
+  notifyOnIdle: true,
   linkifyNotes: true,
   wikilinkPicker: true,
   browserMap: [],
@@ -599,6 +603,12 @@ class Session {
     if (this.busy === b) return;
     this.busy = b;
     this.plugin.refreshTabStatus();
+    // Busy→idle (yellow→green): Claude handed control back. Chime so the user,
+    // away from the screen, knows a session finished. Skip on exit (dot is grey,
+    // not green; `exited` is set before setBusy(false) in the "exit" handler).
+    if (!b && !this.exited && this.plugin.settings.notifyOnIdle) {
+      this.plugin.playIdleChime();
+    }
   }
 
   /** Re-apply the Obsidian theme to this terminal (called on css-change). */
@@ -1899,6 +1909,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         /* best-effort */
       }
       this.tokenDashboardChild = null;
+    }
+    if (this.audioCtx) {
+      try {
+        this.audioCtx.close();
+      } catch {
+        /* best-effort */
+      }
+      this.audioCtx = null;
     }
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
@@ -3877,6 +3895,47 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
   }
 
+  /** Soft two-note "ding", synthesized with the Web Audio API (no asset). Played
+   *  when a session's dot flips yellow→green so the user knows Claude finished.
+   *  One reused AudioContext; a 300ms throttle so several sessions finishing at
+   *  once don't stack into noise. Best-effort — never throws into the caller. */
+  private audioCtx: AudioContext | null = null;
+  private lastChimeAt = 0;
+  playIdleChime() {
+    const now = Date.now();
+    if (now - this.lastChimeAt < 300) return; // collapse simultaneous finishes
+    this.lastChimeAt = now;
+    try {
+      const Ctx: typeof AudioContext =
+        window.AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+      if (!this.audioCtx) this.audioCtx = new Ctx();
+      const ctx = this.audioCtx;
+      if (ctx.state === "suspended") ctx.resume();
+      const t0 = ctx.currentTime;
+      // A5 → D6, the second note a beat later: a gentle rising "ding".
+      const notes = [
+        { freq: 880, at: 0 },
+        { freq: 1174.66, at: 0.12 },
+      ];
+      for (const n of notes) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = n.freq;
+        const start = t0 + n.at;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.linearRampToValueAtTime(0.15, start + 0.02); // soft attack
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.28); // decay
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + 0.3);
+      }
+    } catch {
+      /* audio unavailable — ignore */
+    }
+  }
+
   /** Inline-edit a tab title (double-click). Commits on Enter/blur as a "manual"
    *  title (which outranks the auto sources), cancels on Escape. */
   private startTabRename(tab: HTMLElement, label: HTMLElement, sess: Session) {
@@ -4505,6 +4564,18 @@ class HarnessSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.notifyOnBell).onChange(async (v) => {
           this.plugin.settings.notifyOnBell = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Notify when a session finishes (sound)")
+      .setDesc(
+        "Play a short chime when a tab's heartbeat dot goes from yellow (Claude working) to green (finished, waiting for you) — so you know to come back even when you're away from the screen."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.notifyOnIdle).onChange(async (v) => {
+          this.plugin.settings.notifyOnIdle = v;
           await this.plugin.saveSettings();
         })
       );

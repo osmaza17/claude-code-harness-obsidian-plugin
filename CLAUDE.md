@@ -234,7 +234,13 @@ llama dos veces por sesión (xterm no lo soporta).
        salida que llega <600 ms tras una pulsación (eco de teclado; `lastKeyAt` se
        fija en `term.onData`). `setBusy()` refresca vía `refreshTabStatus()` (actualiza
        solo los `.cch-tab-dot` in situ). El `case "exit"` y `dispose()` apagan el
-       timer; salir asienta el punto.
+       timer; salir asienta el punto. En la transición **amarillo→verde**
+       (`busy → idle`, no al salir), `setBusy` dispara `plugin.playIdleChime()` si
+       `settings.notifyOnIdle` (por defecto on): un "ding" de dos notas sintetizado
+       con la Web Audio API (un único `AudioContext` reutilizado, throttle de 300 ms
+       para no solapar varias sesiones que acaban a la vez), para avisar de que
+       Claude terminó aunque estés lejos de la pantalla. El `AudioContext` se cierra
+       en `onunload`.
   2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
@@ -517,6 +523,13 @@ llama dos veces por sesión (xterm no lo soporta).
 - **Aviso por bell** (`term.onBell`): si `settings.notifyOnBell` (por defecto
   true), muestra un `Notice` cuando el terminal suena la campana (`\x07`), que
   Claude tiende a sonar al terminar una tarea larga.
+- **Sonido al terminar (heartbeat)** (`playIdleChime`, ajuste `notifyOnIdle`, por
+  defecto on): reproduce un "ding" sintetizado (Web Audio) en cada transición del
+  punto de pestaña de **amarillo→verde** (`setBusy(false)` con `!exited`), o sea
+  cuando una sesión deja de trabajar y vuelve a esperarte. Más fiable que el bell
+  (que Claude no siempre suena) porque se ata al heartbeat por hueco de silencio.
+  Independiente de `notifyOnBell`. Toggle en ajustes ("Notify when a session
+  finishes (sound)").
 - **Remote control (toggle de dos estados)** (`toggleRemoteControl`): clave del
   comportamiento de `/remote-control`: la **primera** ejecución solo **conecta**
   (muestra `/rc connecting…` → `/rc active` en la barra de estado) y NO imprime la

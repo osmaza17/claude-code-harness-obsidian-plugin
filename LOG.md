@@ -5,6 +5,20 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-27
 
+- **Sonido cuando una sesión termina (heartbeat amarillo→verde).** Hasta ahora el
+  punto de la pestaña pasaba de amarillo (trabajando) a verde (terminado) en
+  silencio; ahora suena un aviso para volver al ordenador estando lejos.
+  - Setting nuevo `notifyOnIdle: boolean` (def. `true`).
+  - `Session.setBusy()` dispara `plugin.playIdleChime()` en la transición
+    `busy → idle` con guard `!exited` (no suena al cerrarse una sesión, que va a
+    gris; `exited` se fija antes de `setBusy(false)` en el `case "exit"`).
+  - `playIdleChime()`: "ding" de dos notas (A5→D6) sintetizado con la Web Audio
+    API; un único `AudioContext` reutilizado, ataque corto + caída exponencial,
+    throttle de 300 ms para no solapar varias sesiones que acaban a la vez; todo
+    en `try/catch`. El contexto se cierra en `onunload`.
+  - Ajustes: toggle "Notify when a session finishes (sound)".
+  - Docs: CLAUDE.md actualizado.
+
 - **Menú 👤: cuenta atrás hasta el reseteo de la ventana de 7d.** El menú de
   cuentas (y la lista de ajustes) ya mostraban el % de uso de 7d pero no cuándo
   se resetea esa ventana; ahora muestran también el tiempo restante, junto al de
