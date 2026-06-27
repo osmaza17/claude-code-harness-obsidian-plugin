@@ -248,7 +248,7 @@ llama dos veces por sesión (xterm no lo soporta).
        - **Aviso al terminar** (`settings.notifyOnIdle` = sonido, `noticeOnIdle` =
          Notice; ambos def. on): cuando el punto pasa a verde, `setBusy` arma
          `idleChimeTimer` por `settings.idleNotifyDelaySec` s (def. 60) y, si la
-         sesión sigue en verde al cumplirse, llama `plugin.notifySessionIdle(this)`.
+         sesión sigue en verde al cumplirse (def. 20 s), llama `plugin.notifySessionIdle(this)`.
          Cualquier cambio de estado cancela el timer, así que solo notifica cuando de
          verdad ha terminado y se ha asentado. `notifySessionIdle` muestra un Notice
          con el **título de la pestaña** (si `noticeOnIdle`) y/o suena (si
@@ -541,7 +541,7 @@ llama dos veces por sesión (xterm no lo soporta).
   Claude tiende a sonar al terminar una tarea larga.
 - **Aviso al terminar una sesión (heartbeat)** (`notifySessionIdle`): cuando el
   punto de una pestaña lleva en verde el retardo configurado (`idleNotifyDelaySec`,
-  def. 60 s; `idleChimeTimer` armado en `setBusy(false)`, cancelado si vuelve a
+  def. 20 s; `idleChimeTimer` armado en `setBusy(false)`, cancelado si vuelve a
   amarillo), avisa de que esa sesión ha terminado y se ha asentado. Dos canales,
   ambos opt-out por ajuste: un **Notice con el título de la pestaña**
   (`noticeOnIdle`) y/o un **"ding"** sintetizado (`notifyOnIdle`, `playIdleChime`,

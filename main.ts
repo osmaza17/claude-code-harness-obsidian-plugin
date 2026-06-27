@@ -137,7 +137,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   notifyOnBell: true,
   notifyOnIdle: true,
   noticeOnIdle: true,
-  idleNotifyDelaySec: 60,
+  idleNotifyDelaySec: 20,
   idleBlipIgnoreMs: 800,
   linkifyNotes: true,
   wikilinkPicker: true,
@@ -4689,11 +4689,11 @@ class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Finished delay (seconds)")
       .setDesc(
-        "How long a tab's dot must stay green before the session counts as finished and notifies you. Higher = fewer false alarms on brief mid-task pauses. Default 60."
+        "How long a tab's dot must stay green before the session counts as finished and notifies you. Higher = fewer false alarms on brief mid-task pauses. Default 20."
       )
       .addText((text) =>
         text
-          .setPlaceholder("60")
+          .setPlaceholder("20")
           .setValue(String(this.plugin.settings.idleNotifyDelaySec))
           .onChange(async (value) => {
             const n = parseInt(value, 10);
