@@ -89,7 +89,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   incremento** (cambia cada vez que el consumo sube un valor fijo —p. ej. +10 %—
   desde que entró la cuenta, repartiendo el gasto entre todas). Al cambiar, salta a
   la **cuenta menos gastada** (según el % real sondeado por API; fallback a
-  rotación por orden). El cambio es sin reinicio, así que no interrumpe lo que esté
+  rotación por orden), pero **nunca a una cuenta cuyo gasto semanal (7 d) ya esté al
+  95 % o más**, para no aterrizar en una cuenta a punto de agotar su límite semanal
+  en mitad de una respuesta (si todas las demás están al ≥95 % semanal, se queda en
+  la actual). El cambio es sin reinicio, así que no interrumpe lo que esté
   en curso. Se puede activar/desactivar y elegir el modo y el porcentaje **desde un
   botón de la cabecera** (icono 🔁; verde cuando está activo) o desde ajustes. Si
   alguna vez no cambia y no sabes por qué, el comando **"Diagnose auto-switch"**

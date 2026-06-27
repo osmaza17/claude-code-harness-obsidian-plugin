@@ -301,6 +301,17 @@ llama dos veces por sesión (xterm no lo soporta).
   Destino base = `pickNextAccount()` = **cuenta menos gastada** (menor % 5h sondeado,
   saltando las de token muerto **y las bloqueadas**; fallback a round-robin por email
   si no hay datos frescos); el techo/guard del 90 % lo restringe a las que tienen hueco.
+  - **Techo semanal del destino (`WEEKLY_CEILING_PCT` = 95 %)**: además del techo de
+    5h, el auto-switch **nunca salta A una cuenta cuyo uso de 7d (semanal) sea ≥95 %**,
+    para no aterrizar en una cuenta que está a punto de agotar su límite semanal en
+    mitad de una respuesta. Es un **filtro de candidatos** (`weeklyMaxedOut(email)`:
+    true solo con lectura 7d **fresca** ≥95 %; fail-open si no hay dato), aplicado en
+    `pickNextAccount()` (ambas rutas: menos-gastada y round-robin) y en
+    `leastUsedBelow()`. NO fuerza a la cuenta activa a moverse (no toca la decisión de
+    *cuándo* saltar, solo *adónde*). Si **todos** los destinos están al ≥95 % semanal,
+    `leastUsedBelow` devuelve null y, como sí hay datos frescos
+    (`haveFreshUsageData`), el plugin **se queda** en la cuenta actual en vez de saltar
+    a una semanalmente agotada.
   Hot-swap sin reinicio → no corta el turno (la cuenta nueva aplica a la siguiente
   petición). Cooldown de 10 s evita bucles y deja que la barra se asiente.
   - **Cuentas bloqueadas para auto-switch** (`settings.autoSwitchExcluded`, lista de

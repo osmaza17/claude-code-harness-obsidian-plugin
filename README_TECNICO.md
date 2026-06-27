@@ -223,6 +223,13 @@ elige la de **menor % 5h sondeado fresco**. Si ninguna tiene dato fresco →
 **fallback al round-robin** por email (con wrap), saltando igualmente las de token
 muerto. `null` si hay <2 cuentas.
 
+**Techo semanal del destino (`WEEKLY_CEILING_PCT` = 95 %)**: además, ni la ruta
+menos-gastada ni el round-robin eligen una cuenta cuyo **7d (semanal) fresco sea
+≥95 %** (`weeklyMaxedOut(email)`, fail-open si no hay dato), para no aterrizar en
+una cuenta a punto de agotar su límite semanal. Mismo filtro en `leastUsedBelow()`.
+Si **todos** los destinos están ≥95 % semanal, no hay candidato y el plugin se
+queda en la cuenta actual (no salta a una semanalmente agotada).
+
 ### Al rotar (ambos modos)
 `cooldown = now + 10 s`, `rotateBaselinePct = null` (la nueva cuenta recapturará
 su baseline tras el cooldown), `autoSwitchBuf = ""`, Notice, `switchToAccount()`.

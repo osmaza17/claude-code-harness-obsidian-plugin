@@ -159,6 +159,11 @@ const DEFAULT_USAGE_RE = "5h:[^\\n]{0,40}?(\\d{1,3})\\s*%";
 // other account is already ≥90% (or none is eligible): then it stays on the
 // current account and runs it to the limit, since switching would buy no margin.
 const SWITCH_CEILING_PCT = 90;
+// Weekly (7d) ceiling for the DESTINATION of an auto-switch: never jump TO an
+// account whose 7d usage is already ≥ this %, so we don't land on a cuenta that
+// is about to hit its weekly limit mid-response. Applies to candidate selection
+// only (it filters destinations); it does not force the active account to move.
+const WEEKLY_CEILING_PCT = 95;
 // Best-effort patterns (the exact text Claude prints may change — tune if needed).
 // LIMIT_RE: explicit "limit reached" message → fallback trigger to switch.
 const LIMIT_RE =
@@ -2763,8 +2768,19 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.rotateBaselinePct = null;
   }
 
+  /** True when `email` has a FRESH 7d reading at/over the weekly ceiling, i.e. it
+   *  is about to hit its weekly limit and must NOT be used as a switch target.
+   *  Fail-open: unknown/stale/error 7d → false (don't exclude on missing data). */
+  private weeklyMaxedOut(email: string): boolean {
+    const u = this.accountUsage.get(email.trim().toLowerCase());
+    if (!u || u.error || u.pct7d == null) return false;
+    if (Date.now() - u.checkedAt >= USAGE_FRESH_MS) return false;
+    return u.pct7d >= WEEKLY_CEILING_PCT;
+  }
+
   /** Account to switch to: the **least-used** one (lowest probed 5h %), skipping
-   *  dead-token accounts. Falls back to round-robin. Null if nowhere to go. */
+   *  dead-token accounts and any whose 7d usage is ≥ the weekly ceiling. Falls
+   *  back to round-robin. Null if nowhere to go. */
   private pickNextAccount(): string | null {
     const saved = this.listSavedAccounts().map((a) => a.email);
     if (saved.length < 2) return null;
@@ -2779,6 +2795,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     for (const e of others) {
       const u = this.accountUsage.get(e.trim().toLowerCase());
       if (u?.error === "auth") continue; // dead token — can't use it
+      if (this.weeklyMaxedOut(e)) continue; // 7d ≥ ceiling — about to hit weekly limit
       const pct =
         u && u.pct5h != null && Date.now() - u.checkedAt < USAGE_FRESH_MS
           ? u.pct5h
@@ -2797,6 +2814,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (cand.trim().toLowerCase() === cur) continue;
       if (!this.isAccountEligible(cand)) continue;
       if (this.accountUsage.get(cand.trim().toLowerCase())?.error === "auth") continue;
+      if (this.weeklyMaxedOut(cand)) continue; // 7d ≥ ceiling — about to hit weekly limit
       return cand;
     }
     return best; // may be null
@@ -2819,6 +2837,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (!u || u.error === "auth" || u.pct5h == null) continue;
       if (Date.now() - u.checkedAt >= USAGE_FRESH_MS) continue;
       if (u.pct5h >= maxPct) continue; // no room → keep the 10% margin elsewhere
+      if (this.weeklyMaxedOut(a.email)) continue; // 7d ≥ ceiling — about to hit weekly limit
       if (u.pct5h < bestPct) {
         bestPct = u.pct5h;
         best = a.email;
