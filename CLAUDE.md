@@ -235,35 +235,6 @@ llama dos veces por sesión (xterm no lo soporta).
        fija en `term.onData`). `setBusy()` refresca vía `refreshTabStatus()` (actualiza
        solo los `.cch-tab-dot` in situ). El `case "exit"` y `dispose()` apagan el
        timer; salir asienta el punto.
-       - **Debounce de inicio (anti-parpadeo)** (`settings.idleBlipIgnoreMs`, def.
-         800; 0 = instantáneo): la TUI de Claude repinta su barra de estado / título
-         OSC sola estando inactiva, y esos bursts sueltos hacían parpadear el punto a
-         amarillo y reiniciaban el contador de "terminado". Ahora, **estando idle**,
-         `markActivity` no marca busy al instante: espera `idleBlipIgnoreMs` y solo
-         pasa a busy (`markBusyNow`) si llegó MÁS salida tras el primer chunk
-         (`lastActivityAt > onsetStart` = stream real, no un repintado de una sola
-         ráfaga). Ya **en** busy, cada chunk rearma el quiet-gap de 1200 ms como
-         antes. Campos `lastActivityAt`/`onsetTimer` (este se apaga en `exit`/
-         `dispose`).
-       - **Aviso al terminar** (`settings.notifyOnIdle` = sonido, `noticeOnIdle` =
-         Notice; ambos def. on): cuando el punto pasa a verde, `setBusy` arma
-         `idleChimeTimer` por `settings.idleNotifyDelaySec` s (def. 60) y, si la
-         sesión sigue en verde al cumplirse (def. 20 s), llama `plugin.notifySessionIdle(this)`.
-         Cualquier cambio de estado cancela el timer, así que solo notifica cuando de
-         verdad ha terminado y se ha asentado. `notifySessionIdle` muestra un Notice
-         con el **título de la pestaña** (si `noticeOnIdle`) y/o suena (si
-         `notifyOnIdle`). Es **por sesión**: varias pestañas que terminan emiten cada
-         una su aviso. **Solo avisa de pestañas que no estás atendiendo**
-         (`notifyOnlyIfUnattended`, def. on): si durante la ventana de espera entras
-         en esa pestaña (la activas con foco) o vuelves a la ventana sobre ella, su
-         aviso se cancela. `attendedSinceIdle` (campo de `Session`) se fija al armar
-         el timer (`= plugin.isSessionAttended(this)` = es la activa y `document.hasFocus()`)
-         y lo pone a true `markAttended()`, llamado desde `setActive` (si hay foco) y
-         desde el listener `window` `"focus"` (registrado en `onload`); al disparar,
-         si `attendedSinceIdle` se descarta el aviso. `playIdleChime` es un "ding" de dos notas (Web Audio, un único
-         `AudioContext` cerrado en `onunload`); varios a la vez se **escalonan** ~0,4 s
-         (`chimeTail` = siguiente hueco en tiempo del contexto) en vez de descartarse,
-         para oír uno por pestaña sin solaparse.
   2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
@@ -546,24 +517,6 @@ llama dos veces por sesión (xterm no lo soporta).
 - **Aviso por bell** (`term.onBell`): si `settings.notifyOnBell` (por defecto
   true), muestra un `Notice` cuando el terminal suena la campana (`\x07`), que
   Claude tiende a sonar al terminar una tarea larga.
-- **Aviso al terminar una sesión (heartbeat)** (`notifySessionIdle`): cuando el
-  punto de una pestaña lleva en verde el retardo configurado (`idleNotifyDelaySec`,
-  def. 20 s; `idleChimeTimer` armado en `setBusy(false)`, cancelado si vuelve a
-  amarillo), avisa de que esa sesión ha terminado y se ha asentado. Dos canales,
-  ambos opt-out por ajuste: un **Notice con el título de la pestaña**
-  (`noticeOnIdle`) y/o un **"ding"** sintetizado (`notifyOnIdle`, `playIdleChime`,
-  Web Audio). Es **por sesión** (varias pestañas avisan cada una); los dings se
-  **escalonan** ~0,4 s si coinciden. El retardo evita los falsos avisos de los
-  bajones a verde a mitad de tarea, y el **debounce de inicio** (`idleBlipIgnoreMs`,
-  def. 800 ms) evita que los repintados espontáneos de Claude (barra de estado /
-  título OSC) reinicien el contador. Más fiable que el bell (que Claude no siempre
-  suena) porque se ata al heartbeat por hueco de silencio. **Solo avisa de pestañas
-  que no estás atendiendo** (`notifyOnlyIfUnattended`, def. on): si entras en la
-  pestaña (la activas con la ventana enfocada) durante la espera, su aviso se
-  cancela (`attendedSinceIdle`/`markAttended`/`isSessionAttended`). Independiente de
-  `notifyOnBell`. Ajustes: "Notify when a session finishes (sound)" / "(notice)",
-  "Only notify for tabs you're not watching", "Finished delay (seconds)", "Ignore
-  brief redraws (ms)".
 - **Remote control (toggle de dos estados)** (`toggleRemoteControl`): clave del
   comportamiento de `/remote-control`: la **primera** ejecución solo **conecta**
   (muestra `/rc connecting…` → `/rc active` en la barra de estado) y NO imprime la

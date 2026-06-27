@@ -5,65 +5,18 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-27
 
-- **Avisar solo de pestañas que no estás atendiendo.** El sonido/aviso de una
-  pestaña terminada se cancela si entras en ella durante la ventana de espera.
-  - Setting nuevo `notifyOnlyIfUnattended` (def. on).
-  - `Session.attendedSinceIdle` + `markAttended()`; `plugin.isSessionAttended(sess)`
-    = es la pestaña activa **y** `document.hasFocus()`.
-  - Se fija al armar `idleChimeTimer` (suprime si terminó estando tú en ella) y se
-    pone a true al activar la pestaña (`setActive`, con foco) y al volver el foco a
-    la ventana (listener `window`/`focus` en `onload`). Al disparar, si está
-    atendida, no avisa.
-  - Ajuste nuevo: "Only notify for tabs you're not watching".
-  - Docs: CLAUDE.md, README.md actualizados.
-
-- **Retardo de aviso por defecto a 20 s.**
-
-- **Aviso al terminar: Notice con nombre de pestaña, cola escalonada, anti-parpadeo
-  y todo configurable.** Mejora del aviso de sesión terminada a partir del feedback
-  del usuario.
-  - **Notice con el título de la pestaña** (`noticeOnIdle`, def. on): nuevo método
-    `plugin.notifySessionIdle(sess)` que muestra `✓ <título> — terminado` y/o suena,
-    según ajustes. El `idleChimeTimer` ahora llama a este método (antes solo sonaba).
-  - **Cola escalonada en vez de throttle**: `playIdleChime` ya no descarta los
-    avisos simultáneos (quitado `lastChimeAt`/300 ms); los **escalona ~0,4 s**
-    (`chimeTail` = siguiente hueco en tiempo del `AudioContext`), así varias pestañas
-    que terminan a la vez suenan una por una sin solaparse.
-  - **Anti-parpadeo (debounce de inicio)** (`idleBlipIgnoreMs`, def. 800 ms; 0 =
-    instantáneo): la TUI de Claude repinta su barra/título sola estando inactiva, lo
-    que parpadeaba el punto a amarillo y reiniciaba el contador. Ahora estando idle,
-    `markActivity` espera ese tiempo y solo marca busy si llegó más salida tras el
-    primer chunk (`markBusyNow`; campos `lastActivityAt`/`onsetTimer`, apagados en
-    `exit`/`dispose`). Un repintado de una sola ráfaga ya no cuenta como actividad.
-  - **Retardo configurable** (`idleNotifyDelaySec`, def. 60): el minuto fijo pasa a
-    ajuste.
-  - Ajustes nuevos en la pestaña del plugin: "Notify when a session finishes
-    (notice)", "Finished delay (seconds)", "Ignore brief redraws (ms)".
-  - Docs: CLAUDE.md, README.md actualizados.
-
-- **Sonido al terminar: esperar 1 minuto en verde (fix de sobre-sonido).** La
-  primera versión sonaba en cada transición amarillo→verde, y Claude pasa a verde
-  varias veces a mitad de tarea (pausas >1200 ms esperando herramienta o
-  pensando), así que sonaba sin parar. Ahora solo suena cuando la sesión lleva
-  **un minuto entero en verde** sin volver a amarillo.
-  - Campo nuevo `Session.idleChimeTimer` (60 s): se arma en `setBusy(false)` y se
-    cancela en cualquier cambio de estado; el "ding" solo suena si el timer llega
-    al final (sesión aún en verde y `!exited`).
-  - Limpieza del timer en `case "exit"` y `dispose()`.
-
-- **Sonido cuando una sesión termina (heartbeat amarillo→verde).** Hasta ahora el
-  punto de la pestaña pasaba de amarillo (trabajando) a verde (terminado) en
-  silencio; ahora suena un aviso para volver al ordenador estando lejos.
-  - Setting nuevo `notifyOnIdle: boolean` (def. `true`).
-  - `Session.setBusy()` dispara `plugin.playIdleChime()` en la transición
-    `busy → idle` con guard `!exited` (no suena al cerrarse una sesión, que va a
-    gris; `exited` se fija antes de `setBusy(false)` en el `case "exit"`).
-  - `playIdleChime()`: "ding" de dos notas (A5→D6) sintetizado con la Web Audio
-    API; un único `AudioContext` reutilizado, ataque corto + caída exponencial,
-    throttle de 300 ms para no solapar varias sesiones que acaban a la vez; todo
-    en `try/catch`. El contexto se cierra en `onunload`.
-  - Ajustes: toggle "Notify when a session finishes (sound)".
-  - Docs: CLAUDE.md actualizado.
+- **Revertida por completo la función de "aviso al terminar una sesión".** Se había
+  construido una tanda de commits (sonido "ding" con Web Audio, luego Notice por
+  pestaña, cola escalonada, debounce anti-parpadeo y "avisar solo de pestañas no
+  atendidas"). A petición del usuario se elimina **todo** ese trabajo: tanto el
+  sonido como el aviso visual. `main.ts` vuelve al estado de `9f98e00` (el commit
+  anterior al sonido), conservando el punto heartbeat básico de las pestañas, que es
+  anterior e independiente. Borrados: ajustes `notifyOnIdle`/`noticeOnIdle`/
+  `notifyOnlyIfUnattended`/`idleNotifyDelaySec`/`idleBlipIgnoreMs`, métodos
+  `notifySessionIdle`/`playIdleChime`/`markAttended`/`isSessionAttended`, campos
+  `idleChimeTimer`/`attendedSinceIdle`/`audioCtx`/`chimeTail` y su UI de ajustes.
+  Recompilado `main.js`. (El "Aviso por bell" sobre `term.onBell` es una función
+  distinta y anterior; se mantiene.)
 
 - **Menú 👤: cuenta atrás hasta el reseteo de la ventana de 7d.** El menú de
   cuentas (y la lista de ajustes) ya mostraban el % de uso de 7d pero no cuándo
