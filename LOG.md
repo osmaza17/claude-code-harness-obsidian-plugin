@@ -5,6 +5,21 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-27
 
+- **Menú 👤: cuenta atrás hasta el reseteo de la ventana de 7d.** El menú de
+  cuentas (y la lista de ajustes) ya mostraban el % de uso de 7d pero no cuándo
+  se resetea esa ventana; ahora muestran también el tiempo restante, junto al de
+  la ventana de 5h.
+  - `AccountUsage`: campo nuevo `reset7d` (epoch, o `null`).
+  - `probeUsage`: parsea el header `anthropic-ratelimit-unified-7d-reset`. Como
+    ese nombre es por simetría con el de 5h y NO está verificado en vivo, hay un
+    respaldo que escanea cualquier header cuyo nombre contenga "7d" y "reset". Si
+    el header no existe, la cuenta atrás de 7d simplemente no aparece (sin romper
+    nada).
+  - Formateo unificado en `resetCountdown(epoch)`: días+horas para la ventana de
+    7d (`3d 4h`), horas+minutos o solo minutos para la de 5h. Usado tanto por
+    `usageLabel` (ajustes, texto plano `… · 7d NN% (Dd Hh)`) como por
+    `accountMenuTitle` (columna alineada del menú 👤).
+
 - **Token Dashboard: gráficas vacías mientras corre el primer escaneo.** Antes,
   durante el ~1 min del análisis inicial el dashboard parpadeaba re-renderizando
   con datos parciales. Ahora muestra el layout con las **gráficas vacías** y un

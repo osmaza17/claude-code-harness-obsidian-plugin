@@ -193,6 +193,10 @@ const REFRESH_SKEW_MS = 30 * 60 * 1000;
 const H_5H_UTIL = "anthropic-ratelimit-unified-5h-utilization";
 const H_5H_RESET = "anthropic-ratelimit-unified-5h-reset";
 const H_7D_UTIL = "anthropic-ratelimit-unified-7d-utilization";
+// The 7d reset epoch. Expected name by symmetry with the 5h header, but not
+// verified live (unlike H_5H_RESET); probeUsage also scans for any "7d…reset"
+// header as a fallback so a renamed/variant header still works.
+const H_7D_RESET = "anthropic-ratelimit-unified-7d-reset";
 const H_5H_STATUS = "anthropic-ratelimit-unified-5h-status";
 const USAGE_FRESH_MS = 6 * 60 * 1000; // a reading older than this is "stale"
 
@@ -202,6 +206,7 @@ interface AccountUsage {
   pct5h: number | null;
   reset5h: number | null;
   pct7d: number | null;
+  reset7d: number | null;
   status: string | null;
   error: "auth" | "rate" | "net" | null;
   checkedAt: number;
@@ -3031,6 +3036,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       pct5h: null,
       reset5h: null,
       pct7d: null,
+      reset7d: null,
       status: null,
       error,
       checkedAt: now,
@@ -3091,10 +3097,23 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
               return finish(empty(status === 429 ? "rate" : "net"));
             }
             const reset = parseInt(h[H_5H_RESET], 10);
+            // 7d reset: prefer the expected header, else scan for any header
+            // whose name mentions both "7d" and "reset" (robust to a rename).
+            let raw7d = h[H_7D_RESET];
+            if (raw7d == null) {
+              for (const k of Object.keys(h)) {
+                if (k.includes("7d") && k.includes("reset")) {
+                  raw7d = h[k];
+                  break;
+                }
+              }
+            }
+            const reset7 = parseInt(raw7d, 10);
             finish({
               pct5h,
               reset5h: isNaN(reset) ? null : reset,
               pct7d: toPct(h[H_7D_UTIL]),
+              reset7d: isNaN(reset7) ? null : reset7,
               status: h[H_5H_STATUS] || null,
               error: null,
               checkedAt: now,
@@ -3137,6 +3156,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
             pct5h: null,
             reset5h: null,
             pct7d: null,
+            reset7d: null,
             status: null,
             error: "auth",
             checkedAt: Date.now(),
@@ -3162,6 +3182,21 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return u.pct5h;
   }
 
+  /** "Time left until `epoch`" as a short countdown, or "" if missing/past.
+   *  Scales the units: days+hours for the 7d window, hours+minutes (or just
+   *  minutes) for the 5h window. */
+  private resetCountdown(epoch: number | null): string {
+    if (!epoch) return "";
+    const diff = epoch - Math.floor(Date.now() / 1000);
+    if (diff <= 0) return "";
+    const d = Math.floor(diff / 86400);
+    const h = Math.floor((diff % 86400) / 3600);
+    const m = Math.floor((diff % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+    return `${m}m`;
+  }
+
   /** Short label for an account's cached usage (plain text, for settings). */
   usageLabel(email: string): string {
     const u = this.accountUsage.get(email.trim().toLowerCase());
@@ -3171,15 +3206,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (u.error) return "unavailable";
     if (u.pct5h == null) return "…";
     let s = "5h " + u.pct5h + "%";
-    if (u.reset5h) {
-      const diff = u.reset5h - Math.floor(Date.now() / 1000);
-      if (diff > 0) {
-        const h = Math.floor(diff / 3600);
-        const m = Math.floor((diff % 3600) / 60);
-        s += h > 0 ? ` (${h}h ${m}m)` : ` (${m}m)`;
-      }
+    const cd5 = this.resetCountdown(u.reset5h);
+    if (cd5) s += ` (${cd5})`;
+    if (u.pct7d != null) {
+      s += " · 7d " + u.pct7d + "%";
+      const cd7 = this.resetCountdown(u.reset7d);
+      if (cd7) s += ` (${cd7})`;
     }
-    if (u.pct7d != null) s += " · 7d " + u.pct7d + "%";
     return s;
   }
 
@@ -3216,20 +3249,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     seg("5h ", "var(--text-muted)");
     seg(String(u.pct5h).padStart(3, " ") + "%", this.usageColor(u.pct5h));
 
-    let cd = "";
-    if (u.reset5h) {
-      const diff = u.reset5h - Math.floor(Date.now() / 1000);
-      if (diff > 0) {
-        const h = Math.floor(diff / 3600);
-        const m = Math.floor((diff % 3600) / 60);
-        cd = h > 0 ? `(${h}h ${String(m).padStart(2, "0")}m)` : `(${m}m)`;
-      }
-    }
-    seg("  " + cd.padEnd(9, " "), "var(--text-muted)");
+    const cd5 = this.resetCountdown(u.reset5h);
+    seg("  " + (cd5 ? `(${cd5})` : "").padEnd(9, " "), "var(--text-muted)");
 
     if (u.pct7d != null) {
       seg("· 7d ", "var(--text-muted)");
       seg(String(u.pct7d).padStart(3, " ") + "%", this.usageColor(u.pct7d));
+      const cd7 = this.resetCountdown(u.reset7d);
+      seg("  " + (cd7 ? `(${cd7})` : ""), "var(--text-muted)");
     }
     return frag;
   }

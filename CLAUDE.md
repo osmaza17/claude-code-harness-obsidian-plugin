@@ -354,7 +354,9 @@ llama dos veces por sesión (xterm no lo soporta).
   `authorization: Bearer <accessToken>` + `anthropic-version: 2023-06-01` +
   `anthropic-beta: oauth-2025-04-20`, y parsea
   `anthropic-ratelimit-unified-5h-utilization` (fracción 0–1 → ×100),
-  `…-5h-reset` (epoch), `…-7d-utilization`. Usa `https` de Node (no `requestUrl`)
+  `…-5h-reset` (epoch), `…-7d-utilization`, `…-7d-reset` (epoch; nombre por
+  simetría con el de 5h, NO verificado en vivo, con respaldo que escanea cualquier
+  header con "7d"+"reset"). Usa `https` de Node (no `requestUrl`)
   para exponer todos los headers. **Verificado en vivo** que el OAuth token de
   Claude Code autentica esa llamada. `accessTokenFor(email)` saca el token de
   `.credentials.json` (cuenta activa, `claudeAiOauth` en raíz) o del snapshot
@@ -371,10 +373,12 @@ llama dos veces por sesión (xterm no lo soporta).
   (toggle de cabecera o ajustes) se dispara un `refreshUsage({refreshTokens:true})`
   inmediato para revivir y calentar todas las cuentas sin esperar al siguiente tick. El menú 👤 renderiza con `accountMenuTitle()` un
   `DocumentFragment` **monospace + `white-space:pre`** que alinea en columnas
-  (email padded → `5h` num→ countdown padded → `7d`) y **colorea** los % por nivel
-  (`usageColor`: <50 verde, 50-74 amarillo, 75-89 naranja, ≥90 rojo). La lista de
-  ajustes usa el texto plano `usageLabel(email)` (`5h NN% (Hh Mm) · 7d NN%`, o
-  `expired` si 401, `rate-limited` si 429). 401 → `error:"auth"`: `pickNextAccount`
+  (email padded → `5h` num→ countdown 5h padded → `7d` num → countdown 7d) y
+  **colorea** los % por nivel (`usageColor`: <50 verde, 50-74 amarillo, 75-89
+  naranja, ≥90 rojo). Ambas cuentas atrás (hasta el reseteo de cada ventana) se
+  formatean con `resetCountdown(epoch)` (días+horas para 7d, horas+minutos para
+  5h; "" si falta/pasó). La lista de ajustes usa el texto plano `usageLabel(email)`
+  (`5h NN% (Hh Mm) · 7d NN% (Dd Hh)`, o `expired` si 401, `rate-limited` si 429). 401 → `error:"auth"`: `pickNextAccount`
   la salta. OJO: 401 en la **cuenta activa** suele ser falso (su access token
   caducó pero `claude` lo refresca en la siguiente petición); por eso la etiqueta
   es `expired`, no "necesita login".
