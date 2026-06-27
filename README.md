@@ -117,10 +117,13 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   el plugin. (También disponible como comando "Open Token Dashboard".)
 - **Aviso al terminar**: notifica (Obsidian Notice) cuando el terminal suena la
   campana, que Claude tiende a sonar al acabar una tarea larga (configurable).
-- **Sonido al terminar una sesión**: reproduce un "ding" suave cuando el punto de
-  la pestaña lleva **un minuto en verde** (Claude terminó y se ha asentado), para
-  avisarte de que vuelvas al ordenador. El minuto de espera evita falsos avisos por
-  las pausas a mitad de tarea. Configurable (por defecto activado).
+- **Aviso al terminar una sesión**: cuando el punto de la pestaña lleva en verde el
+  tiempo configurado (por defecto un minuto: Claude terminó y se ha asentado), te
+  avisa para que vuelvas al ordenador. Puede sonar un "ding" suave y/o mostrar un
+  aviso con el nombre de la pestaña. Funciona **por pestaña** (varias que terminan
+  avisan cada una; los sonidos se escalonan para no solaparse) e ignora los
+  repintados espontáneos de Claude para no dar falsos avisos. Todo configurable
+  (sonido, aviso, retardo y filtro) en ajustes.
 - **Cabecera configurable**: cada botón de la cabecera se puede ocultar desde
   ajustes.
 - **Zoom de fuente**: `Ctrl +` / `Ctrl -` / `Ctrl 0`, **`Ctrl + rueda del ratón`** y
@@ -164,7 +167,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Skill | Skill de `~/.claude/skills` que se invoca como `/<nombre>` tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
-| Notify when a session finishes (sound) | Reproducir un sonido cuando el punto de la pestaña lleva un minuto en verde (terminado) (por defecto activado). |
+| Notify when a session finishes (sound) | Reproducir un "ding" cuando una sesión termina; varias a la vez se escalonan (por defecto activado). |
+| Notify when a session finishes (notice) | Mostrar un aviso con el nombre de la pestaña que termina (por defecto activado). |
+| Finished delay (seconds) | Tiempo que el punto debe quedar verde antes de avisar (por defecto 60). |
+| Ignore brief redraws (ms) | Ignorar ráfagas de salida más cortas que esto para que los repintados de Claude no parpadeen el punto ni reinicien el aviso; 0 lo desactiva (por defecto 800). |
 | Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, auto-switch al superar un % de uso, y **bloquear cuentas** (🔁/🚫) para que el auto-switch no las elija (p. ej. cuentas de amigos). |
 | Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, token dashboard, zoom). |
 | Default browser | Navegador para el control remoto cuando la cuenta activa no está mapeada. |

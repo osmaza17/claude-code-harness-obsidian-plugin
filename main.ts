@@ -65,9 +65,18 @@ interface HarnessSettings {
   // Fire an Obsidian notice when the terminal rings the bell (\x07) — Claude
   // tends to ring it when a long task finishes / needs attention.
   notifyOnBell: boolean;
-  // Play a short chime when a session's heartbeat dot goes from busy (yellow) to
-  // idle (green) — i.e. Claude stopped working and is waiting for you again.
+  // Play a short chime when a session finishes (its heartbeat dot has stayed idle
+  // for `idleNotifyDelaySec`). Several tabs finishing stagger their chimes.
   notifyOnIdle: boolean;
+  // Show an Obsidian notice naming the tab when a session finishes.
+  noticeOnIdle: boolean;
+  // Seconds the dot must stay idle (green) before a session counts as "finished"
+  // and the notice/chime fires. Avoids ringing on brief mid-task pauses.
+  idleNotifyDelaySec: number;
+  // Ignore lone bursts of PTY output shorter than this (ms) when deciding the dot
+  // is busy — stops incidental redraws (status line / OSC title that Claude emits
+  // while idle) from flashing it yellow and resetting the finished timer. 0 = off.
+  idleBlipIgnoreMs: number;
   // Turn coloured note references in Claude's output (and [[wikilinks]]) into
   // clickable links that open the matching .md note in the vault.
   linkifyNotes: boolean;
@@ -127,6 +136,9 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   model: "opus",
   notifyOnBell: true,
   notifyOnIdle: true,
+  noticeOnIdle: true,
+  idleNotifyDelaySec: 60,
+  idleBlipIgnoreMs: 800,
   linkifyNotes: true,
   wikilinkPicker: true,
   browserMap: [],
@@ -418,10 +430,17 @@ class Session {
   // drives the tab dot; the timer flips it back to idle after a quiet gap.
   busy = false;
   private busyTimer: number | null = null;
-  // Fires the "session finished" chime only once the dot has stayed idle (green)
-  // for a full minute — so the brief busy→idle dips mid-task (Claude pausing for a
-  // tool / thinking) don't ring. Re-arming busy cancels it.
+  // Fires the "session finished" notice/chime only once the dot has stayed idle
+  // (green) for the configured delay — so the brief busy→idle dips mid-task (Claude
+  // pausing for a tool / thinking) don't ring. Re-arming busy cancels it.
   private idleChimeTimer: number | null = null;
+  // Onset debounce: incidental redraws (status-line refresh, OSC title) arrive as a
+  // lone burst and would flash the dot yellow for nothing — and reset the idle
+  // timer. We only flip to busy once activity is *sustained* (more output arrives
+  // after the first burst within idleBlipIgnoreMs). lastActivityAt tracks the most
+  // recent PTY chunk; onsetTimer is the pending "is this real?" check.
+  private lastActivityAt = 0;
+  private onsetTimer: number | null = null;
   private lastKeyAt = 0; // when the user last typed (to ignore keystroke echo)
 
   // Remote control toggle (/remote-control). remoteOn drives the button's green
@@ -587,14 +606,45 @@ class Session {
     if (this.firstPromptBuf.length < 80) this.firstPromptBuf += d;
   }
 
-  /** Tab heartbeat. Each chunk of PTY output (other than keystroke echo) marks
-   *  the session busy and re-arms a quiet-gap timer; when the gap elapses with no
-   *  output, Claude has handed control back and the session goes idle. Output
-   *  within ~600ms of a keystroke is treated as echo (so the dot doesn't pulse
-   *  just because YOU are typing). */
+  /** Tab heartbeat. Each chunk of PTY output (other than keystroke echo) is
+   *  activity; sustained activity marks the session busy and re-arms a quiet-gap
+   *  timer; when the gap elapses with no output, Claude has handed control back and
+   *  the session goes idle. Output within ~600ms of a keystroke is treated as echo
+   *  (so the dot doesn't pulse just because YOU are typing).
+   *
+   *  Onset debounce (idleBlipIgnoreMs): a lone burst of output — a status-line
+   *  repaint or an OSC title update that Claude emits on its own while idle — would
+   *  otherwise flash the dot yellow and reset the "finished" timer. So when idle we
+   *  wait idleBlipIgnoreMs and only go busy if MORE output arrived after the first
+   *  chunk (a real stream), ignoring one-off redraws. Set to 0 for the old instant
+   *  behaviour. */
   private markActivity() {
     if (this.exited) return;
-    if (Date.now() - this.lastKeyAt < 600) return; // keystroke echo, not Claude
+    const now = Date.now();
+    if (now - this.lastKeyAt < 600) return; // keystroke echo, not Claude
+    this.lastActivityAt = now;
+
+    if (this.busy) {
+      this.markBusyNow(); // already working: keep the quiet-gap timer alive
+      return;
+    }
+    const onsetMs = this.plugin.settings.idleBlipIgnoreMs;
+    if (onsetMs <= 0) {
+      this.markBusyNow(); // debounce disabled → instant
+      return;
+    }
+    if (this.onsetTimer != null) return; // already watching this burst
+    const onsetStart = now;
+    this.onsetTimer = window.setTimeout(() => {
+      this.onsetTimer = null;
+      // Only real if more output landed AFTER we started watching (a stream, not a
+      // single incidental redraw, which leaves lastActivityAt == onsetStart).
+      if (!this.exited && this.lastActivityAt > onsetStart) this.markBusyNow();
+    }, onsetMs);
+  }
+
+  /** Mark busy now and (re)arm the quiet-gap timer that returns the dot to idle. */
+  private markBusyNow() {
     this.setBusy(true);
     if (this.busyTimer != null) window.clearTimeout(this.busyTimer);
     this.busyTimer = window.setTimeout(() => {
@@ -607,19 +657,22 @@ class Session {
     if (this.busy === b) return;
     this.busy = b;
     this.plugin.refreshTabStatus();
-    // Sound only when the session has *settled*: stayed idle (green) for a full
-    // minute, not on the brief busy→idle dips that happen mid-task (Claude pausing
-    // for a tool / thinking). Any change cancels a pending chime; going busy again
-    // means it wasn't really finished. Skip on exit (dot is grey, not green).
+    // Notify only when the session has *settled*: stayed idle (green) for the
+    // configured delay, not on the brief busy→idle dips that happen mid-task. Any
+    // change cancels a pending notification; going busy again means it wasn't really
+    // finished. Skip on exit (dot is grey, not green).
     if (this.idleChimeTimer != null) {
       window.clearTimeout(this.idleChimeTimer);
       this.idleChimeTimer = null;
     }
-    if (!b && !this.exited && this.plugin.settings.notifyOnIdle) {
+    const wantSound = this.plugin.settings.notifyOnIdle;
+    const wantNotice = this.plugin.settings.noticeOnIdle;
+    if (!b && !this.exited && (wantSound || wantNotice)) {
+      const delayMs = Math.max(1, this.plugin.settings.idleNotifyDelaySec) * 1000;
       this.idleChimeTimer = window.setTimeout(() => {
         this.idleChimeTimer = null;
-        if (!this.exited) this.plugin.playIdleChime();
-      }, 60000);
+        if (!this.exited) this.plugin.notifySessionIdle(this);
+      }, delayMs);
     }
   }
 
@@ -1610,6 +1663,10 @@ class Session {
       window.clearTimeout(this.idleChimeTimer);
       this.idleChimeTimer = null;
     }
+    if (this.onsetTimer != null) {
+      window.clearTimeout(this.onsetTimer);
+      this.onsetTimer = null;
+    }
     this.closeWikilinkPicker();
     this.killChild();
     try {
@@ -1714,6 +1771,10 @@ class Session {
           if (this.idleChimeTimer != null) {
             window.clearTimeout(this.idleChimeTimer);
             this.idleChimeTimer = null;
+          }
+          if (this.onsetTimer != null) {
+            window.clearTimeout(this.onsetTimer);
+            this.onsetTimer = null;
           }
           this.term.writeln(
             "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"
@@ -3915,16 +3976,27 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
   }
 
-  /** Soft two-note "ding", synthesized with the Web Audio API (no asset). Played
-   *  when a session's dot flips yellow→green so the user knows Claude finished.
-   *  One reused AudioContext; a 300ms throttle so several sessions finishing at
-   *  once don't stack into noise. Best-effort — never throws into the caller. */
+  /** A session settled (stayed idle for the configured delay): tell the user it
+   *  finished, per their settings — a Notice naming the tab and/or a chime. Called
+   *  per-session, so several finishing tabs each fire their own notification (the
+   *  chimes are staggered so they don't overlap into noise). */
+  notifySessionIdle(sess: Session) {
+    if (this.settings.noticeOnIdle) {
+      new Notice("✓ " + (sess.title || "Claude") + " — terminado");
+    }
+    if (this.settings.notifyOnIdle) {
+      this.playIdleChime();
+    }
+  }
+
+  /** Soft two-note "ding", synthesized with the Web Audio API (no asset). When
+   *  several sessions finish at once the chimes are *staggered* (queued ~0.4s
+   *  apart) instead of dropped, so you hear one per tab without them overlapping.
+   *  One reused AudioContext; `chimeTail` is the next free slot in audio-context
+   *  time. Best-effort — never throws into the caller. */
   private audioCtx: AudioContext | null = null;
-  private lastChimeAt = 0;
+  private chimeTail = 0; // next free start time (ctx.currentTime units)
   playIdleChime() {
-    const now = Date.now();
-    if (now - this.lastChimeAt < 300) return; // collapse simultaneous finishes
-    this.lastChimeAt = now;
     try {
       const Ctx: typeof AudioContext =
         window.AudioContext || (window as any).webkitAudioContext;
@@ -3932,7 +4004,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (!this.audioCtx) this.audioCtx = new Ctx();
       const ctx = this.audioCtx;
       if (ctx.state === "suspended") ctx.resume();
-      const t0 = ctx.currentTime;
+      const stagger = 0.4; // seconds between queued chimes
+      const t0 = Math.max(ctx.currentTime, this.chimeTail);
+      this.chimeTail = t0 + stagger;
       // A5 → D6, the second note a beat later: a gentle rising "ding".
       const notes = [
         { freq: 880, at: 0 },
@@ -4591,13 +4665,59 @@ class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Notify when a session finishes (sound)")
       .setDesc(
-        "Play a short chime when a tab's heartbeat dot goes from yellow (Claude working) to green (finished, waiting for you) — so you know to come back even when you're away from the screen."
+        "Play a short chime when a session finishes (its tab dot has stayed green for the delay below). If several tabs finish at once, the chimes are staggered so you hear one per tab."
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.notifyOnIdle).onChange(async (v) => {
           this.plugin.settings.notifyOnIdle = v;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Notify when a session finishes (notice)")
+      .setDesc(
+        "Show an Obsidian notice naming the tab that finished, so you know which session is waiting for you."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.noticeOnIdle).onChange(async (v) => {
+          this.plugin.settings.noticeOnIdle = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Finished delay (seconds)")
+      .setDesc(
+        "How long a tab's dot must stay green before the session counts as finished and notifies you. Higher = fewer false alarms on brief mid-task pauses. Default 60."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("60")
+          .setValue(String(this.plugin.settings.idleNotifyDelaySec))
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            this.plugin.settings.idleNotifyDelaySec =
+              Number.isFinite(n) && n >= 1 ? n : DEFAULT_SETTINGS.idleNotifyDelaySec;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Ignore brief redraws (ms)")
+      .setDesc(
+        "Claude repaints its status line / title on its own while idle; those lone bursts would flash the dot yellow for nothing and reset the finished timer. Output bursts shorter than this are ignored, so the dot only turns yellow on real work. 0 disables (instant dot). Default 800."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("800")
+          .setValue(String(this.plugin.settings.idleBlipIgnoreMs))
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            this.plugin.settings.idleBlipIgnoreMs =
+              Number.isFinite(n) && n >= 0 ? n : DEFAULT_SETTINGS.idleBlipIgnoreMs;
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)

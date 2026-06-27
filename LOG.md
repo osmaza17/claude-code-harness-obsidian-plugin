@@ -5,6 +5,28 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-27
 
+- **Aviso al terminar: Notice con nombre de pestaña, cola escalonada, anti-parpadeo
+  y todo configurable.** Mejora del aviso de sesión terminada a partir del feedback
+  del usuario.
+  - **Notice con el título de la pestaña** (`noticeOnIdle`, def. on): nuevo método
+    `plugin.notifySessionIdle(sess)` que muestra `✓ <título> — terminado` y/o suena,
+    según ajustes. El `idleChimeTimer` ahora llama a este método (antes solo sonaba).
+  - **Cola escalonada en vez de throttle**: `playIdleChime` ya no descarta los
+    avisos simultáneos (quitado `lastChimeAt`/300 ms); los **escalona ~0,4 s**
+    (`chimeTail` = siguiente hueco en tiempo del `AudioContext`), así varias pestañas
+    que terminan a la vez suenan una por una sin solaparse.
+  - **Anti-parpadeo (debounce de inicio)** (`idleBlipIgnoreMs`, def. 800 ms; 0 =
+    instantáneo): la TUI de Claude repinta su barra/título sola estando inactiva, lo
+    que parpadeaba el punto a amarillo y reiniciaba el contador. Ahora estando idle,
+    `markActivity` espera ese tiempo y solo marca busy si llegó más salida tras el
+    primer chunk (`markBusyNow`; campos `lastActivityAt`/`onsetTimer`, apagados en
+    `exit`/`dispose`). Un repintado de una sola ráfaga ya no cuenta como actividad.
+  - **Retardo configurable** (`idleNotifyDelaySec`, def. 60): el minuto fijo pasa a
+    ajuste.
+  - Ajustes nuevos en la pestaña del plugin: "Notify when a session finishes
+    (notice)", "Finished delay (seconds)", "Ignore brief redraws (ms)".
+  - Docs: CLAUDE.md, README.md actualizados.
+
 - **Sonido al terminar: esperar 1 minuto en verde (fix de sobre-sonido).** La
   primera versión sonaba en cada transición amarillo→verde, y Claude pasa a verde
   varias veces a mitad de tarea (pausas >1200 ms esperando herramienta o
