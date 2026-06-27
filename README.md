@@ -122,8 +122,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   avisa para que vuelvas al ordenador. Puede sonar un "ding" suave y/o mostrar un
   aviso con el nombre de la pestaña. Funciona **por pestaña** (varias que terminan
   avisan cada una; los sonidos se escalonan para no solaparse) e ignora los
-  repintados espontáneos de Claude para no dar falsos avisos. Todo configurable
-  (sonido, aviso, retardo y filtro) en ajustes.
+  repintados espontáneos de Claude para no dar falsos avisos. **Solo avisa de
+  pestañas que no estás mirando**: si entras en una pestaña terminada antes de que
+  pase el tiempo, su aviso se cancela. Todo configurable (sonido, aviso, retardo,
+  filtro y "solo si no la miras") en ajustes.
 - **Cabecera configurable**: cada botón de la cabecera se puede ocultar desde
   ajustes.
 - **Zoom de fuente**: `Ctrl +` / `Ctrl -` / `Ctrl 0`, **`Ctrl + rueda del ratón`** y
@@ -169,6 +171,7 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
 | Notify when a session finishes (sound) | Reproducir un "ding" cuando una sesión termina; varias a la vez se escalonan (por defecto activado). |
 | Notify when a session finishes (notice) | Mostrar un aviso con el nombre de la pestaña que termina (por defecto activado). |
+| Only notify for tabs you're not watching | Avisar solo de pestañas que terminan mientras no las miras; si entras en la pestaña antes del retardo, se cancela su aviso (por defecto activado). |
 | Finished delay (seconds) | Tiempo que el punto debe quedar verde antes de avisar (por defecto 20). |
 | Ignore brief redraws (ms) | Ignorar ráfagas de salida más cortas que esto para que los repintados de Claude no parpadeen el punto ni reinicien el aviso; 0 lo desactiva (por defecto 800). |
 | Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, auto-switch al superar un % de uso, y **bloquear cuentas** (🔁/🚫) para que el auto-switch no las elija (p. ej. cuentas de amigos). |

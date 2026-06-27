@@ -5,6 +5,20 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-06-27
 
+- **Avisar solo de pestañas que no estás atendiendo.** El sonido/aviso de una
+  pestaña terminada se cancela si entras en ella durante la ventana de espera.
+  - Setting nuevo `notifyOnlyIfUnattended` (def. on).
+  - `Session.attendedSinceIdle` + `markAttended()`; `plugin.isSessionAttended(sess)`
+    = es la pestaña activa **y** `document.hasFocus()`.
+  - Se fija al armar `idleChimeTimer` (suprime si terminó estando tú en ella) y se
+    pone a true al activar la pestaña (`setActive`, con foco) y al volver el foco a
+    la ventana (listener `window`/`focus` en `onload`). Al disparar, si está
+    atendida, no avisa.
+  - Ajuste nuevo: "Only notify for tabs you're not watching".
+  - Docs: CLAUDE.md, README.md actualizados.
+
+- **Retardo de aviso por defecto a 20 s.**
+
 - **Aviso al terminar: Notice con nombre de pestaña, cola escalonada, anti-parpadeo
   y todo configurable.** Mejora del aviso de sesión terminada a partir del feedback
   del usuario.

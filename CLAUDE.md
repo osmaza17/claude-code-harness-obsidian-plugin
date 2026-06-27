@@ -253,7 +253,14 @@ llama dos veces por sesión (xterm no lo soporta).
          verdad ha terminado y se ha asentado. `notifySessionIdle` muestra un Notice
          con el **título de la pestaña** (si `noticeOnIdle`) y/o suena (si
          `notifyOnIdle`). Es **por sesión**: varias pestañas que terminan emiten cada
-         una su aviso. `playIdleChime` es un "ding" de dos notas (Web Audio, un único
+         una su aviso. **Solo avisa de pestañas que no estás atendiendo**
+         (`notifyOnlyIfUnattended`, def. on): si durante la ventana de espera entras
+         en esa pestaña (la activas con foco) o vuelves a la ventana sobre ella, su
+         aviso se cancela. `attendedSinceIdle` (campo de `Session`) se fija al armar
+         el timer (`= plugin.isSessionAttended(this)` = es la activa y `document.hasFocus()`)
+         y lo pone a true `markAttended()`, llamado desde `setActive` (si hay foco) y
+         desde el listener `window` `"focus"` (registrado en `onload`); al disparar,
+         si `attendedSinceIdle` se descarta el aviso. `playIdleChime` es un "ding" de dos notas (Web Audio, un único
          `AudioContext` cerrado en `onunload`); varios a la vez se **escalonan** ~0,4 s
          (`chimeTail` = siguiente hueco en tiempo del contexto) en vez de descartarse,
          para oír uno por pestaña sin solaparse.
@@ -550,9 +557,13 @@ llama dos veces por sesión (xterm no lo soporta).
   bajones a verde a mitad de tarea, y el **debounce de inicio** (`idleBlipIgnoreMs`,
   def. 800 ms) evita que los repintados espontáneos de Claude (barra de estado /
   título OSC) reinicien el contador. Más fiable que el bell (que Claude no siempre
-  suena) porque se ata al heartbeat por hueco de silencio. Independiente de
+  suena) porque se ata al heartbeat por hueco de silencio. **Solo avisa de pestañas
+  que no estás atendiendo** (`notifyOnlyIfUnattended`, def. on): si entras en la
+  pestaña (la activas con la ventana enfocada) durante la espera, su aviso se
+  cancela (`attendedSinceIdle`/`markAttended`/`isSessionAttended`). Independiente de
   `notifyOnBell`. Ajustes: "Notify when a session finishes (sound)" / "(notice)",
-  "Finished delay (seconds)", "Ignore brief redraws (ms)".
+  "Only notify for tabs you're not watching", "Finished delay (seconds)", "Ignore
+  brief redraws (ms)".
 - **Remote control (toggle de dos estados)** (`toggleRemoteControl`): clave del
   comportamiento de `/remote-control`: la **primera** ejecución solo **conecta**
   (muestra `/rc connecting…` → `/rc active` en la barra de estado) y NO imprime la

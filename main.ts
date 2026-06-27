@@ -70,6 +70,9 @@ interface HarnessSettings {
   notifyOnIdle: boolean;
   // Show an Obsidian notice naming the tab when a session finishes.
   noticeOnIdle: boolean;
+  // Only notify for tabs you weren't attending: if you switch to a finished tab (or
+  // refocus the window on it) during the delay below, its notification is cancelled.
+  notifyOnlyIfUnattended: boolean;
   // Seconds the dot must stay idle (green) before a session counts as "finished"
   // and the notice/chime fires. Avoids ringing on brief mid-task pauses.
   idleNotifyDelaySec: number;
@@ -137,6 +140,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   notifyOnBell: true,
   notifyOnIdle: true,
   noticeOnIdle: true,
+  notifyOnlyIfUnattended: true,
   idleNotifyDelaySec: 20,
   idleBlipIgnoreMs: 800,
   linkifyNotes: true,
@@ -434,6 +438,12 @@ class Session {
   // (green) for the configured delay — so the brief busy→idle dips mid-task (Claude
   // pausing for a tool / thinking) don't ring. Re-arming busy cancels it.
   private idleChimeTimer: number | null = null;
+  // Has the user *attended* this tab (made it the active tab while the window had
+  // focus) since it last went idle? If so we suppress its "finished" notification —
+  // no point alerting you to come back to a tab you already came back to. Set at the
+  // moment the idle timer is armed and whenever you focus the tab; checked when it
+  // fires. See plugin.isSessionAttended / markAttended.
+  attendedSinceIdle = false;
   // Onset debounce: incidental redraws (status-line refresh, OSC title) arrive as a
   // lone burst and would flash the dot yellow for nothing — and reset the idle
   // timer. We only flip to busy once activity is *sustained* (more output arrives
@@ -653,6 +663,13 @@ class Session {
     }, 1200);
   }
 
+  /** The user is now looking at this tab — mark it attended so a pending "finished"
+   *  notification is suppressed (they're already here). Called when the tab becomes
+   *  active or the window regains focus on it. */
+  markAttended() {
+    this.attendedSinceIdle = true;
+  }
+
   private setBusy(b: boolean) {
     if (this.busy === b) return;
     this.busy = b;
@@ -668,10 +685,17 @@ class Session {
     const wantSound = this.plugin.settings.notifyOnIdle;
     const wantNotice = this.plugin.settings.noticeOnIdle;
     if (!b && !this.exited && (wantSound || wantNotice)) {
+      // Start the window already "attended" if you're looking at this tab right now,
+      // so a session that finishes while you watch it never notifies.
+      this.attendedSinceIdle = this.plugin.isSessionAttended(this);
       const delayMs = Math.max(1, this.plugin.settings.idleNotifyDelaySec) * 1000;
       this.idleChimeTimer = window.setTimeout(() => {
         this.idleChimeTimer = null;
-        if (!this.exited) this.plugin.notifySessionIdle(this);
+        if (this.exited) return;
+        // Suppress if you came (back) to this tab during the wait — you don't need
+        // to be told to return to a tab you're already on.
+        if (this.plugin.settings.notifyOnlyIfUnattended && this.attendedSinceIdle) return;
+        this.plugin.notifySessionIdle(this);
       }, delayMs);
     }
   }
@@ -1870,6 +1894,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     await this.loadSettings();
     this.injectFont();
 
+    // Coming back to the Obsidian window counts as attending the tab you land on:
+    // suppress that tab's pending "finished" notification (you're looking at it now).
+    this.registerDomEvent(window, "focus", () => this.activeSession()?.markAttended());
+
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
 
     this.addRibbonIcon("terminal", "Claude Code", () => this.activateView());
@@ -2034,6 +2062,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.activeIndex = i;
     this.rebuildHeader();
     if (this.viewRoot) this.activeSession()?.attachInto(this.viewRoot);
+    // You're now on this tab: cancel its pending "finished" notification (if the
+    // window has focus — switching tabs while the window is in the background, e.g.
+    // via a command, doesn't count as actually looking at it).
+    if (document.hasFocus()) this.activeSession()?.markAttended();
   }
 
   /** Reorder tabs. Moves the session at `from` so it ends up at index `to` in
@@ -3976,6 +4008,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
   }
 
+  /** Is the user actively looking at this session: it's the active tab AND the
+   *  Obsidian window has focus. Used to suppress the "finished" notification for a
+   *  tab you're already attending. */
+  isSessionAttended(sess: Session): boolean {
+    return this.activeSession() === sess && document.hasFocus();
+  }
+
   /** A session settled (stayed idle for the configured delay): tell the user it
    *  finished, per their settings — a Notice naming the tab and/or a chime. Called
    *  per-session, so several finishing tabs each fire their own notification (the
@@ -4682,6 +4721,18 @@ class HarnessSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.noticeOnIdle).onChange(async (v) => {
           this.plugin.settings.noticeOnIdle = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Only notify for tabs you're not watching")
+      .setDesc(
+        "Notify only for sessions that finish while you're elsewhere. If you switch to a finished tab (or bring the Obsidian window back to it) before the delay below elapses, that tab's sound/notice is cancelled — you already came back."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.notifyOnlyIfUnattended).onChange(async (v) => {
+          this.plugin.settings.notifyOnlyIfUnattended = v;
           await this.plugin.saveSettings();
         })
       );
