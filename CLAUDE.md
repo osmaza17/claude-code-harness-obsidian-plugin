@@ -223,18 +223,33 @@ llama dos veces por sesión (xterm no lo soporta).
        el rango manual gana a las fuentes automáticas. `setTitleFrom` limpia control
        chars + colapsa espacios + trunca a 40, y refresca con `refreshTabTitles()`
        (actualiza solo los `.cch-tab-label` in situ, sin rebuild completo).
-     - **Heartbeat por pestaña** (`.cch-tab-dot`, estados `is-busy`/`is-idle`/
-       `is-exited`): un punto sólido (sin animación) que indica si Claude está
-       **trabajando** (amarillo) o **ha terminado/inactivo** (verde); gris si la
-       sesión salió. Se infiere de la **actividad del PTY**:
-       `markActivity()` (en `case "data"`) marca `busy=true` y rearma un timer de
-       hueco silencioso (1200 ms) que lo devuelve a idle —Claude emite tokens /
-       anima su spinner de forma continua mientras piensa o responde, y enmudece al
-       devolver el control—. Para no pulsar mientras **tú** escribes, ignora la
+     - **Heartbeat por pestaña** (`.cch-tab-dot` **+ el borde de la `.cch-tab`**,
+       estados `is-busy`/`is-idle`/`is-exited`/`is-limit`): un punto sólido (sin
+       animación) **y el reborde de la pestaña del mismo color** indican si Claude
+       está **trabajando** (amarillo), **ha terminado/inactivo** (verde), **salió**
+       (gris) o **se detuvo al alcanzar el límite de uso/tokens** (rojo, con leve
+       tinte de fondo). Un único helper `tabState(sess)` decide clase+etiqueta con
+       prioridad `exited > limitReached > busy > idle`, y lo usan **buildHeader**
+       (al construir) y **refreshTabStatus** (in situ: recorre `.cch-tab` y
+       `.cch-tab-dot`, quita los 4 estados y re-aplica). El busy se infiere de la
+       **actividad del PTY**: `markActivity()` (en `case "data"`) marca `busy=true`
+       y rearma un timer de hueco silencioso (1200 ms) que lo devuelve a idle
+       —Claude emite tokens / anima su spinner mientras piensa o responde, y enmudece
+       al devolver el control—. Para no pulsar mientras **tú** escribes, ignora la
        salida que llega <600 ms tras una pulsación (eco de teclado; `lastKeyAt` se
-       fija en `term.onData`). `setBusy()` refresca vía `refreshTabStatus()` (actualiza
-       solo los `.cch-tab-dot` in situ). El `case "exit"` y `dispose()` apagan el
-       timer; salir asienta el punto.
+       fija en `term.onData`). El `case "exit"` y `dispose()` apagan el timer; salir
+       asienta el punto.
+       - **Estado rojo "límite alcanzado"** (`limitReached`): `maybeLimitReached(chunk)`
+         (en `case "data"`, tras `markActivity`) vigila la salida con un buffer
+         rodante propio (ANSI quitado) y, si casa `LIMIT_STOP_RE` —regex **best-effort**,
+         más estricta que `LIMIT_RE`: SIN el `resets at` suelto que sale en la barra de
+         estado normalmente, para no dar falsos rojos—, **engancha** el flag (deja de
+         escanear mientras esté activo, así el texto viejo en pantalla no re-dispara) y
+         pinta la pestaña de rojo. Se **limpia** al teclear (`clearLimitReached` en
+         `term.onData`: seguir escribiendo = continuar) o en `restart()`. CAVEAT honesto:
+         el texto exacto de Claude al agotar el límite puede cambiar; si el rojo nunca
+         se enciende o se enciende mal, ajustar `LIMIT_STOP_RE`. NO cubre la parada por
+         **franja horaria** (eso es otra cosa; ver auto-switch), solo el límite de uso.
   2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;

@@ -19,6 +19,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   conversación; cerrar una pestaña (×) **mata** esa instancia. (Cuenta, uso y
   auto-switch son **globales** —comparten credenciales—, así que cambiar de cuenta
   afecta a todas las instancias.)
+- **Estado de cada pestaña de un vistazo**: cada pestaña lleva un **punto** y, del
+  mismo color, **su reborde**, para ver sin abrirla si Claude está **trabajando**
+  (amarillo), **terminado/inactivo** (verde), **salido** (gris) o **detenido por
+  alcanzar el límite de uso/tokens** (rojo). El rojo se limpia al volver a escribir
+  o al reiniciar la sesión. (La detección del límite es best-effort: depende del
+  texto que imprime Claude, que puede cambiar.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de
   Obsidian (claro/oscuro) y se reaplican al cambiarlo.
 - **Sesiones persistentes**: arrancan al abrir Obsidian aunque no abras el panel,

@@ -183,6 +183,12 @@ const LIMIT_RE =
 // AUTH_FAIL_RE: an auth problem after a swap (e.g. a saved token is dead).
 const AUTH_FAIL_RE =
   /please (run )?\/login|invalid (oauth )?(token|credentials)|token (has )?expired|authentication (failed|error)|unauthorized|\b401\b/i;
+// LIMIT_STOP_RE: Claude stopped because the usage/token limit was hit → paint the
+// tab RED. Tighter than LIMIT_RE on purpose (no bare "resets at", which shows in
+// the status bar normally and would cause false reds). Best-effort: Claude's exact
+// wording can change; tune here if the red never lights up or lights up wrongly.
+const LIMIT_STOP_RE =
+  /(usage|5-?hour|weekly|rate)[- ]?limit (reached|exceeded)|limit reached\b|you'?ve (reached|hit) your[^.]{0,30}\blimit|reached your[^.]{0,20}\blimit|out of (credits|usage)|claude usage limit/i;
 // Generic email matcher (filtered against known accounts before use).
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
@@ -436,6 +442,10 @@ class Session {
   busy = false;
   private busyTimer: number | null = null;
   private lastKeyAt = 0; // when the user last typed (to ignore keystroke echo)
+  // Usage/token limit hit → tab goes RED until the user types again (or restart).
+  // Inferred from Claude's output (best-effort, LIMIT_STOP_RE); drives the tab.
+  limitReached = false;
+  private limitBuf = "";
 
   // Remote control toggle (/remote-control). remoteOn drives the button's green
   // state; while awaiting the menu we scrape the session URL to the clipboard.
@@ -517,6 +527,7 @@ class Session {
     // Forward keystrokes to the pty host (and sniff the first line for a title).
     this.term.onData((d: string) => {
       this.lastKeyAt = Date.now();
+      this.clearLimitReached(); // typing = moving on; drop the red limit flag
       this.captureFirstPrompt(d);
       // The [[ note suggester intercepts typed text: it forwards what should be
       // echoed (the brackets + query) itself and returns true to mean "handled,
@@ -627,6 +638,31 @@ class Session {
   private setBusy(b: boolean) {
     if (this.busy === b) return;
     this.busy = b;
+    this.plugin.refreshTabStatus();
+  }
+
+  /** Watch this session's output for a "usage/token limit reached" message and,
+   *  if seen, flag the tab RED. Uses a small dedicated rolling buffer (ANSI
+   *  stripped) and latches once: it stops scanning while flagged, so stale limit
+   *  text left on screen can't keep re-triggering. Cleared by clearLimitReached
+   *  (the user types) or restart(). */
+  private maybeLimitReached(chunk: string) {
+    if (this.limitReached || this.exited) return;
+    this.limitBuf = (this.limitBuf + chunk).slice(-2000);
+    const clean = this.limitBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+    if (LIMIT_STOP_RE.test(clean)) {
+      this.limitReached = true;
+      this.limitBuf = "";
+      this.plugin.refreshTabStatus();
+    }
+  }
+
+  /** Drop the red limit flag (user moved on / restart). Fresh buffer so the next
+   *  real limit message is detected again. */
+  private clearLimitReached() {
+    this.limitBuf = "";
+    if (!this.limitReached) return;
+    this.limitReached = false;
     this.plugin.refreshTabStatus();
   }
 
@@ -1572,6 +1608,8 @@ class Session {
   /** Kill this claude process and start a fresh one in the same terminal. */
   restart() {
     if (!this.term) return;
+    this.limitReached = false;
+    this.limitBuf = "";
     this.remoteOn = false;
     this.awaitRemoteActive = false;
     this.remoteMenuLoopActive = false;
@@ -1701,6 +1739,7 @@ class Session {
         case "data":
           this.term.write(msg.d);
           this.markActivity(); // tab heartbeat: Claude is producing output
+          this.maybeLimitReached(msg.d); // paint the tab red if usage limit hit
           // Per-session watchers (this terminal's TUI).
           this.maybeSendInitial();
           this.maybeConfirmModel(msg.d);
@@ -3887,12 +3926,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // --- Tab strip: one tab per session + a "new session" button. ---
     const tabs = header.createDiv({ cls: "cch-tabs" });
     this.sessions.forEach((sess, i) => {
+      const st = this.tabState(sess);
       const tab = tabs.createDiv({
-        cls: "cch-tab" + (i === this.activeIndex ? " cch-tab-active" : ""),
+        cls:
+          "cch-tab " + st.cls + (i === this.activeIndex ? " cch-tab-active" : ""),
       });
-      const dotCls = sess.exited ? "is-exited" : sess.busy ? "is-busy" : "is-idle";
-      const dot = tab.createSpan({ cls: "cch-tab-dot " + dotCls });
-      dot.setAttr("aria-label", sess.exited ? "Exited" : sess.busy ? "Working…" : "Idle");
+      const dot = tab.createSpan({ cls: "cch-tab-dot " + st.cls });
+      dot.setAttr("aria-label", st.label);
+      tab.setAttr("title", st.label);
       const label = tab.createSpan({
         cls: "cch-tab-label" + (sess.exited ? " cch-tab-exited" : ""),
         text: sess.title || "Claude",
@@ -4128,16 +4169,34 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Update the per-tab heartbeat dot in place (busy / idle / exited) without a
    *  full header rebuild. Dots are in session order, so index aligns. */
+  /** Shared tab state: drives both the heartbeat dot and the tab border colour.
+   *  Priority: exited (grey) > limit reached (red) > busy (yellow) > idle (green). */
+  private tabState(sess: Session): { cls: string; label: string } {
+    if (sess.exited) return { cls: "is-exited", label: "Exited" };
+    if (sess.limitReached) return { cls: "is-limit", label: "Usage limit reached" };
+    if (sess.busy) return { cls: "is-busy", label: "Working…" };
+    return { cls: "is-idle", label: "Idle" };
+  }
+
   refreshTabStatus() {
     if (!this.viewRoot) return;
+    const states = ["is-busy", "is-idle", "is-exited", "is-limit"];
+    const tabEls = this.viewRoot.findAll(".cch-tabs .cch-tab");
     const dots = this.viewRoot.findAll(".cch-tabs .cch-tab-dot");
     this.sessions.forEach((sess, i) => {
+      const st = this.tabState(sess);
       const dot = dots[i];
-      if (!dot) return;
-      dot.removeClasses(["is-busy", "is-idle", "is-exited"]);
-      const state = sess.exited ? "is-exited" : sess.busy ? "is-busy" : "is-idle";
-      dot.addClass(state);
-      dot.setAttr("aria-label", sess.exited ? "Exited" : sess.busy ? "Working…" : "Idle");
+      if (dot) {
+        dot.removeClasses(states);
+        dot.addClass(st.cls);
+        dot.setAttr("aria-label", st.label);
+      }
+      const tab = tabEls[i];
+      if (tab) {
+        tab.removeClasses(states);
+        tab.addClass(st.cls);
+        tab.setAttr("title", st.label);
+      }
     });
   }
 

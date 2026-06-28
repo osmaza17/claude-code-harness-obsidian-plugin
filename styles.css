@@ -322,6 +322,26 @@
   background: var(--text-faint);
   opacity: 0.45;
 }
+.claude-code-harness .cch-tab-dot.is-limit {
+  background: var(--color-red, #f85149);
+}
+/* Tab border mirrors the heartbeat dot so the state is obvious at a glance:
+   green = idle/done, yellow = working, red = stopped at the usage limit. The
+   prefixed two-class selectors outrank .cch-tab-active's border-color. */
+.claude-code-harness .cch-tab.is-idle {
+  border-color: var(--color-green, #3fb950);
+}
+.claude-code-harness .cch-tab.is-busy {
+  border-color: var(--color-yellow, #d29922);
+}
+.claude-code-harness .cch-tab.is-exited {
+  border-color: var(--background-modifier-border);
+}
+.claude-code-harness .cch-tab.is-limit {
+  border-color: var(--color-red, #f85149);
+  background: rgba(248, 81, 73, 0.14);
+  color: var(--text-normal);
+}
 .claude-code-harness .cch-tab-rename {
   width: 120px;
   height: 20px;
