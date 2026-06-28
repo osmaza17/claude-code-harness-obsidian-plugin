@@ -58,11 +58,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   de la sesión (`https://claude.ai/code/…`) y lo abre para entrar directo a la
   sesión remota; al desactivarlo, desconecta la sesión.
 - **Navegador por cuenta**: como el enlace remoto solo funciona en el navegador
-  donde está logueada la misma cuenta de Claude, puedes mapear en ajustes cada
-  correo de cuenta a un navegador (Chrome / Firefox / Edge / Brave / Opera /
-  Opera GX / ruta personalizada).
-  La cuenta activa se lee de `~/.claude.json`; las no mapeadas usan el navegador
-  por defecto.
+  donde está logueada la misma cuenta de Claude, cada cuenta elige su navegador
+  (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada)
+  **desde su propia tarjeta** en ajustes (ver "Ajustes consolidados por cuenta").
+  La cuenta activa se lee de `~/.claude.json`; las que dejan "Use default" usan el
+  navegador por defecto global.
 - **Cambio de cuenta (sin interrupción)**: las cuentas se **guardan solas** al
   iniciar sesión con ellas, y te cambias entre varias desde el botón de cuenta de
   la cabecera (icono 👤) o la sección "Claude accounts" de ajustes. Hace un
@@ -75,8 +75,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   y **sondea todas las cuentas sin cambiarte a ellas**. El **menú del botón 👤**
   muestra el % de cada cuenta **alineado en columnas y con color** según el nivel
   de uso (verde = menos usada → rojo = cerca del límite), con la cuenta atrás del
-  reset y el % semanal; `expired` si su access token caducó. Hace llamadas mínimas
-  (modelo Haiku); se puede desactivar en ajustes ("Live usage (API)").
+  reset y el % semanal; `expired` si su access token caducó. Además, las cuentas a
+  las que el **auto-switch no puede saltar** por las restricciones (5 h ≥90 %,
+  7 d ≥95 % o token caducado) se resaltan en **rojo** en el menú 👤, como si
+  estuvieran desactivadas (pero el cambio **manual** a ellas sigue funcionando).
+  Hace llamadas mínimas (modelo Haiku); se puede desactivar en ajustes
+  ("Live usage (API)").
 - **Keep-alive de cuentas**: cada 3 min el plugin **refresca el token OAuth** de las
   cuentas cuyo token esté por caducar (el mismo flujo que usa Claude Code por
   dentro), para que las cuentas que no estás usando no se queden `expired` ni se
@@ -115,6 +119,21 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   gastar sus tokens sin querer. También puedes deshabilitarlas en ajustes ("Claude
   accounts", botón 🔁/🚫 por cuenta); ahí el bloqueo solo afecta al cambio
   automático.
+- **Ajustes consolidados por cuenta**: en ajustes, toda la configuración de una
+  cuenta (correo + uso, si el auto-switch puede usarla, su navegador y sus franjas
+  horarias prohibidas) vive **junta en una sola tarjeta** bajo "Per-account
+  settings", en vez de repartida por la página. Los ajustes globales de cuentas
+  (auto-switch, uso en vivo, "Default browser") quedan agrupados encima.
+- **Bloqueo por franjas horarias**: en la tarjeta de cada cuenta puedes definir
+  **ventanas horarias prohibidas** (`HH:MM–HH:MM` + días de la semana;
+  admite franjas que cruzan medianoche, p. ej. 23:00–07:00). Mientras "ahora" cae
+  dentro de una franja, esa cuenta se marca en **rojo** en el menú 👤 (aunque el
+  cambio **manual** a ella sigue permitido) y el **auto-switch nunca salta a ella**.
+  Si la cuenta que estás usando **entra** en su franja prohibida, el plugin **salta
+  automáticamente** a otra cuenta disponible. Y si **no queda ninguna** cuenta a la
+  que saltar, **detiene Claude** (corta la generación, como si se acabase el uso) y
+  te avisa, hasta que la franja termine o haya una cuenta libre. (No bloquea el
+  teclado: corta la generación, no la escritura.)
 - **Token Dashboard**: botón en la cabecera (icono 📊) que abre un **panel local
   de consumo de tokens** en el navegador (`http://127.0.0.1:8080`). Arranca un
   pequeño servidor Python (incluido en `token-dashboard/`, solo stdlib) que escanea
@@ -168,10 +187,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 | Skill | Skill de `~/.claude/skills` que se invoca como `/<nombre>` tras arrancar (también seleccionable desde la cabecera). |
 | Model | Modelo inicial (haiku / sonnet / opus). |
 | Notify on bell | Mostrar un aviso cuando el terminal suena la campana (por defecto activado). |
-| Claude accounts | Guardar la cuenta activa, cambiar/borrar cuentas guardadas (hot-swap sin reinicio), uso real por API ("Live usage") con % por cuenta, auto-switch al superar un % de uso, y **bloquear cuentas** (🔁/🚫) para que el auto-switch no las elija (p. ej. cuentas de amigos). |
+| Claude accounts (global) | Guardar la cuenta activa, uso real por API ("Live usage"), auto-switch al superar un % de uso, y el "Default browser" global. |
+| Per-account settings | Una **tarjeta por cuenta** con todo lo suyo junto: correo + uso, **bloquear** (🔁/🚫) para el auto-switch, su **navegador** (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada, o "Use default") y sus **franjas horarias prohibidas**. |
+| Other browser mappings | Solo aparece si hay mapeos de navegador para correos que aún **no** son cuentas guardadas (para pre-mapear una cuenta no logueada). |
 | Header buttons | Mostrar/ocultar cada botón de la cabecera (enviar nota, cuenta, modelo, skill, remote control, auto-switch, token dashboard, zoom). |
-| Default browser | Navegador para el control remoto cuando la cuenta activa no está mapeada. |
-| Browser per account | Correlación correo de cuenta → navegador (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada). |
 | Node.js path | Ruta a `node.exe` real (autodetectada si se deja vacía). |
 | Python path | Ruta a `python.exe` para el botón Token Dashboard (autodetectada si se deja vacía). |
 

@@ -350,6 +350,64 @@ llama dos veces por sesión (xterm no lo soporta).
     `repeat`/`ban`) el bloqueo solo afecta al auto-switch (el cambio manual desde
     ajustes sigue funcionando). Si todas las demás cuentas están bloqueadas,
     `requestSwitch` avisa una vez ("every other account is blocked").
+    **Resaltado de "destino capado" (`cch-acct-capped`)**: además del bloqueo
+    manual, cada fila se pinta en **rojo** (mismo tinte/acento que `cch-acct-blocked`,
+    pero la etiqueta **sigue clicable**) cuando la cuenta está **inelegible como
+    DESTINO de auto-switch** por las restricciones ya codificadas —espejo de los
+    guards de `pickNextAccount`/`leastUsedBelow` vía el helper `isSwitchTargetCapped`:
+    token caducado (`error==="auth"`), **5h fresco ≥90 %** (`SWITCH_CEILING_PCT`) o
+    **7d fresco ≥95 %** (`WEEKLY_CEILING_PCT`, vía `weeklyMaxedOut`)—. Es **solo
+    aviso visual**: el cambio MANUAL sí ignora los topes (la etiqueta no se vuelve
+    inerte). Fail-open con datos viejos/ausentes (sin lectura fresca → no se pinta,
+    coherente con la decisión real). La cuenta **activa** se excluye (nunca es un
+    destino; conserva su ✓ `cch-acct-current`). `title` de la fila explica el motivo.
+  - **Bloqueo por franjas horarias** (`settings.accountSchedules`): por cuenta se
+    configuran ventanas prohibidas `{start,end,days}` (`HH:MM`, 24h; `days` =
+    números de día JS 0=Dom…6=Sáb; `start>end` cruza medianoche; franja sin días no
+    bloquea). `isTimeBlocked(email, now?)` decide si "ahora" cae dentro (maneja
+    franjas normales y nocturnas, comprobando la pertenencia de día de **ayer** para
+    el tramo tras medianoche). Una cuenta en franja se **descarta como destino** de
+    auto-switch (`continue` añadido en `pickNextAccount` ×2 y `leastUsedBelow`) y se
+    pinta del mismo **rojo clicable** `cch-acct-capped` en el menú 👤 (el `capped`
+    incluye `|| isTimeBlocked`; el cambio MANUAL sigue permitido, como pidió el
+    usuario). **Enforcement** (`enforceSchedule`, intervalo de 20 s + uno a 8 s,
+    corre **aunque autoSwitch esté OFF**): si la cuenta **activa** está en franja,
+    salta a otra elegible (`pickNextAccount` → `triggerSwitch(next,"blocked by
+    schedule")`); si **no hay destino**, **parada dura** = interrumpe (Esc vía
+    `Session.interrupt`) cualquier sesión `busy` y avisa una vez
+    (`notifyScheduleStop`/`scheduleStopNotified`, re-armado al salir de la franja).
+    Corte **inmediato** además del tick: `markActivity` consulta
+    `isScheduleHardStop()` (activa en franja + sin destino) y corta la generación en
+    cuanto Claude empieza a producir, aproximando "como si se acabase el uso".
+    CAVEAT (honesto): NO bloquea el teclado (puedes seguir escribiendo); corta toda
+    **generación** mientras dure la franja, no deshabilita la entrada (evita dejarte
+    atrapado). UI: editor por cuenta en ajustes, dentro de la tarjeta de la cuenta
+    (ver "Ajustes consolidados por cuenta"): una **cabecera** `.cch-schedule-head`
+    ("Forbidden time windows" + botón "Add range") y por franja una fila compacta
+    `.cch-schedule-row` (`from HH:MM to HH:MM` con labels `.cch-schedule-lead`/
+    `.cch-schedule-dash`, + grupo `.cch-day-group` de 7 chips de día —`<button>`
+    reales con clase `.cch-day-toggle`/`.cch-day-on`, NO `addExtraButton`, para que
+    sean cuadrados y no óvalos solapados— + papelera). `scheduleFor(email,create?)`
+    localiza/crea la entrada y `scheduleBlockLabel(email)` da la etiqueta para
+    tooltips/desc.
+- **Ajustes consolidados por cuenta** (`HarnessSettingTab.display`): toda la
+  configuración de una cuenta vive en **una sola tarjeta** bajo el encabezado
+  "Per-account settings", no desperdigada por la página. Por cada cuenta de
+  `listSavedAccounts()`: (1) fila principal (email + `usageLabel`, toggle de
+  elegibilidad `repeat`/`ban`, botón **Switch**, papelera); (2) sub-fila
+  **"Browser"** (`.cch-account-sub`): desplegable de navegador con opción
+  "Use default" (sin entrada en `browserMap` → cae al "Default browser" global) +
+  ruta `custom`, vía `browserFor(email, create?)`; (3) editor de **franjas
+  prohibidas** (cabecera `.cch-schedule-head` + filas `.cch-schedule-row`). Los ajustes
+  **globales** de cuentas (Save current, auto-switch on/mode/threshold, Live usage,
+  probe model, usage regex, **"Default browser"**) quedan agrupados **antes** de las
+  tarjetas. La antigua sección separada "Remote control — browser per account"
+  desapareció: ahora solo queda un grupo **"Other browser mappings"** que aparece
+  cuando hay entradas de `browserMap` cuyo email **no** es una cuenta guardada
+  (poco habitual, porque las cuentas se auto-guardan al `/login`), más un botón "Add
+  browser mapping (unsaved account)" para pre-mapear una cuenta aún no logueada. Las
+  sub-filas se indentan con `.cch-account-sub`/`.cch-schedule-head`/`.cch-schedule-row`
+  (margen + borde izquierdo) para leerse como un bloque bajo su cuenta.
   - **El watcher corre SIEMPRE** (no solo con autoSwitch), porque también: lee el
     **email de la barra** (filtrado contra `knownAccountEmails()`) para anclar el
     %↔cuenta, **etiquetar el botón 👤 en vivo** y **verificar el swap**
@@ -567,7 +625,9 @@ llama dos veces por sesión (xterm no lo soporta).
     existe el `.exe`, `cmd /c start <alias>`), una ruta `custom`, o `default`
     (`shell.openExternal`); cualquier fallo cae a `shell.openExternal`. Devuelve un
     label para el `Notice`. La correlación email→navegador se edita en ajustes
-    (lista dinámica + "Default browser"). Tras lanzar, `focusFullscreen(proc)` pone
+    **dentro de la tarjeta de cada cuenta** (ver "Ajustes consolidados por cuenta"
+    abajo) + un "Default browser" global; el helper `browserFor(email, create?)`
+    localiza/crea la entrada en `settings.browserMap`. Tras lanzar, `focusFullscreen(proc)` pone
     la ventana del navegador en primer plano y la pasa a pantalla completa: como
     los flags `--start-fullscreen` se ignoran si el navegador ya está abierto,
     dispara un PowerShell breve (fire-and-forget) que espera ~1,8 s, hace

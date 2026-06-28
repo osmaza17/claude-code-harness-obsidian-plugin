@@ -95,6 +95,17 @@ interface HarnessSettings {
   // accounts that belong to friends, so the plugin never spends their tokens on
   // its own. Manual switching from the menu is always allowed regardless.
   autoSwitchExcluded: string[];
+  // Forbidden time windows per account. While "now" is inside one of a saved
+  // account's ranges, that account is DISCARDED as an auto-switch destination
+  // (shown red in the 👤 menu, but manual switching is still allowed), and if it
+  // is the ACTIVE account the plugin jumps away from it (or stops Claude when
+  // there is nowhere to go). days = JS weekday numbers (0=Sun … 6=Sat); start/end
+  // = "HH:MM" (24h); start>end means the range crosses midnight. A range with no
+  // days never blocks.
+  accountSchedules: {
+    email: string;
+    ranges: { start: string; end: string; days: number[] }[];
+  }[];
   // Read the real 5h/7d usage % from the Anthropic API (rate-limit headers)
   // instead of only scraping the status bar. Makes tiny per-account calls.
   usageProbe: boolean;
@@ -133,6 +144,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   autoSwitchDelta: 10,
   autoSwitchUsageRegex: "",
   autoSwitchExcluded: [],
+  accountSchedules: [],
   usageProbe: true,
   usageProbeModel: "",
   btnSendNote: true,
@@ -596,6 +608,14 @@ class Session {
   private markActivity() {
     if (this.exited) return;
     if (Date.now() - this.lastKeyAt < 600) return; // keystroke echo, not Claude
+    // Schedule hard stop: the active account is forbidden right now and there is
+    // nowhere to jump → cut any generation the moment it starts ("like usage ran
+    // out"). The plugin throttles the accompanying Notice.
+    if (this.plugin.isScheduleHardStop()) {
+      this.interrupt();
+      this.plugin.notifyScheduleStop();
+      return;
+    }
     this.setBusy(true);
     if (this.busyTimer != null) window.clearTimeout(this.busyTimer);
     this.busyTimer = window.setTimeout(() => {
@@ -629,6 +649,12 @@ class Session {
     } catch {
       /* channel closed */
     }
+  }
+
+  /** Interrupt Claude's current generation (Esc). No-op once the pty has exited. */
+  interrupt() {
+    if (this.exited) return;
+    this.send({ t: "input", d: "\x1b" });
   }
 
   /** @-mention one or more vault paths in this session's input. */
@@ -1758,6 +1784,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private authWatchUntil = 0;
   private recoverAttempts = 0;
   private warnedNoAccounts = false; // one-shot "need ≥2 accounts" notice
+  // Schedule enforcement: throttle the "Claude stopped" notice while the active
+  // account is in a forbidden window with nowhere to jump. `scheduleHardStopActive`
+  // is the CACHED hard-stop state (recomputed by the 20s enforceSchedule tick) so
+  // the per-output-chunk check in markActivity stays cheap (no disk I/O).
+  private scheduleStopNotified = false;
+  private scheduleHardStopActive = false;
   // Auto-save the active account whenever it changes (throttled).
   private lastAutoSavedEmail = "";
   private lastAutoSaveCheck = 0;
@@ -1891,6 +1923,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         3 * 60 * 1000
       )
     );
+
+    // Enforce per-account forbidden time windows (jump away / stop Claude).
+    window.setTimeout(() => this.enforceSchedule(), 8000);
+    this.registerInterval(window.setInterval(() => this.enforceSchedule(), 20000));
   }
 
   onunload() {
@@ -2251,6 +2287,24 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         const row = pop.createDiv({ cls: "cch-acct-row" });
         const eligible = this.isAccountEligible(a.email);
         if (!eligible) row.addClass("cch-acct-blocked");
+
+        // Cuenta "capada" como destino de auto-switch (tope 5h/7d o token muerto):
+        // rojo de aviso, PERO el cambio MANUAL sigue permitido (ignora topes), así
+        // que la etiqueta sigue clicable — a diferencia de cch-acct-blocked, inerte.
+        // La cuenta activa se excluye (nunca es un destino).
+        const timeBlocked = this.isTimeBlocked(a.email);
+        const capped =
+          cur !== a.email.trim().toLowerCase() &&
+          (this.isSwitchTargetCapped(a.email) || timeBlocked);
+        if (capped) {
+          row.addClass("cch-acct-capped");
+          row.setAttr(
+            "title",
+            timeBlocked
+              ? `Prohibida ahora por horario (${this.scheduleBlockLabel(a.email)}) — el auto-switch no salta aquí`
+              : "El auto-switch no salta aquí (5h ≥90%, 7d ≥95% o token caducado)"
+          );
+        }
 
         // Left toggle: allow (on) / block (off) this account. A blocked account
         // is fully unusable — dimmed AND not switchable by clicking its name.
@@ -2762,6 +2816,87 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     await this.saveSettings();
   }
 
+  /** Parse "HH:MM" → minutes since midnight, or null if malformed. */
+  private parseHM(s: string): number | null {
+    const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
+    if (!m) return null;
+    const h = +m[1], mn = +m[2];
+    if (h > 23 || mn > 59) return null;
+    return h * 60 + mn;
+  }
+
+  /** Locate (or, if create, append) the schedule entry for an account email. */
+  scheduleFor(email: string, create = false) {
+    const lower = email.trim().toLowerCase();
+    let e = this.settings.accountSchedules.find(
+      (s) => s.email.trim().toLowerCase() === lower
+    );
+    if (!e && create) {
+      e = { email: lower, ranges: [] };
+      this.settings.accountSchedules.push(e);
+    }
+    return e;
+  }
+
+  /** Locate (or, if create, append) the browser-map entry for an account email. */
+  browserFor(email: string, create = false) {
+    const lower = email.trim().toLowerCase();
+    let m = this.settings.browserMap.find(
+      (b) => b.email.trim().toLowerCase() === lower
+    );
+    if (!m && create) {
+      m = { email: lower, browser: "chrome", path: "" };
+      this.settings.browserMap.push(m);
+    }
+    return m;
+  }
+
+  /** True when `now` falls inside any forbidden window of the account. Handles
+   *  same-day ranges (S<E) and overnight ranges (S>E: the post-midnight portion
+   *  belongs to the START day, so the t<E slice checks YESTERDAY's day membership).
+   *  Fail-safe: no schedule / no days / malformed times → false. */
+  isTimeBlocked(email: string, now = new Date()): boolean {
+    const e = this.scheduleFor(email);
+    if (!e || !e.ranges.length) return false;
+    const t = now.getHours() * 60 + now.getMinutes();
+    const day = now.getDay(); // 0=Sun … 6=Sat
+    const prevDay = (day + 6) % 7;
+    for (const r of e.ranges) {
+      const s = this.parseHM(r.start);
+      const en = this.parseHM(r.end);
+      if (s == null || en == null || s === en) continue;
+      const days = r.days || [];
+      if (s < en) {
+        if (t >= s && t < en && days.includes(day)) return true;
+      } else {
+        // overnight: [s..24h) on the start day, [0..en) on the next day
+        if (t >= s && days.includes(day)) return true;
+        if (t < en && days.includes(prevDay)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Human label of an account's forbidden ranges, for tooltips/desc. */
+  scheduleBlockLabel(email: string): string {
+    const e = this.scheduleFor(email);
+    if (!e || !e.ranges.length) return "";
+    const dn = ["D", "L", "M", "X", "J", "V", "S"]; // Sun..Sat (ES single-letter)
+    return e.ranges
+      .map((r) => {
+        const days = (r.days || []).slice().sort((a, b) => a - b).map((d) => dn[d]).join("");
+        return `${r.start}–${r.end}${days ? " " + days : ""}`;
+      })
+      .join(", ");
+  }
+
+  /** Cached hard-stop state (active account forbidden now AND nowhere to jump).
+   *  Recomputed by enforceSchedule() every 20s; markActivity() reads this cheaply
+   *  on every output chunk (computing it live would hit the disk per chunk). */
+  isScheduleHardStop(): boolean {
+    return this.scheduleHardStopActive;
+  }
+
   /** Auto-snapshot the active account whenever it changes (throttled to ~10s). */
   maybeAutoSaveAccount() {
     const now = Date.now();
@@ -2798,6 +2933,22 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return u.pct7d >= WEEKLY_CEILING_PCT;
   }
 
+  /** True cuando `email` está INELEGIBLE como DESTINO de auto-switch por un tope de
+   *  uso o un token muerto — espejo de los guards de pickNextAccount/leastUsedBelow:
+   *  token caducado, 5h FRESCO ≥ techo (90), o 7d FRESCO ≥ techo semanal (95). Para
+   *  marcar esas filas en rojo en el menú 👤. NO mira la lista de bloqueo manual
+   *  (eso ya lo cubre cch-acct-blocked). Fail-open con datos ausentes/viejos (igual
+   *  que la decisión real: sin lectura fresca → no se excluye → no rojo). */
+  private isSwitchTargetCapped(email: string): boolean {
+    const u = this.accountUsage.get(email.trim().toLowerCase());
+    if (!u) return false;
+    if (u.error === "auth") return true;
+    const fresh = Date.now() - u.checkedAt < USAGE_FRESH_MS;
+    if (fresh && u.pct5h != null && u.pct5h >= SWITCH_CEILING_PCT) return true;
+    if (this.weeklyMaxedOut(email)) return true; // ya gestiona frescura + ≥95
+    return false;
+  }
+
   /** Account to switch to: the **least-used** one (lowest probed 5h %), skipping
    *  dead-token accounts and any whose 7d usage is ≥ the weekly ceiling. Falls
    *  back to round-robin. Null if nowhere to go. */
@@ -2813,6 +2964,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     let best: string | null = null;
     let bestPct = Infinity;
     for (const e of others) {
+      if (this.isTimeBlocked(e)) continue; // forbidden time window
       const u = this.accountUsage.get(e.trim().toLowerCase());
       if (u?.error === "auth") continue; // dead token — can't use it
       if (this.weeklyMaxedOut(e)) continue; // 7d ≥ ceiling — about to hit weekly limit
@@ -2833,6 +2985,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const cand = saved[(start + i) % saved.length];
       if (cand.trim().toLowerCase() === cur) continue;
       if (!this.isAccountEligible(cand)) continue;
+      if (this.isTimeBlocked(cand)) continue; // forbidden time window
       if (this.accountUsage.get(cand.trim().toLowerCase())?.error === "auth") continue;
       if (this.weeklyMaxedOut(cand)) continue; // 7d ≥ ceiling — about to hit weekly limit
       return cand;
@@ -2853,6 +3006,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const lower = a.email.trim().toLowerCase();
       if (lower === cur) continue;
       if (!this.isAccountEligible(a.email)) continue;
+      if (this.isTimeBlocked(a.email)) continue; // forbidden time window
       const u = this.accountUsage.get(lower);
       if (!u || u.error === "auth" || u.pct5h == null) continue;
       if (Date.now() - u.checkedAt >= USAGE_FRESH_MS) continue;
@@ -3531,6 +3685,40 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       return;
     }
     this.triggerSwitch(next, reason);
+  }
+
+  /** Enforce per-account forbidden time windows. Runs on a timer regardless of the
+   *  `autoSwitch` setting (it's a separate hard rule). If the ACTIVE account is in a
+   *  forbidden window: jump to another eligible account if one exists; otherwise
+   *  stop Claude (interrupt any in-flight generation) and notify once. The 20s
+   *  tick is a backstop — markActivity() also cuts generations promptly. */
+  enforceSchedule() {
+    const cur = this.currentAccountEmail();
+    if (!cur || !this.isTimeBlocked(cur)) {
+      this.scheduleHardStopActive = false;
+      this.scheduleStopNotified = false;
+      return;
+    }
+    const next = this.pickNextAccount(); // skips time-blocked/capped/ineligible/dead
+    if (next) {
+      this.scheduleHardStopActive = false;
+      this.scheduleStopNotified = false;
+      if (Date.now() < this.autoSwitchCooldownUntil) return;
+      this.triggerSwitch(next, "blocked by schedule");
+    } else {
+      this.scheduleHardStopActive = true;
+      for (const s of this.sessions) if (s.busy) s.interrupt();
+      this.notifyScheduleStop();
+    }
+  }
+
+  /** One-shot "Claude stopped by schedule" notice (re-armed when the window ends). */
+  notifyScheduleStop() {
+    if (this.scheduleStopNotified) return;
+    this.scheduleStopNotified = true;
+    new Notice(
+      "La cuenta activa está prohibida ahora por horario y no hay otra a la que saltar — Claude detenido."
+    );
   }
 
   /** Common path for an automatic switch: set cooldown, reset state, notify, swap. */
@@ -4749,18 +4937,57 @@ class HarnessSettingTab extends PluginSettingTab {
           })
       );
 
+    const browserOptions: Record<string, string> = {
+      chrome: "Chrome",
+      firefox: "Firefox",
+      edge: "Edge",
+      brave: "Brave",
+      opera: "Opera",
+      operagx: "Opera GX",
+      zen: "Zen",
+      helium: "Helium",
+      vivaldi: "Vivaldi",
+      waterfox: "Waterfox",
+      floorp: "Floorp",
+      mullvad: "Mullvad Browser",
+    };
+
+    new Setting(containerEl)
+      .setName("Default browser")
+      .setDesc(
+        "Browser used to open a remote/login URL when an account has no browser of its own set below (or its email can't be read). The remote session URL only works in the browser where that Claude account is logged in."
+      )
+      .addDropdown((d) => {
+        for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
+        d.addOption("default", "System default");
+        d.setValue(this.plugin.settings.defaultBrowser || "chrome");
+        d.onChange(async (v) => {
+          this.plugin.settings.defaultBrowser = v;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Per-account settings")
+      .setDesc(
+        "Everything for each saved account in one place: usage, whether auto-switch may use it, which browser its remote/login URL opens in, and the time windows when it's forbidden."
+      )
+      .setHeading();
+
     for (const a of this.plugin.listSavedAccounts()) {
       const name = this.plugin.settings.usageProbe
         ? a.email + " — " + this.plugin.usageLabel(a.email)
         : a.email;
       const eligible = this.plugin.isAccountEligible(a.email);
+      const blockedNow = this.plugin.isTimeBlocked(a.email);
+      let desc = eligible
+        ? "Auto-switch: allowed"
+        : "Auto-switch: blocked (e.g. a friend's account — its tokens won't be spent automatically)";
+      if (blockedNow)
+        desc += ` · ⛔ prohibida ahora por horario (${this.plugin.scheduleBlockLabel(a.email)})`;
       new Setting(containerEl)
         .setName(name)
-        .setDesc(
-          eligible
-            ? "Auto-switch: allowed"
-            : "Auto-switch: blocked (e.g. a friend's account — its tokens won't be spent automatically)"
-        )
+        .setDesc(desc)
         .addExtraButton((b) =>
           b
             .setIcon(eligible ? "repeat" : "ban")
@@ -4786,7 +5013,195 @@ class HarnessSettingTab extends PluginSettingTab {
               this.display();
             })
         );
+
+      // Browser this account's remote/login URL opens in (its SSO/cookie lives there).
+      const bmap = this.plugin.browserFor(a.email);
+      const browserRow = new Setting(containerEl)
+        .setClass("cch-account-sub")
+        .setName("Browser")
+        .setDesc("Where this account's remote/login URL opens. Default = the browser above.");
+      browserRow.addDropdown((d) => {
+        d.addOption("", "Use default");
+        for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
+        d.addOption("custom", "Custom path…");
+        d.setValue(bmap?.browser || "");
+        d.onChange(async (v) => {
+          if (!v) {
+            const i = this.plugin.settings.browserMap.findIndex(
+              (m) => m.email.trim().toLowerCase() === a.email.trim().toLowerCase()
+            );
+            if (i >= 0) this.plugin.settings.browserMap.splice(i, 1);
+          } else {
+            this.plugin.browserFor(a.email, true)!.browser = v;
+          }
+          await this.plugin.saveSettings();
+          this.display(); // show/hide the custom-path field
+        });
+      });
+      if (bmap?.browser === "custom") {
+        browserRow.addText((t) =>
+          t
+            .setPlaceholder("C:\\path\\to\\browser.exe")
+            .setValue(bmap.path)
+            .onChange(async (v) => {
+              this.plugin.browserFor(a.email, true)!.path = v.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+      }
+
+      // Forbidden time windows for this account (auto-switch never lands here while
+      // inside one; if it's the active account, the plugin jumps away or stops).
+      const sched = this.plugin.scheduleFor(a.email);
+      const dayLabels = ["L", "M", "X", "J", "V", "S", "D"]; // Mon..Sun (display)
+      const dayNums = [1, 2, 3, 4, 5, 6, 0]; // JS getDay for each label
+      const ranges = sched?.ranges || [];
+
+      // Header for the windows block + the "Add range" button (so the button isn't
+      // floating alone in an empty row, and the rows below have a clear label).
+      const schedHead = new Setting(containerEl)
+        .setClass("cch-account-sub")
+        .setClass("cch-schedule-head")
+        .setName("Forbidden time windows")
+        .setDesc(
+          ranges.length
+            ? "Auto-switch won't use this account during these windows; if it's active when one starts, it switches away (or stops Claude if there's nowhere to go)."
+            : "None. Add a window below to forbid this account at certain hours/days."
+        );
+      schedHead.addButton((b) =>
+        b.setButtonText("Add range").onClick(async () => {
+          const e = this.plugin.scheduleFor(a.email, true)!;
+          e.ranges.push({ start: "23:00", end: "07:00", days: [1, 2, 3, 4, 5] });
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+      ranges.forEach((r, ri) => {
+        const row = new Setting(containerEl).setClass("cch-schedule-row");
+        row.infoEl.remove(); // compact: no name/desc column
+        row.controlEl.createSpan({ text: "from", cls: "cch-schedule-lead" });
+        row.addText((t) =>
+          t
+            .setPlaceholder("23:00")
+            .setValue(r.start)
+            .onChange(async (v) => {
+              r.start = v.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+        row.controlEl.createSpan({ text: "to", cls: "cch-schedule-dash" });
+        row.addText((t) =>
+          t
+            .setPlaceholder("07:00")
+            .setValue(r.end)
+            .onChange(async (v) => {
+              r.end = v.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+        const days = row.controlEl.createDiv({ cls: "cch-day-group" });
+        dayLabels.forEach((dl, di) => {
+          const dn = dayNums[di];
+          const on = (r.days || []).includes(dn);
+          const chip = days.createEl("button", {
+            text: dl,
+            cls: "cch-day-toggle",
+            attr: { type: "button", "aria-label": dl, title: dl },
+          });
+          chip.toggleClass("cch-day-on", on);
+          chip.onclick = async () => {
+            r.days = r.days || [];
+            const i = r.days.indexOf(dn);
+            if (i >= 0) r.days.splice(i, 1);
+            else r.days.push(dn);
+            await this.plugin.saveSettings();
+            this.display();
+          };
+        });
+        row.addExtraButton((b) =>
+          b
+            .setIcon("trash")
+            .setTooltip("Remove this window")
+            .onClick(async () => {
+              sched!.ranges.splice(ri, 1);
+              await this.plugin.saveSettings();
+              this.display();
+            })
+        );
+      });
     }
+
+    // Browser mappings for emails that are NOT saved accounts (saved accounts set
+    // their browser inline in their card above). Lets you pre-map an account you
+    // haven't logged into yet; normally empty since accounts auto-save on /login.
+    const savedEmails = new Set(
+      this.plugin.listSavedAccounts().map((a) => a.email.trim().toLowerCase())
+    );
+    const orphans = this.plugin.settings.browserMap
+      .map((row, i) => ({ row, i }))
+      .filter(({ row }) => !savedEmails.has(row.email.trim().toLowerCase()));
+
+    if (orphans.length) {
+      new Setting(containerEl)
+        .setName("Other browser mappings")
+        .setDesc(
+          "Browser mappings for emails that aren't saved accounts yet. Once an account is saved, set its browser from its card above instead."
+        )
+        .setHeading();
+
+      for (const { row, i } of orphans) {
+        const setting = new Setting(containerEl)
+          .addText((t) =>
+            t
+              .setPlaceholder("account@gmail.com")
+              .setValue(row.email)
+              .onChange(async (v) => {
+                this.plugin.settings.browserMap[i].email = v;
+                await this.plugin.saveSettings();
+              })
+          )
+          .addDropdown((d) => {
+            for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
+            d.addOption("custom", "Custom path…");
+            d.setValue(row.browser || "chrome");
+            d.onChange(async (v) => {
+              this.plugin.settings.browserMap[i].browser = v;
+              await this.plugin.saveSettings();
+              this.display(); // show/hide the custom-path field
+            });
+          });
+        if (row.browser === "custom") {
+          setting.addText((t) =>
+            t
+              .setPlaceholder("C:\\path\\to\\browser.exe")
+              .setValue(row.path)
+              .onChange(async (v) => {
+                this.plugin.settings.browserMap[i].path = v.trim();
+                await this.plugin.saveSettings();
+              })
+          );
+        }
+        setting.addExtraButton((b) =>
+          b
+            .setIcon("trash")
+            .setTooltip("Remove")
+            .onClick(async () => {
+              this.plugin.settings.browserMap.splice(i, 1);
+              await this.plugin.saveSettings();
+              this.display();
+            })
+        );
+      }
+    }
+
+    new Setting(containerEl).addButton((b) =>
+      b.setButtonText("Add browser mapping (unsaved account)").onClick(async () => {
+        this.plugin.settings.browserMap.push({ email: "", browser: "chrome", path: "" });
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
 
     new Setting(containerEl).setName("Header buttons").setHeading();
     const buttonToggle = (
@@ -4816,93 +5231,6 @@ class HarnessSettingTab extends PluginSettingTab {
     buttonToggle("Auto-switch toggle", "btnAutoSwitch");
     buttonToggle("Token Dashboard", "btnTokenDashboard");
     buttonToggle("Zoom controls", "btnZoom");
-
-    new Setting(containerEl)
-      .setName("Remote control — browser per account")
-      .setDesc(
-        "The remote session URL only works in the browser where that Claude account is logged in. Map each account email (the active one is read from ~/.claude.json) to a browser. Unmapped accounts use the default below."
-      )
-      .setHeading();
-
-    const browserOptions: Record<string, string> = {
-      chrome: "Chrome",
-      firefox: "Firefox",
-      edge: "Edge",
-      brave: "Brave",
-      opera: "Opera",
-      operagx: "Opera GX",
-      zen: "Zen",
-      helium: "Helium",
-      vivaldi: "Vivaldi",
-      waterfox: "Waterfox",
-      floorp: "Floorp",
-      mullvad: "Mullvad Browser",
-    };
-
-    new Setting(containerEl)
-      .setName("Default browser")
-      .setDesc("Used when the active account isn't mapped (or can't be read).")
-      .addDropdown((d) => {
-        for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
-        d.addOption("default", "System default");
-        d.setValue(this.plugin.settings.defaultBrowser || "chrome");
-        d.onChange(async (v) => {
-          this.plugin.settings.defaultBrowser = v;
-          await this.plugin.saveSettings();
-        });
-      });
-
-    this.plugin.settings.browserMap.forEach((row, i) => {
-      const setting = new Setting(containerEl)
-        .addText((t) =>
-          t
-            .setPlaceholder("account@gmail.com")
-            .setValue(row.email)
-            .onChange(async (v) => {
-              this.plugin.settings.browserMap[i].email = v;
-              await this.plugin.saveSettings();
-            })
-        )
-        .addDropdown((d) => {
-          for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
-          d.addOption("custom", "Custom path…");
-          d.setValue(row.browser || "chrome");
-          d.onChange(async (v) => {
-            this.plugin.settings.browserMap[i].browser = v;
-            await this.plugin.saveSettings();
-            this.display(); // show/hide the custom-path field
-          });
-        });
-      if (row.browser === "custom") {
-        setting.addText((t) =>
-          t
-            .setPlaceholder("C:\\path\\to\\browser.exe")
-            .setValue(row.path)
-            .onChange(async (v) => {
-              this.plugin.settings.browserMap[i].path = v.trim();
-              await this.plugin.saveSettings();
-            })
-        );
-      }
-      setting.addExtraButton((b) =>
-        b
-          .setIcon("trash")
-          .setTooltip("Remove")
-          .onClick(async () => {
-            this.plugin.settings.browserMap.splice(i, 1);
-            await this.plugin.saveSettings();
-            this.display();
-          })
-      );
-    });
-
-    new Setting(containerEl).addButton((b) =>
-      b.setButtonText("Add account → browser").onClick(async () => {
-        this.plugin.settings.browserMap.push({ email: "", browser: "chrome", path: "" });
-        await this.plugin.saveSettings();
-        this.display();
-      })
-    );
 
     new Setting(containerEl)
       .setName("Node.js path")

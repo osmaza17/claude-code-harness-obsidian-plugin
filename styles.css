@@ -513,6 +513,99 @@
   text-decoration: line-through;
 }
 
+/* Cuenta inelegible como DESTINO de auto-switch (tope 5h ≥90% / 7d ≥95% o token
+   caducado): mismo rojo de aviso que un bloqueo manual, pero la etiqueta sigue
+   clicable (el cambio manual ignora los topes). No se redefine .cch-acct-label,
+   así queda normal; si la fila también es cch-acct-blocked, ese estilo inerte gana. */
+.cch-account-menu .cch-acct-row.cch-acct-capped {
+  background: rgba(220, 76, 76, 0.10);
+  border-left: 3px solid var(--color-red, #e05252);
+  padding-left: 7px;
+}
+.cch-account-menu .cch-acct-row.cch-acct-capped:hover {
+  background: rgba(220, 76, 76, 0.16);
+}
+
+/* Editor de franjas horarias prohibidas por cuenta (página de ajustes). Cabecera
+   "Forbidden time windows" + botón "Add range", y por franja una fila compacta:
+   from HH:MM to HH:MM + 7 chips de día (L M X J V S D) + papelera. */
+.cch-schedule-head {
+  border-top: none;
+}
+.cch-schedule-head .setting-item-name {
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+.cch-schedule-row {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  border-top: none;
+}
+.cch-schedule-row .setting-item-control {
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: center;
+}
+.cch-schedule-row input[type="text"] {
+  width: 58px;
+  text-align: center;
+}
+.cch-schedule-lead,
+.cch-schedule-dash {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+/* Grupo de chips de día, separado de los campos de hora. */
+.cch-day-group {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+}
+.cch-day-toggle {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.cch-day-toggle:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+.cch-day-toggle.cch-day-on {
+  color: var(--text-on-accent, #fff);
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+.cch-day-toggle.cch-day-on:hover {
+  color: var(--text-on-accent, #fff);
+}
+
+/* Sub-filas que cuelgan de la tarjeta de una cuenta (navegador + franjas):
+   indentadas y con borde izquierdo para leerse como un grupo bajo su cuenta. */
+.cch-account-sub,
+.cch-schedule-head,
+.cch-schedule-row {
+  margin-left: 16px;
+  padding-left: 12px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+.cch-account-sub {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
 /* [[ note suggester: floating picker anchored at the terminal cursor. Same DOM
    pattern as the account menu (position:fixed, clamped to the viewport). */
 .cch-wikilink-menu {
