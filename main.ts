@@ -188,6 +188,10 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // from the Claude Code binary; both may change with future CLI versions.
 const OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+// Opened in an account's mapped browser from the 👤 menu so the user can quickly
+// re-login that account where its SSO/cookie lives. claude.ai redirects to the
+// login screen when the session is expired.
+const CLAUDE_LOGIN_URL = "https://claude.ai/";
 // Only refresh a token when it's expired or within this window of expiring. The
 // token endpoint rate-limits hard (observed 429), and refreshing a still-valid
 // token would rotate the refresh token needlessly, so we keep each account's
@@ -2287,6 +2291,22 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           this.closeAccountMenu();
           this.switchToAccount(a.email);
         };
+
+        // Right shortcut: open claude.ai in the browser mapped to THIS account
+        // (where its SSO/cookie lives) so you can re-login it if it expired —
+        // no need to remember which browser each account uses.
+        const open = row.createDiv({ cls: "cch-acct-open" });
+        setIcon(open, "log-in");
+        open.setAttr(
+          "aria-label",
+          `Open ${this.browserLabelForAccount(a.email)} to log in to this account`
+        );
+        open.onclick = (e) => {
+          e.stopPropagation();
+          this.closeAccountMenu();
+          const browserLabel = this.openLoginForAccount(a.email);
+          new Notice(`Opening ${browserLabel} to log in to ${a.email}…`);
+        };
       }
     }
 
@@ -3532,8 +3552,40 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return this.launchBrowser(browser, map?.path || "", url);
   }
 
+  /** Open claude.ai in the browser MAPPED TO A SPECIFIC account (not the active
+   *  one) so the user can re-login that account in the right browser — the one
+   *  where its SSO/cookie lives — without remembering the pairing. Falls back to
+   *  the default browser if the account has no mapping. Brings the window to the
+   *  foreground but does NOT toggle fullscreen (you're logging in, not viewing). */
+  openLoginForAccount(email: string): string {
+    const e = email.trim().toLowerCase();
+    const map = this.settings.browserMap.find(
+      (m) => m.email.trim().toLowerCase() === e && !!e
+    );
+    const browser = map?.browser || this.settings.defaultBrowser || "chrome";
+    return this.launchBrowser(browser, map?.path || "", CLAUDE_LOGIN_URL, false);
+  }
+
+  /** The browser this account is (or would be) opened in — for labels/tooltips. */
+  browserLabelForAccount(email: string): string {
+    const e = email.trim().toLowerCase();
+    const map = this.settings.browserMap.find(
+      (m) => m.email.trim().toLowerCase() === e && !!e
+    );
+    const browser = map?.browser || this.settings.defaultBrowser || "chrome";
+    if (browser === "default") return "default browser";
+    if (browser === "custom")
+      return map?.path ? path.basename(map.path) : "default browser";
+    return BROWSERS[browser]?.label || browser;
+  }
+
   /** Launch a specific browser with the URL (new tab in the running instance). */
-  private launchBrowser(browser: string, customPath: string, url: string): string {
+  private launchBrowser(
+    browser: string,
+    customPath: string,
+    url: string,
+    fullscreen = true
+  ): string {
     const openDefault = () => {
       try {
         nodeRequire("electron")?.shell?.openExternal(url);
@@ -3554,7 +3606,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (browser === "custom") {
         if (customPath) {
           cp.spawn(customPath, [url], { detached: true, stdio: "ignore" }).unref();
-          this.focusFullscreen(path.basename(customPath).replace(/\.exe$/i, ""));
+          this.focusFullscreen(
+            path.basename(customPath).replace(/\.exe$/i, ""),
+            fullscreen
+          );
           return path.basename(customPath);
         }
         openDefault();
@@ -3583,7 +3638,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           windowsHide: true,
         }).unref();
       }
-      this.focusFullscreen(def.proc);
+      this.focusFullscreen(def.proc, fullscreen);
       return def.label;
     } catch {
       openDefault();
@@ -3591,9 +3646,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Bring the just-launched browser window to the foreground and toggle
-   *  fullscreen (F11). Best-effort, fire-and-forget. */
-  private focusFullscreen(proc: string) {
+  /** Bring the just-launched browser window to the foreground and (optionally)
+   *  toggle fullscreen (F11). Best-effort, fire-and-forget. Pass fullscreen=false
+   *  to only raise the window (e.g. a re-login flow). */
+  private focusFullscreen(proc: string, fullscreen = true) {
     if (!proc) return;
     try {
       const cp = nodeRequire("child_process");
@@ -3606,8 +3662,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         "if ($p) {",
         "  $w = New-Object -ComObject WScript.Shell",
         "  $w.AppActivate($p.Id) | Out-Null",
-        "  Start-Sleep -Milliseconds 350",
-        "  $w.SendKeys('{F11}')",
+        ...(fullscreen
+          ? ["  Start-Sleep -Milliseconds 350", "  $w.SendKeys('{F11}')"]
+          : []),
         "}",
       ].join("; ");
       cp.spawn(

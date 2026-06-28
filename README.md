@@ -102,7 +102,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - **Activar/desactivar cuentas**: el **menú del botón 👤** muestra **una sola
   lista** de cuentas: cada fila tiene a la **izquierda un toggle** (verde =
   habilitada; gris = deshabilitada) y, a la derecha, el **nombre de la cuenta** (con
-  su % de uso). Pulsa el toggle para habilitar/deshabilitar (puedes conmutar varias
+  su % de uso) y, a la **derecha del todo, un botón 🔓 (icono `log-in`)** que abre
+  `claude.ai` en el **navegador donde está iniciada la sesión de esa cuenta** (el
+  que mapeaste en ajustes; si no tiene mapeo, el navegador por defecto). Sirve para
+  **volver a iniciar sesión** rápido cuando una cuenta caduca, sin tener que
+  acordarte de qué navegador usa cada una. Pulsa el toggle para habilitar/
+  deshabilitar (puedes conmutar varias
   sin que se cierre el menú) y **haz clic en el nombre para cambiarte a esa cuenta**.
   Una cuenta **deshabilitada queda sombreada y totalmente inutilizable desde este
   menú**: el auto-switch nunca la elige y, además, clicar su nombre **no** te cambia

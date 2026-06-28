@@ -329,8 +329,18 @@ llama dos veces por sesión (xterm no lo soporta).
     **izquierda** un toggle `.cch-acct-toggle` (verde = habilitada; gris =
     deshabilitada; `onclick` → `toggleAccountEligible` + actualiza `is-on` y la clase
     `cch-acct-blocked` de la fila **sin cerrar** el popup, para conmutar varias) y,
-    a la derecha, la **etiqueta** `.cch-acct-label` (texto de `accountMenuTitle` si
-    `usageProbe`, si no el email; la cuenta activa lleva `.cch-acct-current` con ✓).
+    en medio la **etiqueta** `.cch-acct-label` (texto de `accountMenuTitle` si
+    `usageProbe`, si no el email; la cuenta activa lleva `.cch-acct-current` con ✓)
+    y, a la **derecha**, un botón **abrir-login** `.cch-acct-open` (icono `log-in`)
+    por cuenta → `openLoginForAccount(email)`: abre `CLAUDE_LOGIN_URL`
+    (`https://claude.ai/`) en el **navegador mapeado a ESA cuenta** (no la activa)
+    en `settings.browserMap` —el navegador donde vive su cookie/SSO—, con fallback
+    a `defaultBrowser`. Sirve para **volver a iniciar sesión** rápido en una cuenta
+    caducada sin recordar qué navegador usa cada una. Usa el mismo `launchBrowser`
+    que el remote-control pero con `fullscreen=false` (solo trae la ventana al
+    frente, sin pulsar F11; `focusFullscreen(proc, fullscreen)` omite el SendKeys
+    `{F11}` cuando es false). El `aria-label`/Notice nombran el navegador vía
+    `browserLabelForAccount(email)`.
     **Deshabilitación TOTAL en este popup**: una cuenta off recibe `cch-acct-blocked`
     (sombreada + tachada) y su etiqueta es **inerte** —`switchToAccount` NO se llama
     al clicarla; muestra un `Notice` pidiendo reactivar el toggle—, así que no se

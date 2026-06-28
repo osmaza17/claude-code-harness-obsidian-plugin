@@ -468,6 +468,27 @@
   font-size: 13px;
   white-space: nowrap;
 }
+/* Per-account shortcut: open claude.ai in the browser where that account is
+   logged in, to re-login it quickly when it expires. */
+.cch-account-menu .cch-acct-open {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-s, 4px);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.cch-account-menu .cch-acct-open:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.cch-account-menu .cch-acct-open .svg-icon {
+  width: 15px;
+  height: 15px;
+}
 .cch-account-menu .cch-acct-current {
   font-weight: var(--font-bold, 600);
 }
