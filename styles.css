@@ -365,6 +365,12 @@
   border-radius: 4px;
   flex: 0 0 auto;
   opacity: 0.6;
+  /* Pin the × to the right edge of the tab regardless of label length: with a
+     short name the tab (flex:1 1 0) is wider than its content, and this auto
+     margin eats the slack so the close button always sits in the same place.
+     When the tab compresses and the label ellipsises, the slack is gone and the
+     margin collapses to 0, so the × stays flush right. */
+  margin-left: auto;
 }
 .claude-code-harness .cch-tab-close:hover {
   background: var(--background-modifier-hover);
