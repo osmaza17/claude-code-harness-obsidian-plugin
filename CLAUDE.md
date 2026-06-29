@@ -67,9 +67,34 @@ Reparto de responsabilidades:
   la activa), `onClose()` -> `plugin.detachView()` (desmonta **sin matar**).
 - **Cierre de pestaña (×)** -> `closeSession()` mata esa instancia; si no queda
   ninguna, crea una nueva (el panel nunca queda muerto). **Cerrar el panel** no
-  mata nada. `onunload()` mata **todas** las sesiones.
+  mata nada. `onunload()` mata **todas** las sesiones. Antes de `dispose()`,
+  `closeSession` apila la config de la sesión (`sessionId`/skill/model/args/title/
+  cols/rows) en `closedSessions` (LIFO, tope 10, **solo en memoria**) para poder
+  reabrirla.
+- **Reabrir pestaña cerrada (Ctrl+Shift+Y, estilo Chrome)** -> `reopenClosedSession()`
+  hace `pop()` de `closedSessions` y `newSession({...info, resume:true})`. CLAVE: cada
+  `Session` lleva un **`sessionId` UUID propio** (`newConversationId()` en el
+  constructor) que se inyecta como `--session-id <uuid>` al arrancar `claude` (en
+  `startHost`, **NO** en `settings.args`, que es global). Eso fija el id de la
+  conversación de Claude Code (`~/.claude/projects/<cwd>/<id>.jsonl`) de forma
+  **determinista** —imprescindible porque hay varias sesiones en el mismo cwd y
+  "el .jsonl más reciente" no las desambigua—, así que al reabrir se lanza
+  `claude --resume <uuid>` y se **recupera la conversación** exacta. Con `resume:true`,
+  `maybeSendInitial` sale temprano (**no** reinyecta `/skill` ni startup commands: la
+  conversación ya los trae). `restart()` regenera el `sessionId` (conversación nueva,
+  evita choque de `--session-id` con el `.jsonl` ya existente). `startHost` no inyecta
+  el flag si el usuario ya puso `--session-id`/`--resume`/`-c` en "Extra arguments".
+  VERIFICADO (en `-p`): `claude --session-id <uuid>` crea el `.jsonl` y
+  `claude --resume <uuid>` recupera la conversación. CAVEAT (honesto): solo se probó
+  en modo `--print`; el arranque interactivo con `--session-id` es muy probable pero
+  no se verificó turno a turno; y cuánto scrollback repinta la TUI al resumir es
+  variable (el contexto sí se recupera).
 - Comando "Restart Claude Code session" -> `activeSession().restart()`. Comando
   **"New Claude Code session"** y el botón **+** de la barra -> `newSession({skill})`.
+  Comando **"Reopen closed Claude session"** (hotkey **`Mod+Shift+Y`**) + intercepción
+  de **Ctrl+Shift+Y** en el key handler del terminal (como Ctrl+R) ->
+  `reopenClosedSession()`. NO se usa Ctrl+Shift+T: Obsidian lo reserva para reabrir
+  pestañas de notas y lo captura globalmente antes de que llegue al harness.
 
 Por eso cada `host` (el div donde xterm pinta) se conserva en su `Session` y solo
 se mueve entre fuera-del-DOM y el `contentEl` del panel; `term.open()` nunca se
@@ -682,7 +707,9 @@ llama dos veces por sesión (xterm no lo soporta).
   `opus`.
 - **Comandos**: "Open Claude Code panel", **"New Claude Code session"** (abre el
   panel y crea otra instancia con `newSession()`), "Restart Claude Code session"
-  (sobre la activa), "Send active note to Claude" (inserta `@<ruta>` de la nota
+  (sobre la activa), **"Reopen closed Claude session"** (hotkey `Mod+Shift+Y`;
+  `reopenClosedSession()` reabre la última pestaña cerrada con `--resume`),
+  "Send active note to Claude" (inserta `@<ruta>` de la nota
   activa en la activa), "Toggle remote control" (hotkey `Mod+R`; sobre la activa),
   "Save current Claude account", "Diagnose
   auto-switch (why no account change)" (`diagnoseAutoSwitch()`: muestra en un

@@ -19,6 +19,15 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   conversación; cerrar una pestaña (×) **mata** esa instancia. (Cuenta, uso y
   auto-switch son **globales** —comparten credenciales—, así que cambiar de cuenta
   afecta a todas las instancias.)
+- **Reabrir pestaña cerrada (`Ctrl+Shift+Y`)**: como el `Ctrl+Shift+T` del
+  navegador, si cierras una pestaña sin querer, **`Ctrl+Shift+Y`** (o el comando
+  "Reopen closed Claude session") la reabre y **recupera su conversación**. (Se usa
+  `Y` porque Obsidian ya reserva `Ctrl+Shift+T` para reabrir pestañas de notas.)
+  El plugin etiqueta cada
+  sesión con un id propio (`claude --session-id`) y al reabrir hace
+  `claude --resume <id>`, así que continúas la misma conversación, no una nueva.
+  Funciona en orden inverso al cierre (las últimas 10). La pila es **en memoria**:
+  se vacía al recargar el plugin o reiniciar Obsidian.
 - **Estado de cada pestaña de un vistazo**: cada pestaña lleva un **punto** y, del
   mismo color, **su reborde**, para ver sin abrirla si Claude está **trabajando**
   (amarillo), **terminado/inactivo** (verde), **salido** (gris) o **detenido por
@@ -158,7 +167,8 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   pega texto o **imagen** (guarda un PNG temporal y pega su ruta);
   `Ctrl+Shift+V` fuerza texto; clic derecho copia/pega.
 - **Teclado**: `Ctrl+Enter` / `Shift+Enter` = nueva línea sin enviar; `Ctrl+R` =
-  toggle remote control; AltGr+2 = `@` (teclado español); `Ctrl+Z` /
+  toggle remote control; `Ctrl+Shift+Y` = reabrir la última pestaña cerrada;
+  AltGr+2 = `@` (teclado español); `Ctrl+Z` /
   `Ctrl+Shift+Z` mapeados al borrar-línea / restaurar de Claude.
 
 ## Requisitos

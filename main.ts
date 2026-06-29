@@ -393,6 +393,27 @@ const ANSI_LIGHT = {
 // Monotonic id source for sessions (used for tab titles + identity).
 let SESSION_SEQ = 0;
 
+// Fresh UUID for a Claude Code conversation (--session-id / --resume). Prefers the
+// Web Crypto global (present in Electron's renderer); falls back to Node's crypto.
+function newConversationId(): string {
+  try {
+    if (typeof crypto !== "undefined" && (crypto as any).randomUUID)
+      return (crypto as any).randomUUID();
+  } catch {
+    /* fall through */
+  }
+  try {
+    return nodeRequire("crypto").randomUUID();
+  } catch {
+    /* last-resort RFC4122-ish */
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+}
+
 /**
  * One Claude Code instance: its own xterm Terminal, DOM host and forked pty-host
  * process (running `claude`). Several Sessions live on the plugin at once so the
@@ -411,6 +432,12 @@ class Session {
   skill: string;
   model: string;
   args: string;
+  // Claude Code conversation id for this tab. We fix it with --session-id when the
+  // session starts so we can deterministically --resume it later (Ctrl+Shift+T),
+  // even with several sessions running in the same vault cwd. Not part of `args`
+  // (that's the shared/global "Extra arguments"); injected at command-build time.
+  sessionId: string;
+  resume = false; // start with --resume <sessionId> (recovered tab) vs --session-id
 
   term: Terminal | null = null;
   fit: FitAddon | null = null;
@@ -490,7 +517,14 @@ class Session {
 
   constructor(
     plugin: ClaudeCodeHarnessPlugin,
-    opts?: { skill?: string; model?: string; args?: string; title?: string }
+    opts?: {
+      skill?: string;
+      model?: string;
+      args?: string;
+      title?: string;
+      sessionId?: string;
+      resume?: boolean;
+    }
   ) {
     this.plugin = plugin;
     this.id = ++SESSION_SEQ;
@@ -499,6 +533,8 @@ class Session {
     this.model = opts?.model !== undefined ? opts.model : s.model;
     this.args = opts?.args !== undefined ? opts.args : s.args;
     this.title = opts?.title || this.skill || "Claude";
+    this.sessionId = opts?.sessionId || newConversationId();
+    this.resume = !!opts?.resume;
     this.create();
   }
 
@@ -1102,6 +1138,15 @@ class Session {
         this.toggleRemoteControl();
         return false;
       }
+      // Ctrl+Shift+Y -> reopen the last closed tab (Chrome's Ctrl+Shift+T is taken
+      // by Obsidian for note tabs). Kept out of the pty and out of Obsidian/Electron
+      // (stopPropagation prevents a page reload and Obsidian's global hotkeys).
+      if (key === "y" && ev.shiftKey && !ev.altKey) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void this.plugin.reopenClosedSession();
+        return false;
+      }
       if (key === "c" && (ev.shiftKey || term.hasSelection())) {
         if (copySelection() && !ev.shiftKey) term.clearSelection();
         ev.preventDefault();
@@ -1525,6 +1570,9 @@ class Session {
   private maybeSendInitial() {
     if (this.initialSent) return;
     this.initialSent = true;
+    // Recovered tab (--resume): the conversation already has its skill + startup
+    // context in history. Resume clean — don't re-inject anything.
+    if (this.resume) return;
 
     const steps: string[] = [];
     const startup = this.plugin.settings.startupCommands || "";
@@ -1616,6 +1664,10 @@ class Session {
     this.remoteUrlCaptured = false;
     this.awaitRemoteUrl = false;
     this.plugin.updateRemoteBtn();
+    // Restart = fresh conversation. New id (so --session-id won't collide with the
+    // previous one's .jsonl) and clear resume mode.
+    this.sessionId = newConversationId();
+    this.resume = false;
     this.killChild();
     this.term.reset();
     this.startHost();
@@ -1717,7 +1769,19 @@ class Session {
       : process.env.SHELL || "/bin/bash";
     const base = this.plugin.settings.command || "claude";
     const extra = this.args?.trim();
-    const full = extra ? `${base} ${extra}` : base;
+    const parts = [base];
+    if (extra) parts.push(extra);
+    // Tag the conversation with our own id so it can be recovered later. Skip if the
+    // user already passed a session flag in "Extra arguments" (avoid duplicates).
+    const hasSessionFlag = /(^|\s)(--session-id|--resume|-r|--continue|-c)(\s|=|$)/.test(
+      extra || ""
+    );
+    if (this.sessionId && !hasSessionFlag) {
+      parts.push(
+        this.resume ? `--resume ${this.sessionId}` : `--session-id ${this.sessionId}`
+      );
+    }
+    const full = parts.join(" ");
     const args = isWin ? ["/c", full] : ["-lc", full];
     // Spawn at the remembered (or current) size so the first fit is a no-op.
     const cols = this.lastCols || this.plugin.settings.cols || 100;
@@ -1794,6 +1858,18 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // the plugin (not the view) so they survive the panel being closed/reopened.
   private sessions: Session[] = [];
   private activeIndex = 0;
+  // Chrome-style "reopen closed tab" (Ctrl+Shift+T): LIFO stack of recently closed
+  // sessions. In-memory only (cleared on plugin reload). reopenClosedSession() pops
+  // one and recreates the tab with --resume <sessionId> to recover its conversation.
+  private closedSessions: {
+    sessionId: string;
+    skill: string;
+    model: string;
+    args: string;
+    title: string;
+    cols: number;
+    rows: number;
+  }[] = [];
   private viewRoot: HTMLElement | null = null; // the panel contentEl while open
 
   private fontLink: HTMLLinkElement | null = null;
@@ -1882,6 +1958,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       id: "restart-claude-code",
       name: "Restart Claude Code session",
       callback: () => this.activeSession()?.restart(),
+    });
+
+    this.addCommand({
+      id: "reopen-closed-session",
+      name: "Reopen closed Claude session",
+      // Ctrl+Shift+T is taken by Obsidian (reopen closed note tab), so use Y.
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "y" }],
+      callback: () => void this.reopenClosedSession(),
     });
 
     this.addCommand({
@@ -1999,7 +2083,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Create a new session (its own claude), make it active, and mount it if the
    *  panel is open. Used by the + tab button and the "New session" command. */
-  newSession(opts?: { skill?: string; model?: string; args?: string; title?: string }): Session {
+  newSession(opts?: {
+    skill?: string;
+    model?: string;
+    args?: string;
+    title?: string;
+    sessionId?: string;
+    resume?: boolean;
+  }): Session {
     if (this.viewRoot) this.activeSession()?.detachHost();
     const sess = new Session(this, opts);
     this.sessions.push(sess);
@@ -2129,6 +2220,21 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   closeSession(sess: Session) {
     const idx = this.sessions.indexOf(sess);
     if (idx < 0) return;
+    // Remember it for Ctrl+Shift+T before we kill the process. Its conversation
+    // survives on disk (~/.claude/projects/.../<sessionId>.jsonl), so reopening
+    // can --resume it.
+    if (sess.sessionId) {
+      this.closedSessions.push({
+        sessionId: sess.sessionId,
+        skill: sess.skill,
+        model: sess.model,
+        args: sess.args,
+        title: sess.title,
+        cols: sess.lastCols,
+        rows: sess.lastRows,
+      });
+      if (this.closedSessions.length > 10) this.closedSessions.shift();
+    }
     if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
     sess.dispose();
     this.sessions.splice(idx, 1);
@@ -2146,6 +2252,26 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (a && !a.host?.isConnected) a.attachInto(this.viewRoot);
       else a?.scheduleFit();
     }
+  }
+
+  /** Chrome-style Ctrl+Shift+T: reopen the most recently closed tab and recover
+   *  its conversation via `claude --resume <sessionId>`. */
+  async reopenClosedSession() {
+    const info = this.closedSessions.pop();
+    if (!info) {
+      new Notice("No closed Claude sessions to reopen");
+      return;
+    }
+    await this.activateView(); // open the panel if it isn't already
+    this.newSession({
+      skill: info.skill,
+      model: info.model,
+      args: info.args,
+      title: info.title,
+      sessionId: info.sessionId,
+      resume: true,
+    });
+    new Notice("Reopened session: " + info.title);
   }
 
   /** Mount the panel: build the header (tabs + toolbar) and show the active
