@@ -26,8 +26,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   El plugin etiqueta cada
   sesión con un id propio (`claude --session-id`) y al reabrir hace
   `claude --resume <id>`, así que continúas la misma conversación, no una nueva.
-  Funciona en orden inverso al cierre (las últimas 10). La pila es **en memoria**:
-  se vacía al recargar el plugin o reiniciar Obsidian.
+  Funciona en orden inverso al cierre (las últimas 25). **Persiste entre sesiones
+  de Obsidian**: la pila se guarda en disco, así que al día siguiente —incluso tras
+  apagar el PC— `Ctrl+Shift+Y` sigue recuperando tanto las pestañas que cerraste
+  con la × como las que **dejaste abiertas** al cerrar Obsidian (de la más reciente
+  a la más antigua). La recuperación es **bajo demanda** (una pestaña por pulsación),
+  no una restauración automática al arrancar.
 - **Estado de cada pestaña de un vistazo**: cada pestaña lleva un **punto** y, del
   mismo color, **su reborde**, para ver sin abrirla si Claude está **trabajando**
   (amarillo), **terminado/inactivo** (verde), **salido** (gris) o **detenido por

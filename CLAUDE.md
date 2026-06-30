@@ -69,10 +69,31 @@ Reparto de responsabilidades:
   ninguna, crea una nueva (el panel nunca queda muerto). **Cerrar el panel** no
   mata nada. `onunload()` mata **todas** las sesiones. Antes de `dispose()`,
   `closeSession` apila la config de la sesión (`sessionId`/skill/model/args/title/
-  cols/rows) en `closedSessions` (LIFO, tope 10, **solo en memoria**) para poder
-  reabrirla.
+  cols/rows) en `settings.closedSessions` (LIFO, tope `MAX_CLOSED_SESSIONS`=25,
+  **persistido en disco** vía `saveSettings`) para poder reabrirla.
+- **Persistencia entre sesiones de Obsidian (clave del reopen).** El reopen ya NO
+  es solo en memoria: `closedSessions` vive en `settings` (data.json) y, además,
+  las pestañas que siguen **abiertas** se snapshotean en `settings.openSessions`.
+  - `persistOpenSessions()` (debounce ~1,5 s) vuelca a `settings.openSessions` los
+    tabs abiertos **con actividad** (`Session.hasActivity()` = `firstPromptDone ||
+    titleRank>0 || resume`, para no ensuciar la pila con tabs en blanco; el `resume`
+    incluye los tabs reabiertos, que nacen con `titleRank=0` y sin primer prompt
+    pero sí tienen conversación —si no, se descartarían y no se podrían re-recuperar)
+    y guarda. Se llama
+    desde `newSession`/`closeSession`/`moveSession`/`Session.restart` (cambia el
+    `sessionId`) y `Session.setTitleFrom` (el título se persiste). `onunload` hace
+    un `flushOpenSessions()` directo (best-effort; el debounce ya cubre el apagón
+    duro, porque `saveData` es asíncrono y puede no vaciarse al cerrar el SO).
+  - `foldPreviousOpenSessions()` corre en `onload` **tras `loadSettings` y antes de
+    crear ninguna sesión**: anexa las `openSessions` de la ejecución anterior al
+    **final** de `closedSessions` (final = se extraen primero con `pop()` → más
+    reciente primero), dedupe por `sessionId`, aplica el tope, y vacía
+    `openSessions`. Así `Ctrl+Shift+Y` recupera tanto las cerradas con × como las
+    que quedaron abiertas al salir, **otro día/tras apagar el PC**. Recuperación
+    **bajo demanda** (una a una); NO hay restauración automática al arrancar.
 - **Reabrir pestaña cerrada (Ctrl+Shift+Y, estilo Chrome)** -> `reopenClosedSession()`
-  hace `pop()` de `closedSessions` y `newSession({...info, resume:true})`. CLAVE: cada
+  hace `pop()` de `settings.closedSessions` (+ `saveSettings` para no re-popearla) y
+  `newSession({...info, resume:true})`. CLAVE: cada
   `Session` lleva un **`sessionId` UUID propio** (`newConversationId()` en el
   constructor) que se inyecta como `--session-id <uuid>` al arrancar `claude` (en
   `startHost`, **NO** en `settings.args`, que es global). Eso fija el id de la

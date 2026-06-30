@@ -32,6 +32,19 @@ function stripDiacritics(s: string): string {
 
 export const VIEW_TYPE = "claude-code-harness-view";
 
+// Snapshot of a tab needed to reopen it later (Ctrl+Shift+Y) and recover its
+// conversation via `claude --resume <sessionId>`. Persisted in settings so the
+// reopen stack survives an Obsidian restart.
+type ClosedSessionInfo = {
+  sessionId: string;
+  skill: string;
+  model: string;
+  args: string;
+  title: string;
+  cols: number;
+  rows: number;
+};
+
 interface HarnessSettings {
   // Command run inside the PTY when the session starts.
   command: string;
@@ -120,6 +133,15 @@ interface HarnessSettings {
   btnAutoSwitch: boolean;
   btnTokenDashboard: boolean;
   btnZoom: boolean;
+  // Chrome-style "reopen closed tab" (Ctrl+Shift+Y), persisted across Obsidian
+  // restarts. closedSessions = LIFO stack of reopenable tabs (closed with × or
+  // folded in from the previous run's open tabs). openSessions = live snapshot of
+  // the CURRENTLY open tabs; on the next launch it is folded into closedSessions
+  // so tabs that were still open when Obsidian quit are reopenable too. Each entry
+  // carries the deterministic sessionId, so reopening recovers the conversation
+  // via `claude --resume <sessionId>` (the .jsonl survives on disk).
+  closedSessions: ClosedSessionInfo[];
+  openSessions: ClosedSessionInfo[];
 }
 
 const DEFAULT_SETTINGS: HarnessSettings = {
@@ -156,10 +178,15 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   btnAutoSwitch: true,
   btnTokenDashboard: true,
   btnZoom: true,
+  closedSessions: [],
+  openSessions: [],
 };
 
 const MIN_FONT = 8;
 const MAX_FONT = 40;
+// Cap on the persisted reopen stack. Higher than the old in-memory 10 because the
+// stack now also absorbs every tab that was open when Obsidian quit.
+const MAX_CLOSED_SESSIONS = 25;
 
 // Default pattern to scrape the 5h usage % from Claude's status line
 // ("5h:[▓▓░] 23% (3 31m)"). Overridable via settings.autoSwitchUsageRegex.
@@ -462,6 +489,14 @@ class Session {
   private firstPromptBuf = ""; // accumulates the first line you type (fallback)
   private firstPromptDone = false; // stop after the first committed prompt
 
+  /** True once this tab has real conversation/usage (a committed first prompt, a
+   *  non-default title, or it was reopened from a saved conversation). Used to keep
+   *  pristine blank tabs out of the persisted reopen stack — while still keeping a
+   *  reopened tab (which starts with titleRank 0 / no first prompt) recoverable. */
+  hasActivity(): boolean {
+    return this.firstPromptDone || this.titleRank > 0 || this.resume;
+  }
+
   // Tab heartbeat: is Claude actively working in this session? Inferred from PTY
   // activity — Claude streams tokens / animates its spinner continuously while
   // thinking or responding, then goes silent when it hands control back. `busy`
@@ -624,6 +659,9 @@ class Session {
     this.title = clean;
     this.titleRank = rank;
     this.plugin.refreshTabTitles();
+    // The persisted open-tab snapshot stores the title; keep it current so a
+    // reopened tab shows its real name (debounced, so frequent OSC updates are cheap).
+    this.plugin.persistOpenSessions();
   }
 
   /** Fallback title: gather the first line you type and commit it on Enter,
@@ -1673,6 +1711,8 @@ class Session {
     this.startHost();
     this.fitNow();
     this.plugin.rebuildHeader();
+    // sessionId changed → update the persisted open-tab snapshot to the new id.
+    this.plugin.persistOpenSessions();
   }
 
   killChild() {
@@ -1858,18 +1898,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // the plugin (not the view) so they survive the panel being closed/reopened.
   private sessions: Session[] = [];
   private activeIndex = 0;
-  // Chrome-style "reopen closed tab" (Ctrl+Shift+T): LIFO stack of recently closed
-  // sessions. In-memory only (cleared on plugin reload). reopenClosedSession() pops
-  // one and recreates the tab with --resume <sessionId> to recover its conversation.
-  private closedSessions: {
-    sessionId: string;
-    skill: string;
-    model: string;
-    args: string;
-    title: string;
-    cols: number;
-    rows: number;
-  }[] = [];
+  // Chrome-style "reopen closed tab" (Ctrl+Shift+Y): the LIFO stack of reopenable
+  // tabs now lives in settings.closedSessions (persisted), so it survives an
+  // Obsidian restart. reopenClosedSession() pops one and recreates the tab with
+  // --resume <sessionId> to recover its conversation. The currently-open tabs are
+  // snapshotted (debounced) into settings.openSessions so they're reopenable too.
+  private persistOpenTimer: number | null = null;
   private viewRoot: HTMLElement | null = null; // the panel contentEl while open
 
   private fontLink: HTMLLinkElement | null = null;
@@ -1933,6 +1967,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    // Make the previous run's still-open tabs reopenable via Ctrl+Shift+Y, before
+    // any session is created.
+    this.foldPreviousOpenSessions();
     this.injectFont();
 
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
@@ -2054,6 +2091,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   onunload() {
     this.closeAccountMenu();
+    // Best-effort final snapshot of the open tabs so Ctrl+Shift+Y can recover them
+    // next launch (the debounced snapshot already covers a hard shutdown).
+    if (this.persistOpenTimer !== null) {
+      window.clearTimeout(this.persistOpenTimer);
+      this.persistOpenTimer = null;
+    }
+    this.flushOpenSessions();
     for (const s of this.sessions) s.dispose();
     this.sessions = [];
     this.viewRoot = null;
@@ -2099,6 +2143,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       this.rebuildHeader();
       sess.attachInto(this.viewRoot);
     }
+    this.persistOpenSessions();
     return sess;
   }
 
@@ -2124,6 +2169,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.sessions.splice(to, 0, moved);
     this.activeIndex = active ? this.sessions.indexOf(active) : this.activeIndex;
     this.rebuildHeader();
+    this.persistOpenSessions();
   }
 
   /** Interactive Chrome-style tab drag. The dragged tab follows the pointer
@@ -2220,11 +2266,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   closeSession(sess: Session) {
     const idx = this.sessions.indexOf(sess);
     if (idx < 0) return;
-    // Remember it for Ctrl+Shift+T before we kill the process. Its conversation
+    // Remember it for Ctrl+Shift+Y before we kill the process. Its conversation
     // survives on disk (~/.claude/projects/.../<sessionId>.jsonl), so reopening
     // can --resume it.
     if (sess.sessionId) {
-      this.closedSessions.push({
+      this.settings.closedSessions.push({
         sessionId: sess.sessionId,
         skill: sess.skill,
         model: sess.model,
@@ -2233,11 +2279,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         cols: sess.lastCols,
         rows: sess.lastRows,
       });
-      if (this.closedSessions.length > 10) this.closedSessions.shift();
+      while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
+        this.settings.closedSessions.shift();
+      void this.saveSettings();
     }
     if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
     sess.dispose();
     this.sessions.splice(idx, 1);
+    this.persistOpenSessions();
     if (!this.sessions.length) {
       this.activeIndex = 0;
       this.newSession(); // always keep one
@@ -2254,14 +2303,17 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Chrome-style Ctrl+Shift+T: reopen the most recently closed tab and recover
-   *  its conversation via `claude --resume <sessionId>`. */
+  /** Chrome-style Ctrl+Shift+Y: reopen the most recently closed tab and recover
+   *  its conversation via `claude --resume <sessionId>`. The stack is persisted
+   *  in settings, so this works across Obsidian restarts (and includes tabs that
+   *  were still open when Obsidian last quit — see foldPreviousOpenSessions). */
   async reopenClosedSession() {
-    const info = this.closedSessions.pop();
+    const info = this.settings.closedSessions.pop();
     if (!info) {
       new Notice("No closed Claude sessions to reopen");
       return;
     }
+    void this.saveSettings(); // persist the shorter stack so it isn't re-popped
     await this.activateView(); // open the panel if it isn't already
     this.newSession({
       skill: info.skill,
@@ -2272,6 +2324,57 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       resume: true,
     });
     new Notice("Reopened session: " + info.title);
+  }
+
+  /** Snapshot the currently-open tabs into settings.openSessions (debounced), so
+   *  that on the NEXT launch foldPreviousOpenSessions() can make them reopenable
+   *  even though Obsidian quit without closing them. Only tabs with real activity
+   *  are kept, to avoid cluttering the reopen stack with pristine blank tabs. */
+  persistOpenSessions() {
+    if (this.persistOpenTimer !== null) window.clearTimeout(this.persistOpenTimer);
+    this.persistOpenTimer = window.setTimeout(() => {
+      this.persistOpenTimer = null;
+      this.flushOpenSessions();
+    }, 1500);
+  }
+
+  /** Write the open-tab snapshot immediately (used by the debounce and onunload). */
+  private flushOpenSessions() {
+    this.settings.openSessions = this.sessions
+      .filter((s) => s.sessionId && s.hasActivity())
+      .map((s) => ({
+        sessionId: s.sessionId,
+        skill: s.skill,
+        model: s.model,
+        args: s.args,
+        title: s.title,
+        cols: s.lastCols,
+        rows: s.lastRows,
+      }));
+    void this.saveSettings();
+  }
+
+  /** At launch, fold the previous run's still-open tabs into the reopen stack so
+   *  Ctrl+Shift+Y can recover them. Appended at the END (popped first, newest
+   *  first), deduped by sessionId against tabs already in the stack, capped. */
+  private foldPreviousOpenSessions() {
+    // Defensive copy: loadSettings does a shallow Object.assign, so on a first run
+    // (no saved data) these would alias the DEFAULT_SETTINGS arrays and our
+    // push/shift would mutate the module-level defaults. Spreading breaks the alias.
+    const prev = [...(this.settings.openSessions || [])];
+    this.settings.closedSessions = [...(this.settings.closedSessions || [])];
+    if (prev.length) {
+      const seen = new Set(this.settings.closedSessions.map((c) => c.sessionId));
+      for (const info of prev) {
+        if (!info.sessionId || seen.has(info.sessionId)) continue;
+        seen.add(info.sessionId);
+        this.settings.closedSessions.push(info);
+      }
+      while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
+        this.settings.closedSessions.shift();
+    }
+    this.settings.openSessions = [];
+    void this.saveSettings();
   }
 
   /** Mount the panel: build the header (tabs + toolbar) and show the active
