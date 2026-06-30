@@ -270,14 +270,16 @@ llama dos veces por sesión (xterm no lo soporta).
        chars + colapsa espacios + trunca a 40, y refresca con `refreshTabTitles()`
        (actualiza solo los `.cch-tab-label` in situ, sin rebuild completo).
      - **Heartbeat por pestaña** (`.cch-tab-dot` **+ el borde de la `.cch-tab`**,
-       estados `is-busy`/`is-idle`/`is-exited`/`is-limit`): un punto sólido (sin
-       animación) **y el reborde de la pestaña del mismo color** indican si Claude
+       estados `is-busy`/`is-idle`/`is-exited`/`is-limit`/`is-await`): un punto sólido
+       (sin animación) **y el reborde de la pestaña del mismo color** indican si Claude
        está **trabajando** (amarillo), **ha terminado/inactivo** (verde), **salió**
-       (gris) o **se detuvo al alcanzar el límite de uso/tokens** (rojo, con leve
-       tinte de fondo). Un único helper `tabState(sess)` decide clase+etiqueta con
-       prioridad `exited > limitReached > busy > idle`, y lo usan **buildHeader**
-       (al construir) y **refreshTabStatus** (in situ: recorre `.cch-tab` y
-       `.cch-tab-dot`, quita los 4 estados y re-aplica). El busy se infiere de la
+       (gris), **se detuvo al alcanzar el límite de uso/tokens** (rojo, con leve
+       tinte de fondo) o **está esperando tu respuesta** (también rojo con leve tinte
+       —mismo color que el límite, se distinguen por el tooltip—; ver "Estado rojo
+       esperando respuesta"). Un único helper `tabState(sess)` decide clase+etiqueta
+       con prioridad `exited > limitReached > awaitingInput > busy > idle`, y lo usan
+       **buildHeader** (al construir) y **refreshTabStatus** (in situ: recorre
+       `.cch-tab` y `.cch-tab-dot`, quita los 5 estados y re-aplica). El busy se infiere de la
        **actividad del PTY**: `markActivity()` (en `case "data"`) marca `busy=true`
        y rearma un timer de hueco silencioso (1200 ms) que lo devuelve a idle
        —Claude emite tokens / anima su spinner mientras piensa o responde, y enmudece
@@ -296,6 +298,48 @@ llama dos veces por sesión (xterm no lo soporta).
          el texto exacto de Claude al agotar el límite puede cambiar; si el rojo nunca
          se enciende o se enciende mal, ajustar `LIMIT_STOP_RE`. NO cubre la parada por
          **franja horaria** (eso es otra cosa; ver auto-switch), solo el límite de uso.
+       - **Estado rojo "esperando tu respuesta"** (`awaitingInput`): resuelve el
+         problema de que cuando Claude **te pregunta** (prompt de permiso, aprobación de
+         plan, o un **cuestionario `AskUserQuestion`**) se queda **en silencio**
+         esperando, así que el heartbeat lo daba por **terminado** (verde) y no se
+         distinguía "acabó" de "necesita que respondas". Pinta la pestaña de **rojo**
+         (clase `is-await`, mismo color que `is-limit` por petición del usuario; se
+         distinguen por el tooltip: "Waiting for your answer" vs "Usage limit reached").
+         - **Detección leyendo la PANTALLA renderizada, no el flujo de bytes**
+           (`screenShowsPrompt`): recorre las filas **visibles** del buffer de xterm
+           (`term.buffer.active`, de `baseY` a `baseY+rows`, `translateToString(true)`) y
+           casa `PROMPT_WAIT_RE` contra ese texto. CLAVE (bug que dejaba la pestaña
+           clavada en verde): el primer intento usaba un **buffer rodante de bytes** de
+           2500 chars, pero Claude **refresca su barra de estado** periódicamente aunque
+           esté inactivo, y esos bytes **empujaban el pie del formulario fuera de la
+           ventana** → la lógica creía que el prompt ya no estaba → verde. Leer la
+           pantalla real es inmune a eso (la barra de estado no "desplaza" lo visible) y
+           además **navegar el formulario** (que lo repinta) lo mantiene detectado.
+         - **`looksLikePrompt(text)`** (best-effort, con **guarda anti-falsos-positivos**):
+           los fragmentos sueltos del pie ("Esc to cancel"…) también pueden salir en la
+           **prosa** de Claude (p. ej. explicando un atajo), así que un solo fragmento NO
+           basta. Da true si: (a) casa una **frase específica** de permiso/plan
+           (`PROMPT_SENTENCE_RE`: "Do you want to proceed/make/…", "No, and tell Claude
+           what to do…", "Would you like to proceed" — frases completas, raras de pasada);
+           **o** (b) aparecen **a la vez** una pista de **navegación** (`PROMPT_NAV_HINT_RE`:
+           "keys to navigate", "arrow/tab … navigate") **y** una de **acción**
+           (`PROMPT_ACT_HINT_RE`: "enter to select/submit/confirm", "esc to cancel"), que es
+           el **pie multi-parte** que imprimen los menús reales ("Enter to select · Tab/Arrow
+           keys to navigate · Esc to cancel") y que la prosa casi nunca combina. Las pistas
+           del pie son **independientes del idioma** (el pie va en inglés aunque la pregunta
+           esté en español; verificado contra un formulario `AskUserQuestion` en español).
+         - **Disparo y limpieza**: `scheduleAwaitScan()` (en `case "data"` tras
+           `maybeLimitReached`, y en `term.onData`) **deduplica** los escaneos con un
+           timer de ~80 ms —xterm parsea sus writes de forma asíncrona, así que se espera
+           a que el buffer se asiente antes de leerlo—. `maybeAwaitingInput()` es
+           **bidireccional**: refleja exactamente si la pantalla muestra el prompt, así
+           que cuando Claude **reanuda** (el formulario desaparece de pantalla) o tú
+           respondes, el siguiente escaneo lo apaga solo. `restart()` y `case "exit"`
+           (vía `clearAwaiting`) lo resetean y matan el timer. Prioriza sobre `busy`.
+         CAVEAT honesto: el texto/glifo exactos de Claude pueden cambiar entre versiones
+         del CLI; si un cuestionario concreto no enciende el rojo (o enciende de más),
+         ajustar `PROMPT_SENTENCE_RE`/`PROMPT_NAV_HINT_RE`/`PROMPT_ACT_HINT_RE`
+         (idealmente copiando el texto real del prompt).
   2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
@@ -583,23 +627,21 @@ llama dos veces por sesión (xterm no lo soporta).
     `wlPopup`/`wlItems`/`wlSel`): `feedWikilink` (máquina de estados del trigger),
     `openWikilinkPicker`/`closeWikilinkPicker`, `searchWikilink`, `queryNotes`,
     `renderWikilinkResults`/`highlightWikilink`/`moveWikilinkSel`, `acceptWikilink`,
-    `positionWikilinkPopup`. `searchWikilink` es **async** (OmniSearch lo es) con
-    `wlSearchSeq` para descartar respuestas obsoletas / picker ya cerrado.
-  - **Fuente de sugerencias = OmniSearch** (`app.plugins.plugins.omnisearch.api.search(q)`):
-    full-text (busca también el **contenido** de las notas, no solo el título) y con
-    los **mismos resultados que la ventana de OmniSearch**, ya **insensible a acentos**
-    por su propio ajuste. `queryNotes` mapea cada resultado a `{path, basename}` (path
-    = ruta de vault para el `@`-ref). **Fallback = `nativeNotes`** (el suggester nativo
-    de Obsidian: `metadataCache.getLinkSuggestions()` + `prepareFuzzySearch` +
-    `sortSearchResults`, con `stripDiacritics`) cuando OmniSearch no está instalado/
-    activo o falla, **y para la consulta vacía** (OmniSearch no tiene qué buscar antes
-    de teclear → muestra la lista nativa reciente). HISTORIA: primero fue OmniSearch,
-    luego se cambió al nativo para "igualar el `[[` de una nota", y finalmente se
-    devolvió a OmniSearch a petición del usuario (quería full-text + igual que su
-    ventana de búsqueda).
-  - **Insensible a acentos**: con OmniSearch lo da su propio motor. El fallback
-    nativo (`nativeNotes`) usa `stripDiacritics` (helper a nivel de módulo: NFD →
-    quita `\p{Diacritic}` → NFC, sobre consulta y candidato) porque el
+    `positionWikilinkPopup`. `searchWikilink` es **async** (la firma se mantiene por
+    compatibilidad) con `wlSearchSeq` para descartar respuestas obsoletas / picker ya
+    cerrado.
+  - **Fuente de sugerencias = suggester NATIVO de Obsidian** (`nativeNotes`):
+    `metadataCache.getLinkSuggestions()` (cada fichero linkable + sus alias) matcheado
+    sobre el **nombre/alias** con el mismo fuzzy matcher (`prepareFuzzySearch`) +
+    `sortSearchResults`, de modo que el orden coincide con el popup `[[` del editor.
+    `queryNotes` solo delega en `nativeNotes` (la indirección se conserva por si en el
+    futuro se quiere otra fuente); mapea a `{path, basename}` (path = ruta de vault para
+    el `@`-ref). Para la **consulta vacía** muestra la lista nativa tal cual (reciente/
+    ordenada). HISTORIA: primero fue OmniSearch, luego nativo para "igualar el `[[` de
+    una nota", luego OmniSearch (full-text) a petición del usuario, y finalmente
+    **de vuelta al nativo** porque el usuario lo prefiere (funciona mejor para él).
+  - **Insensible a acentos**: `nativeNotes` usa `stripDiacritics` (helper a nivel de
+    módulo: NFD → quita `\p{Diacritic}` → NFC, sobre consulta y candidato) porque el
     `prepareFuzzySearch` nativo es **sensible a diacríticos**. OJO: esto solo afecta a
     ESTE picker del terminal; el `[[` nativo del editor y el Quick Switcher (Ctrl+O)
     de Obsidian siguen siendo sensibles a acentos (limitación del núcleo, sin ajuste).

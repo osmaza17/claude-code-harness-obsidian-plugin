@@ -216,6 +216,29 @@ const AUTH_FAIL_RE =
 // wording can change; tune here if the red never lights up or lights up wrongly.
 const LIMIT_STOP_RE =
   /(usage|5-?hour|weekly|rate)[- ]?limit (reached|exceeded)|limit reached\b|you'?ve (reached|hit) your[^.]{0,30}\blimit|reached your[^.]{0,20}\blimit|out of (credits|usage)|claude usage limit/i;
+// Detecting "Claude is BLOCKED waiting for the user to answer" — a permission prompt
+// ("Do you want to proceed?"), a plan-approval prompt, or an AskUserQuestion form.
+// While waiting Claude emits no tokens, so the heartbeat would mark the tab idle
+// (green, "done") and you couldn't tell "finished" from "needs your answer";
+// matching this paints the tab RED instead. Best-effort, like LIMIT_STOP_RE.
+//
+// FALSE-POSITIVE GUARD: the individual footer words ("Esc to cancel", etc.) can also
+// appear in Claude's PROSE (e.g. it explains a keybinding), so a single fragment is
+// NOT enough. looksLikePrompt() requires either (a) a specific permission/plan
+// SENTENCE — full phrases unlikely in passing — or (b) BOTH a navigation hint AND an
+// action hint together, which is the multi-part footer real menus print
+// ("Enter to select · Tab/Arrow keys to navigate · Esc to cancel") and which prose
+// almost never combines. Language-independent (the footer is English even when the
+// question is in Spanish — verified against a Spanish AskUserQuestion form). The exact
+// wording can change between CLI versions — tune these three regexes if needed.
+const PROMPT_SENTENCE_RE =
+  /No,?\s+and tell Claude what to do|Do you want to (proceed|make|create|run|allow|apply|continue|edit)\b|Would you like to proceed/i;
+const PROMPT_NAV_HINT_RE = /\bkeys? to navigate\b|\b(arrow|tab)\b[^\n]{0,24}\bnavigate\b/i;
+const PROMPT_ACT_HINT_RE = /\benter to (select|submit|confirm)\b|\besc to cancel\b/i;
+function looksLikePrompt(text: string): boolean {
+  if (PROMPT_SENTENCE_RE.test(text)) return true;
+  return PROMPT_NAV_HINT_RE.test(text) && PROMPT_ACT_HINT_RE.test(text);
+}
 // Generic email matcher (filtered against known accounts before use).
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
@@ -508,6 +531,13 @@ class Session {
   // Inferred from Claude's output (best-effort, LIMIT_STOP_RE); drives the tab.
   limitReached = false;
   private limitBuf = "";
+  // Claude is blocked waiting for the user to answer (permission prompt / plan
+  // approval / AskUserQuestion) → tab goes RED so "needs your answer" is not
+  // confused with "done" (both are silent/idle). Detected by scanning xterm's
+  // RENDERED screen (not the byte stream — see screenShowsPrompt), so the periodic
+  // status-bar refresh can't scroll the prompt out of view and leave it stuck.
+  awaitingInput = false;
+  private awaitScanTimer: number | null = null;
 
   // Remote control toggle (/remote-control). remoteOn drives the button's green
   // state; while awaiting the menu we scrape the session URL to the clipboard.
@@ -599,6 +629,7 @@ class Session {
     this.term.onData((d: string) => {
       this.lastKeyAt = Date.now();
       this.clearLimitReached(); // typing = moving on; drop the red limit flag
+      this.scheduleAwaitScan(); // re-check the prompt after navigating/answering it
       this.captureFirstPrompt(d);
       // The [[ note suggester intercepts typed text: it forwards what should be
       // echoed (the brackets + query) itself and returns true to mean "handled,
@@ -740,6 +771,54 @@ class Session {
     this.plugin.refreshTabStatus();
   }
 
+  /** Coalesce a screen scan after output/keystrokes. xterm parses writes
+   *  asynchronously, so we wait ~80ms for the buffer to settle before reading it,
+   *  and dedupe bursts into one scan. */
+  private scheduleAwaitScan() {
+    if (this.exited || this.awaitScanTimer != null) return;
+    this.awaitScanTimer = window.setTimeout(() => {
+      this.awaitScanTimer = null;
+      this.maybeAwaitingInput();
+    }, 80);
+  }
+
+  /** True if the terminal's VISIBLE screen currently shows an interactive prompt
+   *  blocked on the user. Reads xterm's rendered viewport (the real on-screen
+   *  state) rather than a byte-stream buffer: the periodic status-bar refresh would
+   *  otherwise scroll the prompt's footer out of a rolling window and leave the tab
+   *  stuck green, and navigating the form (which redraws it) keeps it on screen. */
+  private screenShowsPrompt(): boolean {
+    const term = this.term;
+    if (!term) return false;
+    const buf = term.buffer.active;
+    const end = buf.baseY + term.rows; // bottom of the live viewport
+    const start = Math.max(0, end - term.rows);
+    let text = "";
+    for (let y = start; y < end; y++) {
+      const line = buf.getLine(y);
+      if (line) text += line.translateToString(true) + "\n";
+    }
+    return looksLikePrompt(text);
+  }
+
+  /** Reconcile the RED "awaiting your answer" flag with what's on screen. The red
+   *  limit flag wins, so skip while it's set. */
+  private maybeAwaitingInput() {
+    if (this.exited || this.limitReached) return;
+    const waiting = this.screenShowsPrompt();
+    if (waiting !== this.awaitingInput) {
+      this.awaitingInput = waiting;
+      this.plugin.refreshTabStatus();
+    }
+  }
+
+  /** Force-drop the awaiting flag (restart). Screen scans handle the normal case. */
+  private clearAwaiting() {
+    if (!this.awaitingInput) return;
+    this.awaitingInput = false;
+    this.plugin.refreshTabStatus();
+  }
+
   /** Re-apply the Obsidian theme to this terminal (called on css-change). */
   applyTheme() {
     if (!this.term) return;
@@ -779,7 +858,7 @@ class Session {
   //
   // Mirrors Obsidian's wikilink autocomplete inside the terminal: typing "[[" opens
   // a floating picker anchored at the cursor with the SAME suggestions as [[ in a
-  // note (Obsidian's own getLinkSuggestions + prepareFuzzySearch — see queryNotes);
+  // note (Obsidian's native getLinkSuggestions + prepareFuzzySearch — see queryNotes);
   // picking a note replaces "[[query" with an "@<path> " reference (Claude's syntax).
   //
   // The typed text (the two "[" and the query) IS forwarded to Claude so it echoes
@@ -874,7 +953,7 @@ class Session {
   }
 
   /** Run the current query and re-render. Tagged with a sequence number so a slow
-   *  OmniSearch response can't clobber a newer query (or a closed picker). */
+   *  response can't clobber a newer query (or a closed picker). */
   private async searchWikilink() {
     const seq = ++this.wlSearchSeq;
     const items = await this.queryNotes(this.wlQuery);
@@ -884,37 +963,20 @@ class Session {
     this.renderWikilinkResults();
   }
 
-  /** Suggestions = OmniSearch (full-text, same results as its own search window,
-   *  and diacritic-insensitive on its own). Falls back to Obsidian's native [[
-   *  suggester (`nativeNotes`) when OmniSearch isn't available, and for the empty
-   *  query (OmniSearch has nothing to search before you type). `path` (for the @
-   *  reference) is the file's vault-relative path. */
+  /** Suggestions = Obsidian's native [[ suggester (`nativeNotes`): same candidate
+   *  source + fuzzy matcher + sort order as the editor's own [[ popup. `path` (for
+   *  the @ reference) is the file's vault-relative path. */
   private async queryNotes(
     q: string
   ): Promise<{ path: string; basename: string }[]> {
-    const app = this.plugin.app as any;
-    const omni = app.plugins?.plugins?.omnisearch?.api;
-    if (q.trim() && omni?.search) {
-      try {
-        const res = await omni.search(q);
-        if (Array.isArray(res)) {
-          return res.slice(0, 8).map((r: any) => ({
-            path: r.path,
-            basename: r.basename ?? (r.path.split("/").pop() || r.path),
-          }));
-        }
-      } catch {
-        /* OmniSearch failed/indexing — fall through to the native suggester */
-      }
-    }
     return this.nativeNotes(q);
   }
 
-  /** Fallback suggester that mirrors Obsidian's native [[ autocomplete: SAME
-   *  candidate source (`metadataCache.getLinkSuggestions()` — every linkable file +
-   *  its aliases), matched on the FILENAME / alias with the SAME fuzzy matcher
+  /** Mirrors Obsidian's native [[ autocomplete: SAME candidate source
+   *  (`metadataCache.getLinkSuggestions()` — every linkable file + its aliases),
+   *  matched on the FILENAME / alias with the SAME fuzzy matcher
    *  (`prepareFuzzySearch`) + `sortSearchResults`, diacritic-insensitive via
-   *  `stripDiacritics`. Used when OmniSearch is unavailable and for the empty query. */
+   *  `stripDiacritics`. */
   private nativeNotes(q: string): { path: string; basename: string }[] {
     const app = this.plugin.app as any;
     type Cand = { file: TFile; alias?: string };
@@ -1696,6 +1758,11 @@ class Session {
     if (!this.term) return;
     this.limitReached = false;
     this.limitBuf = "";
+    this.awaitingInput = false;
+    if (this.awaitScanTimer != null) {
+      window.clearTimeout(this.awaitScanTimer);
+      this.awaitScanTimer = null;
+    }
     this.remoteOn = false;
     this.awaitRemoteActive = false;
     this.remoteMenuLoopActive = false;
@@ -1748,6 +1815,10 @@ class Session {
     if (this.busyTimer != null) {
       window.clearTimeout(this.busyTimer);
       this.busyTimer = null;
+    }
+    if (this.awaitScanTimer != null) {
+      window.clearTimeout(this.awaitScanTimer);
+      this.awaitScanTimer = null;
     }
     this.closeWikilinkPicker();
     this.killChild();
@@ -1844,6 +1915,7 @@ class Session {
           this.term.write(msg.d);
           this.markActivity(); // tab heartbeat: Claude is producing output
           this.maybeLimitReached(msg.d); // paint the tab red if usage limit hit
+          this.scheduleAwaitScan(); // red if Claude is waiting on the user (screen scan)
           // Per-session watchers (this terminal's TUI).
           this.maybeSendInitial();
           this.maybeConfirmModel(msg.d);
@@ -1859,9 +1931,14 @@ class Session {
           this.exited = true; // stop sending resizes to the dead pty
           this.closeWikilinkPicker();
           this.setBusy(false); // settle the heartbeat dot
+          this.clearAwaiting(); // drop the awaiting flag; the tab is now "exited"
           if (this.busyTimer != null) {
             window.clearTimeout(this.busyTimer);
             this.busyTimer = null;
+          }
+          if (this.awaitScanTimer != null) {
+            window.clearTimeout(this.awaitScanTimer);
+            this.awaitScanTimer = null;
           }
           this.term.writeln(
             "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"
@@ -4399,17 +4476,21 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   /** Update the per-tab heartbeat dot in place (busy / idle / exited) without a
    *  full header rebuild. Dots are in session order, so index aligns. */
   /** Shared tab state: drives both the heartbeat dot and the tab border colour.
-   *  Priority: exited (grey) > limit reached (red) > busy (yellow) > idle (green). */
+   *  Priority: exited (grey) > limit reached (red) > awaiting user (orange) >
+   *  busy (yellow) > idle (green). Awaiting outranks busy so the prompt-draw chunk
+   *  (which also marks the session busy) shows orange immediately. */
   private tabState(sess: Session): { cls: string; label: string } {
     if (sess.exited) return { cls: "is-exited", label: "Exited" };
     if (sess.limitReached) return { cls: "is-limit", label: "Usage limit reached" };
+    if (sess.awaitingInput)
+      return { cls: "is-await", label: "Waiting for your answer" };
     if (sess.busy) return { cls: "is-busy", label: "Working…" };
     return { cls: "is-idle", label: "Idle" };
   }
 
   refreshTabStatus() {
     if (!this.viewRoot) return;
-    const states = ["is-busy", "is-idle", "is-exited", "is-limit"];
+    const states = ["is-busy", "is-idle", "is-exited", "is-limit", "is-await"];
     const tabEls = this.viewRoot.findAll(".cch-tabs .cch-tab");
     const dots = this.viewRoot.findAll(".cch-tabs .cch-tab-dot");
     this.sessions.forEach((sess, i) => {

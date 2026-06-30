@@ -34,10 +34,14 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   no una restauración automática al arrancar.
 - **Estado de cada pestaña de un vistazo**: cada pestaña lleva un **punto** y, del
   mismo color, **su reborde**, para ver sin abrirla si Claude está **trabajando**
-  (amarillo), **terminado/inactivo** (verde), **salido** (gris) o **detenido por
-  alcanzar el límite de uso/tokens** (rojo). El rojo se limpia al volver a escribir
-  o al reiniciar la sesión. (La detección del límite es best-effort: depende del
-  texto que imprime Claude, que puede cambiar.)
+  (amarillo), **terminado/inactivo** (verde), **esperando tu respuesta** (rojo:
+  te ha hecho un prompt de permiso, una aprobación de plan o un cuestionario y está
+  bloqueado hasta que contestes) o **detenido por alcanzar el límite de uso/tokens**
+  (también rojo; se distinguen por el tooltip al pasar el ratón), y **salido** (gris).
+  El rojo de "esperando respuesta" se apaga al responder (escribir) o cuando Claude
+  reanuda; el del límite se limpia al volver a escribir o al reiniciar la sesión.
+  (Tanto la detección de "esperando respuesta" como la del límite son best-effort:
+  dependen del texto que imprime Claude, que puede cambiar.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de
   Obsidian (claro/oscuro) y se reaplican al cambiarlo.
 - **Sesiones persistentes**: arrancan al abrir Obsidian aunque no abras el panel,
@@ -61,11 +65,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   `@<ruta>`.
 - **Autocompletado `[[` → referencia `@`**: al escribir `[[` en el input de Claude
   aparece un **desplegable** anclado al cursor (estilo Obsidian) con las notas más
-  parecidas, vía **OmniSearch** (búsqueda full-text, **ignorando acentos**; mismas
-  sugerencias que su ventana de búsqueda). Flechas para moverte, Enter/Tab/clic para
-  elegir, Escape para cancelar; al elegir, lo tecleado se sustituye por la referencia
-  `@<ruta>` de Claude Code. Si OmniSearch no está, cae al suggester nativo de
-  Obsidian. Se puede desactivar en ajustes ("[[ note suggester").
+  parecidas, usando el **suggester nativo de Obsidian** (mismas sugerencias y orden
+  que el `[[` del editor; **ignorando acentos**). Flechas para moverte, Enter/Tab/clic
+  para elegir, Escape para cancelar; al elegir, lo tecleado se sustituye por la
+  referencia `@<ruta>` de Claude Code. Se puede desactivar en ajustes
+  ("[[ note suggester").
 - **Referencias a notas clicables**: las menciones a notas en la salida de Claude
   (el texto **coloreado** que coincide con el nombre de una nota `.md` del vault, y
   los `[[wikilinks]]`) se vuelven **enlaces**: pasa el ratón para subrayarlas y haz
