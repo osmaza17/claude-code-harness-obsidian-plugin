@@ -30,8 +30,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   de Obsidian**: la pila se guarda en disco, así que al día siguiente —incluso tras
   apagar el PC— `Ctrl+Shift+Y` sigue recuperando las pestañas que cerraste con la ×,
   de la más reciente a la más antigua. La recuperación es **bajo demanda** (una
-  pestaña por pulsación). (Las pestañas que dejas **abiertas** al cerrar Obsidian
-  ya no van a esta pila: se **restauran solas** al reabrir — ver abajo.)
+  pestaña por pulsación). Las pestañas **en blanco** (sin ningún mensaje) no se
+  archivan al cerrarlas: no hay conversación que recuperar. (Las pestañas que dejas
+  **abiertas** al cerrar Obsidian ya no van a esta pila: se **restauran solas** al
+  reabrir — ver abajo.)
 - **Restaurar la sesión de trabajo al reabrir Obsidian**: las pestañas que tengas
   **abiertas** al cerrar Obsidian se **guardan** y, al volver a abrir Obsidian y el
   panel de Claude Code, **reaparecen automáticamente** las mismas pestañas (en su
@@ -76,9 +78,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   abras el panel; las que tenías abiertas antes se restauran al abrir el panel (ver
   "Restaurar la sesión de trabajo"). No se cierran al cerrar el panel — siguen vivas
   hasta que cierras su pestaña, cierras Obsidian o desactivas el plugin.
-- **Comandos de inicio + skill** configurables: comandos slash que se ejecutan
-  al arrancar (vacío por defecto) y una skill que se invoca después. Se envían se
-  abra o no el panel.
+- **Comandos de inicio + skill** configurables: al arrancar una sesión nueva se
+  envía primero `/model <id>` (el modelo que muestra la cabecera es el que la
+  sesión usa de verdad), luego los comandos slash configurados (vacío por defecto)
+  y por último la skill. Se envían se abra o no el panel; las pestañas restauradas
+  con `--resume` no reciben nada (su conversación ya lo trae).
 - **Selector de skills**: lista las skills de Claude Code en `~/.claude/skills`
   (cada subcarpeta con un `SKILL.md`) y la invoca como `/<nombre>`. Cámbiala desde
   un botón (icono ✨) en la cabecera **para la pestaña activa**; por defecto

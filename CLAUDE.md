@@ -75,7 +75,9 @@ Reparto de responsabilidades:
   cols/rows) en `settings.closedSessions` (LIFO, tope `MAX_CLOSED_SESSIONS`=25,
   **persistido en disco** vía `saveSettings`) para poder reabrirla, vía el helper
   compartido **`rememberClosedSession(sess)`** (lo usa también `restart()` para
-  archivar la conversación vieja al reiniciar).
+  archivar la conversación vieja al reiniciar). Ambos llamadores lo guardan con
+  `if (hasActivity())`: una pestaña en blanco no tiene `.jsonl`, así que reabrirla
+  lanzaría `claude --resume` sobre una conversación inexistente.
 - **Persistencia entre sesiones de Obsidian (clave del reopen + auto-restauración).**
   La persistencia ya NO es solo en memoria: `closedSessions` (pila de reopen) vive en
   `settings` (data.json) y, además, las pestañas que siguen **abiertas** se snapshotean
@@ -112,8 +114,12 @@ Reparto de responsabilidades:
       open+fit correcto), así que renderizan bien al cambiarse a ellos.
     - **NO** vacía `settings.openSessions`: los tabs restaurados (vivos) se re-persisten
       solos (`flushOpenSessions` **reemplaza**, no anexa → idempotente); `flushOpenSessions`
-      además **no pisa** el snapshot si `pendingOpen` sigue sin consumir y no hay sesiones
-      (cerraste Obsidian sin abrir el panel → conserva los tabs para el próximo arranque).
+      además **no pisa** el snapshot mientras `pendingOpen` siga sin consumir
+      (cerraste Obsidian sin abrir el panel → conserva los tabs para el próximo
+      arranque, aunque exista alguna sesión creada sin llegar a montar el panel).
+    - Los `cols`/`rows` archivados viajan por las opts de `newSession`/`Session`
+      hasta `lastCols/lastRows`, así el `claude --resume` arranca al tamaño que
+      tenía la pestaña (también en el reopen de Ctrl+Shift+Y / historial).
     - En `onload` **no** se crea sesión en blanco si hay `pendingOpen` (se espera al
       panel); sí se crea una si no hay nada que restaurar (comportamiento previo).
     - CAVEAT (honesto): al abrir el panel se lanzan **N procesos `claude --resume`** (uno
@@ -351,8 +357,11 @@ llama dos veces por sesión (xterm no lo soporta).
        - **Estado rojo "límite alcanzado"** (`limitReached`): `maybeLimitReached(chunk)`
          (en `case "data"`, tras `markActivity`) vigila la salida con un buffer
          rodante propio (ANSI quitado) y, si casa `LIMIT_STOP_RE` —regex **best-effort**,
-         más estricta que `LIMIT_RE`: SIN el `resets at` suelto que sale en la barra de
-         estado normalmente, para no dar falsos rojos—, **engancha** el flag (deja de
+         estricta a propósito: SIN el `resets at` suelto que sale en la barra de
+         estado normalmente, para no dar falsos positivos (es también el disparador
+         de respaldo del auto-switch; la antigua `LIMIT_RE`, que sí incluía `resets at`,
+         se eliminó porque provocaba switches espurios en cada cooldown)—,
+         **engancha** el flag (deja de
          escanear mientras esté activo, así el texto viejo en pantalla no re-dispara) y
          pinta la pestaña de rojo. Se **limpia** al teclear (`clearLimitReached` en
          `term.onData`: seguir escribiendo = continuar) o en `restart()`. CAVEAT honesto:
@@ -452,7 +461,11 @@ llama dos veces por sesión (xterm no lo soporta).
   **NO reinicia**: un proceso claude vivo re-lee `.credentials.json` y usa la cuenta
   nueva en su **siguiente petición** (confirmado por el usuario: las instancias ya
   abiertas cambian solas), así que la sesión sigue sin interrupción y sin perder la
-  conversación. Antes de escribir, re-snapshotea la cuenta saliente (conserva su
+  conversación. ORDEN seguro: lee y valida TODO (el snapshot destino y
+  `~/.claude.json`) **antes** de escribir nada — si una lectura falla se aborta con
+  los ficheros intactos (escribir las credenciales primero dejaba un estado a
+  medias que un auto-save posterior podía convertir en un snapshot corrupto de la
+  cuenta saliente). Antes de escribir, re-snapshotea la cuenta saliente (conserva su
   token recién refrescado; mitiga la rotación de refresh tokens). Como no hay
   reinicio, la skill NO se reinyecta al cambiar (sin lógica extra). UI: botón de
   cabecera (icono `user-round`; "Save current account" + lista para cambiar),
@@ -607,13 +620,26 @@ llama dos veces por sesión (xterm no lo soporta).
   - **Anclaje**: si el email de la barra ≠ `currentAccountEmail()`, no actúa (la
     barra aún no refleja el último swap) → evita cambios espurios por leer el % de
     la cuenta vieja justo tras cambiar.
-  - **Disparador de respaldo** `LIMIT_RE` (mensaje de "límite alcanzado") aunque no
-    haya %. **Regex de uso configurable** (`settings.autoSwitchUsageRegex`, default
-    `DEFAULT_USAGE_RE`, compilada con fallback seguro).
+  - **Disparador de respaldo** `LIMIT_STOP_RE` (mensaje de "límite alcanzado")
+    aunque no haya % — la misma regex estricta del estado rojo de pestaña (la
+    antigua `LIMIT_RE`, con `resets at`, casaba con la barra de estado normal y
+    provocaba switches en bucle; se eliminó). Tras cada `triggerSwitch` se vacían
+    los `autoSwitchBuf` de todas las sesiones para que el texto disparador no
+    re-dispare otro salto en el siguiente cooldown. **Regex de uso configurable**
+    (`settings.autoSwitchUsageRegex`, default `DEFAULT_USAGE_RE`, compilada con
+    fallback seguro); del buffer rodante se toma **la ÚLTIMA coincidencia** (la
+    primera era el % más viejo aún visible → lecturas desfasadas), igual que el
+    escaneo de emails.
   - **Auto-recuperación por auth-fail** (`AUTH_FAIL_RE` dentro de `authWatchUntil`
     tras un swap): avisa y, en auto, salta a la siguiente cuenta (tope
-    `recoverAttempts`). `LIMIT_RE`/`AUTH_FAIL_RE` son best-effort: el texto real de
-    Claude puede cambiar, ajustar si hace falta.
+    `recoverAttempts`). `LIMIT_STOP_RE`/`AUTH_FAIL_RE` son best-effort: el texto
+    real de Claude puede cambiar, ajustar si hace falta.
+  - **Caché de disco (`ACCOUNT_CACHE_MS` = 5 s)**: `currentAccountEmail()` y
+    `listSavedAccounts()` cachean su lectura (el watcher corre en **cada chunk**
+    del PTY y releer `~/.claude.json` —que puede ser enorme— más todos los
+    snapshots decenas de veces por segundo producía jank real).
+    `saveCurrentAccount`/`switchToAccount`/`deleteSavedAccount` invalidan la caché
+    (`invalidateAccountCaches`); un `/login` externo se detecta dentro del TTL.
   - **Aviso si <2 cuentas** al activar auto-switch o al intentar rotar
     (`warnedNoAccounts`, one-shot).
 - **Live usage (sondeo por API)** (`settings.usageProbe`, on por defecto): lee el
@@ -699,8 +725,10 @@ llama dos veces por sesión (xterm no lo soporta).
   (`sendActiveNote`), el menú contextual del explorador (eventos `file-menu` /
   `files-menu` → "Send to Claude") y el **drag-and-drop** sobre el terminal
   (`handleDrop`: lee `app.dragManager.draggable` para arrastres internos,
-  `dataTransfer.files` para archivos del SO, y un fallback de `text/plain` que
-  resuelve `[[wikilinks]]` vía `metadataCache.getFirstLinkpathDest`).
+  `dataTransfer.files` para archivos del SO —vía `electron.webUtils.getPathForFile`,
+  con fallback a `File.path` en Electron <32, que fue donde se eliminó esa API—,
+  y un fallback de `text/plain` que resuelve `[[wikilinks]]` vía
+  `metadataCache.getFirstLinkpathDest`).
 - **Autocompletado `[[` → referencia `@`** (suggester estilo Obsidian dentro del
   terminal; ajuste `wikilinkPicker`, on por defecto): al escribir **`[[`** en el
   input se abre un **desplegable flotante** (`.cch-wikilink-menu`, mismo patrón DOM
@@ -869,10 +897,13 @@ llama dos veces por sesión (xterm no lo soporta).
   nº de cuentas— a partir de `lastDiagInfo`, que `maybeAutoSwitch` rellena en
   cada chunk; útil para saber por qué no cambia).
 - **Instrucciones predefinidas**: ajuste "Extra arguments" (se anexa al comando,
-  p. ej. `--append-system-prompt "..."`) y "Skill". `maybeSendInitial` corre los
-  `startupCommands` (p. ej. `/remote-control`) y luego invoca la skill activa
-  (`/<skill>`) cuando llega la primera salida de claude, **se abra o no el
-  panel**. Cada paso se manda al pty con `pasteToPty()` (entrada IPC directa, con
+  p. ej. `--append-system-prompt "..."`) y "Skill". `maybeSendInitial` envía
+  primero `/model <id>` (para que el modelo de la pestaña sea REAL: antes la
+  cabecera mostraba `session.model` pero claude arrancaba con su propio default),
+  luego corre los `startupCommands` (p. ej. `/remote-control`) y por último invoca
+  la skill activa (`/<skill>`) cuando llega la primera salida de claude, **se abra
+  o no el panel**. En tabs con `resume:true` no se envía nada (la conversación ya
+  trae su modelo/skill). Cada paso se manda al pty con `pasteToPty()` (entrada IPC directa, con
   marcadores de bracketed-paste si el modo está activo) en vez de `term.paste()`,
   que requería la vista montada — por eso antes fallaba si nunca se abría la
   ventana.

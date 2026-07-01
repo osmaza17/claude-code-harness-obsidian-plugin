@@ -210,16 +210,15 @@ const SWITCH_CEILING_PCT = 90;
 // only (it filters destinations); it does not force the active account to move.
 const WEEKLY_CEILING_PCT = 95;
 // Best-effort patterns (the exact text Claude prints may change — tune if needed).
-// LIMIT_RE: explicit "limit reached" message → fallback trigger to switch.
-const LIMIT_RE =
-  /(5-?hour|usage|rate).{0,20}limit (reached|exceeded)|limit reached|resets? at/i;
 // AUTH_FAIL_RE: an auth problem after a swap (e.g. a saved token is dead).
 const AUTH_FAIL_RE =
   /please (run )?\/login|invalid (oauth )?(token|credentials)|token (has )?expired|authentication (failed|error)|unauthorized|\b401\b/i;
-// LIMIT_STOP_RE: Claude stopped because the usage/token limit was hit → paint the
-// tab RED. Tighter than LIMIT_RE on purpose (no bare "resets at", which shows in
-// the status bar normally and would cause false reds). Best-effort: Claude's exact
-// wording can change; tune here if the red never lights up or lights up wrongly.
+// LIMIT_STOP_RE: Claude stopped because the usage/token limit was hit → paints
+// the tab RED and is also the auto-switch fallback trigger. Deliberately strict:
+// no bare "resets at", which shows in the status bar normally and would fire
+// falsely (as a switch trigger it caused an account ping-pong every cooldown).
+// Best-effort: Claude's exact wording can change; tune here if the red never
+// lights up or lights up wrongly.
 const LIMIT_STOP_RE =
   /(usage|5-?hour|weekly|rate)[- ]?limit (reached|exceeded)|limit reached\b|you'?ve (reached|hit) your[^.]{0,30}\blimit|reached your[^.]{0,20}\blimit|out of (credits|usage)|claude usage limit/i;
 // Detecting "Claude is BLOCKED waiting for the user to answer" — a permission prompt
@@ -291,6 +290,13 @@ const H_7D_UTIL = "anthropic-ratelimit-unified-7d-utilization";
 const H_7D_RESET = "anthropic-ratelimit-unified-7d-reset";
 const H_5H_STATUS = "anthropic-ratelimit-unified-5h-status";
 const USAGE_FRESH_MS = 6 * 60 * 1000; // a reading older than this is "stale"
+// TTL for the cached currentAccountEmail()/listSavedAccounts() reads. Both are
+// called (several times) from maybeAutoSwitch on EVERY pty data chunk; without a
+// cache that meant re-reading ~/.claude.json (often huge) plus every account
+// snapshot dozens of times per second during streaming — real renderer jank.
+// Writes through the plugin invalidate the cache; external changes (/login in
+// the terminal) are picked up within this TTL.
+const ACCOUNT_CACHE_MS = 5000;
 
 // Per-account usage snapshot from a probe (or an error state). pct values are
 // 0..100 (the headers give a 0..1 fraction; we ×100). reset5h is epoch seconds.
@@ -604,6 +610,8 @@ class Session {
       title?: string;
       sessionId?: string;
       resume?: boolean;
+      cols?: number;
+      rows?: number;
     }
   ) {
     this.plugin = plugin;
@@ -615,6 +623,12 @@ class Session {
     this.title = opts?.title || this.skill || "Claude";
     this.sessionId = opts?.sessionId || newConversationId();
     this.resume = !!opts?.resume;
+    // Reopened/restored tabs carry their archived grid size: spawn claude at it
+    // so the --resume repaint matches (0/undefined falls back to settings).
+    if (opts?.cols && opts?.rows) {
+      this.lastCols = opts.cols;
+      this.lastRows = opts.rows;
+    }
     this.create();
   }
 
@@ -1335,11 +1349,26 @@ class Session {
         for (const f of dragged.files) if (f?.path) paths.push(f.path);
       }
     }
-    // 2) OS files dropped from outside Obsidian.
+    // 2) OS files dropped from outside Obsidian. Electron ≥32 removed File.path
+    // in favour of webUtils.getPathForFile, so try the modern API first and fall
+    // back to .path on older builds.
     const dt = e.dataTransfer;
     if (dt?.files?.length) {
+      let webUtils: any = null;
+      try {
+        webUtils = nodeRequire("electron")?.webUtils;
+      } catch {
+        /* old Electron / unavailable */
+      }
       for (let i = 0; i < dt.files.length; i++) {
-        const p = (dt.files[i] as any).path;
+        const f = dt.files[i];
+        let p: string | null = null;
+        try {
+          p = webUtils?.getPathForFile?.(f) || null;
+        } catch {
+          p = null;
+        }
+        if (!p) p = (f as any).path || null;
         if (p) paths.push(p);
       }
     }
@@ -1690,6 +1719,11 @@ class Session {
     if (this.resume) return;
 
     const steps: string[] = [];
+    // Make the session's model real: the header tab shows session.model, but a
+    // fresh claude starts on ITS default — send /model first so the label never
+    // lies (same /model pattern the header selector uses; resumed tabs return
+    // above and keep their conversation's model).
+    if (this.model) steps.push("/model " + this.model);
     const startup = this.plugin.settings.startupCommands || "";
     for (const line of startup.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
       steps.push(line);
@@ -1771,6 +1805,7 @@ class Session {
   /** Kill this claude process and start a fresh one in the same terminal. */
   restart() {
     if (!this.term) return;
+    this.closeWikilinkPicker(); // don't leave the [[ popup floating over the reset
     this.limitReached = false;
     this.limitBuf = "";
     this.awaitingInput = false;
@@ -2048,6 +2083,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // Auto-save the active account whenever it changes (throttled).
   private lastAutoSavedEmail = "";
   private lastAutoSaveCheck = 0;
+  // Disk-read caches (see ACCOUNT_CACHE_MS): maybeAutoSwitch runs on every pty
+  // chunk, so these two reads must not hit the filesystem each time.
+  private cachedEmail: { v: string | null; at: number } = { v: null, at: 0 };
+  private cachedAccounts: { v: { email: string; file: string }[]; at: number } = {
+    v: [],
+    at: 0,
+  };
   // Live usage probe cache + guards.
   private accountUsage = new Map<string, AccountUsage>();
   private usageProbing = false;
@@ -2073,9 +2115,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    // Break the DEFAULT_SETTINGS alias (loadSettings does a shallow assign) so
-    // closeSession's push doesn't mutate the module-level default on a fresh install.
+    // Break the DEFAULT_SETTINGS aliases (loadSettings does a shallow assign):
+    // on a fresh install these arrays ARE the module-level defaults, and every
+    // in-place push/splice (closedSessions, autoSwitchExcluded, browserMap,
+    // accountSchedules) would pollute them for later loads.
     this.settings.closedSessions = [...(this.settings.closedSessions || [])];
+    this.settings.autoSwitchExcluded = [...(this.settings.autoSwitchExcluded || [])];
+    this.settings.browserMap = [...(this.settings.browserMap || [])];
+    this.settings.accountSchedules = [...(this.settings.accountSchedules || [])];
     // Queue the previous run's still-open tabs for restoration when the panel is
     // first shown — NOT now. Spawning a --resume session while detached (no panel,
     // so no real terminal size) makes Claude repaint its TUI at the spawn size and
@@ -2258,6 +2305,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     title?: string;
     sessionId?: string;
     resume?: boolean;
+    cols?: number;
+    rows?: number;
   }): Session {
     if (this.viewRoot) this.activeSession()?.detachHost();
     const sess = new Session(this, opts);
@@ -2361,29 +2410,45 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       }
     };
 
-    const onUp = () => {
+    // Always clear the inline drag styles before committing: if the index didn't
+    // change (e.g. dragged a corner tab past the edge) moveSession is a no-op and
+    // won't rebuild, so without this the tab would stay where the cursor left it
+    // instead of snapping back into its slot.
+    const clearDragStyles = () => {
+      for (const t of tabEls) {
+        t.style.transform = "";
+        t.style.transition = "";
+        t.style.zIndex = "";
+        t.style.position = "";
+      }
+      dragged.removeClass("cch-tab-dragging");
+    };
+    const unlisten = () => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onCancel);
+    };
+
+    const onUp = () => {
+      unlisten();
       if (started) {
-        // Always clear the inline drag styles first: if the index didn't change
-        // (e.g. dragged a corner tab past the edge) moveSession is a no-op and
-        // won't rebuild, so without this the tab would stay where the cursor
-        // left it instead of snapping back into its slot.
-        for (const t of tabEls) {
-          t.style.transform = "";
-          t.style.transition = "";
-          t.style.zIndex = "";
-          t.style.position = "";
-        }
-        dragged.removeClass("cch-tab-dragging");
+        clearDragStyles();
         if (to !== from) this.moveSession(from, to); // rebuilds the header
       } else {
         this.setActive(from); // it was a click, not a drag
       }
     };
 
+    // Aborted drag (pen/touch cancel, pointer capture lost): revert without
+    // committing — previously this left the listeners and transforms hanging.
+    const onCancel = () => {
+      unlisten();
+      if (started) clearDragStyles();
+    };
+
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onCancel);
   }
 
   /** Push a session's conversation metadata onto the reopen stack (Ctrl+Shift+Y /
@@ -2415,8 +2480,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (idx < 0) return;
     // Remember it for Ctrl+Shift+Y before we kill the process. Its conversation
     // survives on disk (~/.claude/projects/.../<sessionId>.jsonl), so reopening
-    // can --resume it.
-    this.rememberClosedSession(sess);
+    // can --resume it. Blank tabs are skipped (same guard as restart()): they
+    // have no .jsonl, so --resume on reopen would fail on a dead conversation.
+    if (sess.hasActivity()) this.rememberClosedSession(sess);
     if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
     sess.dispose();
     this.sessions.splice(idx, 1);
@@ -2475,6 +2541,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       title: info.title,
       sessionId: info.sessionId,
       resume: true,
+      cols: info.cols,
+      rows: info.rows,
     });
     new Notice("Reopened session: " + info.title);
   }
@@ -2505,10 +2573,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Write the open-tab snapshot immediately (used by the debounce and onunload). */
   private flushOpenSessions() {
-    // If restoration is still pending (the panel was never opened this run), keep the
-    // saved snapshot rather than clobbering it with our (empty) live session list —
+    // If restoration is still pending (the panel was never opened this run), keep
+    // the saved snapshot rather than clobbering it with the live session list —
     // otherwise closing Obsidian without opening the panel would lose the tabs.
-    if (this.pendingOpen && this.pendingOpen.length && !this.sessions.length) return;
+    // This holds even if some session exists (rare: created without the panel
+    // ever mounting), since flushing then would drop the unrestored tabs.
+    if (this.pendingOpen && this.pendingOpen.length) return;
     this.settings.openSessions = this.sessions
       .filter((s) => s.sessionId && s.hasActivity())
       .map((s) => ({
@@ -2553,6 +2623,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         title: info.title,
         sessionId: info.sessionId,
         resume: true,
+        cols: info.cols,
+        rows: info.rows,
       });
     }
     // Detach the last-created (currently active + mounted) tab and make the first
@@ -3227,17 +3299,31 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   // --- Account email ------------------------------------------------------
 
-  /** The Claude account currently logged in, from ~/.claude.json. */
+  /** The Claude account currently logged in, from ~/.claude.json. Cached for
+   *  ACCOUNT_CACHE_MS (this runs on every pty chunk via maybeAutoSwitch, and
+   *  ~/.claude.json can be megabytes); plugin-side writes invalidate the cache. */
   private currentAccountEmail(): string | null {
+    const now = Date.now();
+    if (now - this.cachedEmail.at < ACCOUNT_CACHE_MS) return this.cachedEmail.v;
+    let email: string | null = null;
     try {
       const fs = nodeRequire("fs");
       const os = nodeRequire("os");
       const raw = fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8");
-      const email = JSON.parse(raw)?.oauthAccount?.emailAddress;
-      return email ? String(email).trim().toLowerCase() : null;
+      const e = JSON.parse(raw)?.oauthAccount?.emailAddress;
+      email = e ? String(e).trim().toLowerCase() : null;
     } catch {
-      return null;
+      email = null;
     }
+    this.cachedEmail = { v: email, at: now };
+    return email;
+  }
+
+  /** Drop the cached account email + saved-account list so the next read is
+   *  fresh. Called after every plugin-side write that changes them. */
+  private invalidateAccountCaches() {
+    this.cachedEmail.at = 0;
+    this.cachedAccounts.at = 0;
   }
 
   // --- Account switching --------------------------------------------------
@@ -3289,6 +3375,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         credentials: creds,
         oauthAccount,
       });
+      this.invalidateAccountCaches();
       if (notify) new Notice("Saved Claude account: " + email);
       return email;
     } catch (e) {
@@ -3298,8 +3385,18 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Saved accounts (from cch-accounts/*.json), sorted by email. */
+  /** Saved accounts (from cch-accounts/*.json), sorted by email. Cached for
+   *  ACCOUNT_CACHE_MS (called from the per-chunk auto-switch path); plugin-side
+   *  saves/deletes invalidate the cache. */
   listSavedAccounts(): { email: string; file: string }[] {
+    const now = Date.now();
+    if (now - this.cachedAccounts.at < ACCOUNT_CACHE_MS) return this.cachedAccounts.v;
+    const list = this.readSavedAccounts();
+    this.cachedAccounts = { v: list, at: now };
+    return list;
+  }
+
+  private readSavedAccounts(): { email: string; file: string }[] {
     try {
       const fs = nodeRequire("fs");
       const dir = this.accountsDir();
@@ -3339,17 +3436,26 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         new Notice("Saved file for " + email + " has no valid credentials.");
         return;
       }
+      // Read ~/.claude.json BEFORE writing anything: if this read throws we
+      // abort with every file intact. (Writing the credentials first left a
+      // half-switched state — new tokens + old oauthAccount — and a later
+      // auto-save could then snapshot the NEW account's tokens under the OLD
+      // account's email, destroying its saved refresh token.)
+      let cj: any = null;
+      if (saved.oauthAccount) {
+        cj = JSON.parse(fs.readFileSync(this.claudeJsonPath(), "utf8"));
+      }
       const current = this.currentAccountEmail();
       if (current && current !== email.trim().toLowerCase()) {
         this.saveCurrentAccount(false); // preserve the outgoing account's latest token
       }
       // Atomic writes so the live claude never reads a half-written file.
       this.writeJsonAtomic(this.credsPath(), saved.credentials);
-      if (saved.oauthAccount) {
-        const cj = JSON.parse(fs.readFileSync(this.claudeJsonPath(), "utf8"));
+      if (cj) {
         cj.oauthAccount = saved.oauthAccount;
         this.writeJsonAtomic(this.claudeJsonPath(), cj);
       }
+      this.invalidateAccountCaches();
       const target = email.trim().toLowerCase();
       this.lastAutoSavedEmail = target;
       this.rotateBaselinePct = null; // new account re-establishes its own baseline
@@ -3370,6 +3476,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     try {
       const fs = nodeRequire("fs");
       fs.unlinkSync(path.join(this.accountsDir(), this.accountFileName(email)));
+      this.invalidateAccountCaches();
     } catch (e) {
       console.warn("[claude-code-harness] deleteSavedAccount:", e);
     }
@@ -3696,7 +3803,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       return false; // network/HTTP error → keep old creds intact
     }
 
-    const ttl = resp.expires_in || 0;
+    // Best-effort fallback when the response omits expires_in: assume hours,
+    // not 0 — a zero TTL writes an already-expired expiresAt, which re-refreshed
+    // (and rotated) the token on every 3-min tick against an endpoint that
+    // rate-limits hard (429 observed).
+    const ttl = resp.expires_in || 8 * 3600;
     const expiresAt =
       prev > 0 && prev < 1e12
         ? Math.floor(Date.now() / 1000) + ttl // seconds
@@ -4114,7 +4225,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const cur = this.currentAccountEmail();
     let pct: number | null = null;
     let src = "none";
-    const m = clean.match(this.usageRegex());
+    // Keep the LAST match in the rolling buffer: old status-bar repaints linger
+    // in it, so the first match is the OLDEST % (a stale reading that delayed
+    // threshold crossings). Same policy as the email scan above.
+    const re = this.usageRegex();
+    const gre = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+    let m: RegExpMatchArray | null = null;
+    for (const mm of clean.matchAll(gre)) m = mm;
     const scraped = m && m[1] !== undefined ? parseInt(m[1], 10) : NaN;
     if (!isNaN(scraped)) {
       if (this.barAccountEmail && this.barAccountEmail !== cur) {
@@ -4133,7 +4250,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (!this.settings.autoSwitch) return "auto-switch is OFF";
       const cd = this.autoSwitchCooldownUntil - Date.now();
       if (cd > 0) return `in cooldown (${Math.ceil(cd / 1000)}s left after last switch)`;
-      if (LIMIT_RE.test(clean)) {
+      if (LIMIT_STOP_RE.test(clean)) {
         this.requestSwitch("limit reached");
         return "switching now — “limit reached” message detected";
       }
@@ -4301,6 +4418,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private triggerSwitch(next: string, reason: string) {
     this.autoSwitchCooldownUntil = Date.now() + 10000;
     this.rotateBaselinePct = null; // recapture baseline for the new account
+    // Drop the trigger text from every session's rolling buffer: a "limit
+    // reached" message (or an old %) lingering there would re-fire another
+    // switch after each cooldown until 3000 chars of new output pushed it out.
+    for (const s of this.sessions) s.autoSwitchBuf = "";
     new Notice(`Claude account ${reason} — switching to ${next}…`);
     this.switchToAccount(next);
   }
@@ -4713,11 +4834,17 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Update just the tab labels in place (cheap; avoids a full header rebuild on
-   *  every auto-title change). Labels are in session order, so index aligns. */
+   *  every auto-title change). Walks the TABS (in session order) and finds each
+   *  one's label — a flat label list would shift indexes while one tab's label is
+   *  replaced by the inline-rename input, mislabelling the tabs after it. */
   refreshTabTitles() {
     if (!this.viewRoot) return;
-    const labels = this.viewRoot.findAll(".cch-tabs .cch-tab-label");
-    this.sessions.forEach((sess, i) => labels[i]?.setText(sess.title || "Claude"));
+    const tabs = this.viewRoot.findAll(".cch-tabs .cch-tab");
+    this.sessions.forEach((sess, i) =>
+      tabs[i]
+        ?.querySelector<HTMLElement>(".cch-tab-label")
+        ?.setText(sess.title || "Claude")
+    );
   }
 
   /** Update the per-tab heartbeat dot in place (busy / idle / exited) without a
