@@ -239,7 +239,10 @@ const LIMIT_STOP_RE =
 // wording can change between CLI versions — tune these three regexes if needed.
 const PROMPT_SENTENCE_RE =
   /No,?\s+and tell Claude what to do|Do you want to (proceed|make|create|run|allow|apply|continue|edit)\b|Would you like to proceed/i;
-const PROMPT_NAV_HINT_RE = /\bkeys? to navigate\b|\b(arrow|tab)\b[^\n]{0,24}\bnavigate\b/i;
+// Also matches arrow GLYPHS ("↑/↓ to navigate") — some CLI versions print the
+// footer with ↑↓←→ instead of the words "arrow"/"keys", which slipped past before.
+const PROMPT_NAV_HINT_RE =
+  /\bkeys? to navigate\b|\b(arrow|tab)\b[^\n]{0,24}\bnavigate\b|[↑↓←→][^\n]{0,24}\bnavigate\b/i;
 const PROMPT_ACT_HINT_RE = /\benter to (select|submit|confirm)\b|\besc to cancel\b/i;
 function looksLikePrompt(text: string): boolean {
   if (PROMPT_SENTENCE_RE.test(text)) return true;

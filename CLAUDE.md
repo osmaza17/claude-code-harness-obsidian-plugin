@@ -354,7 +354,9 @@ llama dos veces por sesión (xterm no lo soporta).
            (`PROMPT_SENTENCE_RE`: "Do you want to proceed/make/…", "No, and tell Claude
            what to do…", "Would you like to proceed" — frases completas, raras de pasada);
            **o** (b) aparecen **a la vez** una pista de **navegación** (`PROMPT_NAV_HINT_RE`:
-           "keys to navigate", "arrow/tab … navigate") **y** una de **acción**
+           "keys to navigate", "arrow/tab … navigate", **o los glifos de flecha `↑ ↓ ← →` …
+           navigate** —algunas versiones del CLI imprimen "↑/↓ to navigate" sin la palabra
+           "arrow"/"keys", y eso se colaba antes dejando la pestaña en verde—) **y** una de **acción**
            (`PROMPT_ACT_HINT_RE`: "enter to select/submit/confirm", "esc to cancel"), que es
            el **pie multi-parte** que imprimen los menús reales ("Enter to select · Tab/Arrow
            keys to navigate · Esc to cancel") y que la prosa casi nunca combina. Las pistas
