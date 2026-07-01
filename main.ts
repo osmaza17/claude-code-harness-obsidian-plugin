@@ -1996,6 +1996,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // --resume <sessionId> to recover its conversation. The currently-open tabs are
   // snapshotted (debounced) into settings.openSessions so they're reopenable too.
   private persistOpenTimer: number | null = null;
+  // Previous run's open tabs, awaiting restoration on the FIRST panel open (see
+  // restorePendingOpenSessions). Non-null until consumed; while non-null and no
+  // sessions exist yet, flushOpenSessions won't clobber the saved snapshot.
+  private pendingOpen: ClosedSessionInfo[] | null = null;
   private viewRoot: HTMLElement | null = null; // the panel contentEl while open
 
   private fontLink: HTMLLinkElement | null = null;
@@ -2060,6 +2064,16 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    // Break the DEFAULT_SETTINGS alias (loadSettings does a shallow assign) so
+    // closeSession's push doesn't mutate the module-level default on a fresh install.
+    this.settings.closedSessions = [...(this.settings.closedSessions || [])];
+    // Queue the previous run's still-open tabs for restoration when the panel is
+    // first shown — NOT now. Spawning a --resume session while detached (no panel,
+    // so no real terminal size) makes Claude repaint its TUI at the spawn size and
+    // then again after the fit, garbling the footer. Restoring on panel-open renders
+    // cleanly (same as the Ctrl+Shift+Y reopen path).
+    const saved = [...(this.settings.openSessions || [])].filter((s) => s.sessionId);
+    this.pendingOpen = saved.length ? saved : null;
     this.injectFont();
 
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
@@ -2168,10 +2182,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
     this.sweepTempImages(); // remove leftover paste PNGs from previous runs
 
-    // Re-open the tabs that were open when Obsidian last quit (each resuming its
-    // conversation), or start one blank session. Done even if the user never opens
-    // the panel — xterm buffers all output until the panel is shown.
-    this.restoreOpenSessions();
+    // Start one blank background session now ONLY if there's nothing to restore.
+    // If there is, we wait for the panel (restorePendingOpenSessions in attachView)
+    // so restored tabs render at the right size without a garbled footer.
+    if (!this.pendingOpen) this.ensureAtLeastOneSession();
 
     // Token keep-alive + live usage (see refreshAccount()). Every 3 min we CHECK
     // every account and refresh its OAuth token if it's expired/about to expire,
@@ -2474,6 +2488,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Write the open-tab snapshot immediately (used by the debounce and onunload). */
   private flushOpenSessions() {
+    // If restoration is still pending (the panel was never opened this run), keep the
+    // saved snapshot rather than clobbering it with our (empty) live session list —
+    // otherwise closing Obsidian without opening the panel would lose the tabs.
+    if (this.pendingOpen && this.pendingOpen.length && !this.sessions.length) return;
     this.settings.openSessions = this.sessions
       .filter((s) => s.sessionId && s.hasActivity())
       .map((s) => ({
@@ -2489,28 +2507,28 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     void this.saveSettings();
   }
 
-  /** At launch, RE-OPEN the tabs that were still open when Obsidian last quit, each
-   *  resuming its stored conversation (claude --resume <sessionId>), so the user
-   *  gets their workspace back automatically. Falls back to a single blank session
-   *  if there were none. Replaces the old behaviour of merely folding them into the
-   *  Ctrl+Shift+Y history — they now come back on their own. (Tabs closed with × are
-   *  unaffected: they still go to the history stack via closeSession.)
+  /** First panel open: RE-OPEN the tabs that were still open when Obsidian last
+   *  quit, each resuming its conversation (claude --resume <sessionId>), so the user
+   *  gets their workspace back automatically. Consumes pendingOpen (runs once).
    *
-   *  We do NOT clear settings.openSessions here: the restored (live) tabs re-persist
-   *  themselves via persistOpenSessions, overwriting the snapshot with the current
-   *  open set. Leaving it means a crash before that debounce fires still restores
-   *  next launch (idempotent — flushOpenSessions replaces, never appends). */
-  private restoreOpenSessions() {
-    // Defensive copy: loadSettings does a shallow Object.assign, so on a first run
-    // (no saved data) closedSessions would alias the DEFAULT_SETTINGS array and
-    // closeSession's push would mutate the module-level default. Spreading un-aliases.
-    this.settings.closedSessions = [...(this.settings.closedSessions || [])];
-    const prev = [...(this.settings.openSessions || [])].filter((s) => s.sessionId);
-    if (!prev.length) {
-      this.ensureAtLeastOneSession();
-      return;
-    }
-    for (const info of prev) {
+   *  Deferred to here (not onload) on purpose: newSession mounts each tab into the
+   *  now-sized panel, so every terminal is term.open()'d and fit at the REAL size
+   *  BEFORE Claude --resume renders. Doing it detached at onload made Claude paint
+   *  its TUI at the spawn size and then repaint after the fit, garbling the footer.
+   *
+   *  newSession leaves the LAST-created tab active + mounted; we detach it and set
+   *  the first tab active so attachView mounts a single host. Each tab was briefly
+   *  mounted during its newSession iteration (empty buffer → clean open+fit), so
+   *  even the non-active tabs render correctly when later switched to.
+   *
+   *  Tabs closed with × are unaffected: they still go to the history stack. We do
+   *  NOT clear settings.openSessions — the restored (live) tabs re-persist themselves
+   *  via persistOpenSessions (flushOpenSessions replaces, never appends → idempotent). */
+  private restorePendingOpenSessions() {
+    const saved = this.pendingOpen;
+    this.pendingOpen = null; // consume: restore at most once per run
+    if (!saved || !saved.length) return;
+    for (const info of saved) {
       this.newSession({
         skill: info.skill,
         model: info.model,
@@ -2520,16 +2538,25 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         resume: true,
       });
     }
-    this.activeIndex = 0; // show the first restored tab when the panel opens
+    // Detach the last-created (currently active + mounted) tab and make the first
+    // active; attachView then mounts exactly that one.
+    if (this.viewRoot) this.activeSession()?.detachHost();
+    this.activeIndex = 0;
   }
 
-  /** Mount the panel: build the header (tabs + toolbar) and show the active
-   *  session. Called from the view's onOpen. */
+  /** Mount the panel: restore the previous run's tabs (first open only), build the
+   *  header (tabs + toolbar) and show the active session. Called from the view's
+   *  onOpen. */
   attachView(root: HTMLElement) {
     this.viewRoot = root;
-    this.ensureAtLeastOneSession();
-    this.buildHeader(root);
-    this.activeSession()?.attachInto(root);
+    this.restorePendingOpenSessions(); // re-create last session's tabs (once)
+    this.ensureAtLeastOneSession(); // blank fallback if there were none
+    // rebuildHeader (remove-then-build), not buildHeader: the restore loop may have
+    // left a header behind, and rebuildHeader is idempotent (no-op remove on first open).
+    this.rebuildHeader();
+    const a = this.activeSession();
+    if (a && !a.host?.isConnected) a.attachInto(root);
+    else a?.scheduleFit();
   }
 
   /** Unmount the panel WITHOUT killing any session. Called from the view's onClose. */

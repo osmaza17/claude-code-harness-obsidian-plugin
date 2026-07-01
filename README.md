@@ -35,10 +35,11 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
 - **Restaurar la sesión de trabajo al reabrir Obsidian**: las pestañas que tengas
   **abiertas** al cerrar Obsidian se **guardan** y, al volver a abrir Obsidian y el
   panel de Claude Code, **reaparecen automáticamente** las mismas pestañas (en su
-  orden, cada una recuperando su conversación con `--resume`). No hay que reabrirlas
-  a mano. Solo se restauran las pestañas con conversación real (las recién abiertas
-  y en blanco se ignoran). Nota: esto lanza un proceso `claude` por pestaña al
-  arrancar Obsidian.
+  orden, cada una recuperando su conversación con `--resume`), la primera activa. No
+  hay que reabrirlas a mano. Solo se restauran las pestañas con conversación real
+  (las recién abiertas y en blanco se ignoran). La restauración ocurre al **abrir el
+  panel** (no antes), lo que evita cualquier corrupción visual del terminal; nota que
+  al abrirlo se lanza un proceso `claude` por pestaña restaurada.
 - **Historial de conversaciones (estilo ChatGPT/Claude web)**: un botón en el
   **extremo izquierdo** de la cabecera (icono 🕘 *history*, junto al de @) —o el
   comando "Open Claude session history"— abre un **panel lateral** que se **superpone
@@ -61,10 +62,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   dependen del texto que imprime Claude, que puede cambiar.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de
   Obsidian (claro/oscuro) y se reaplican al cambiarlo.
-- **Sesiones persistentes**: arrancan al abrir Obsidian aunque no abras el panel
-  (restaurando las que tenías abiertas — ver "Restaurar la sesión de trabajo"),
-  y no se cierran al cerrar el panel — siguen vivas hasta que cierras su pestaña,
-  cierras Obsidian o desactivas el plugin.
+- **Sesiones persistentes**: una sesión nueva arranca al abrir Obsidian aunque no
+  abras el panel; las que tenías abiertas antes se restauran al abrir el panel (ver
+  "Restaurar la sesión de trabajo"). No se cierran al cerrar el panel — siguen vivas
+  hasta que cierras su pestaña, cierras Obsidian o desactivas el plugin.
 - **Comandos de inicio + skill** configurables: comandos slash que se ejecutan
   al arrancar (vacío por defecto) y una skill que se invoca después. Se envían se
   abra o no el panel.
