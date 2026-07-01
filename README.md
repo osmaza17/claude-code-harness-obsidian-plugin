@@ -40,6 +40,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   (las recién abiertas y en blanco se ignoran). La restauración ocurre al **abrir el
   panel** (no antes), lo que evita cualquier corrupción visual del terminal; nota que
   al abrirlo se lanza un proceso `claude` por pestaña restaurada.
+- **Reiniciar guarda la conversación anterior**: al reiniciar una conversación con
+  el botón de la cabecera (icono de flecha circular), la sesión empieza de cero pero
+  la conversación anterior **no se pierde**: se archiva en el historial, así que
+  puedes recuperarla más tarde desde el historial o con `Ctrl+Shift+Y` (su
+  conversación sigue en disco). La pestaña reinicia también su nombre para que la
+  conversación nueva estrene el suyo.
 - **Historial de conversaciones (estilo ChatGPT/Claude web)**: un botón en el
   **extremo izquierdo** de la cabecera (icono 🕘 *history*, junto al de @) —o el
   comando "Open Claude session history"— abre un **panel lateral** que se **superpone

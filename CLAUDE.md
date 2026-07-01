@@ -73,7 +73,9 @@ Reparto de responsabilidades:
   mata nada. `onunload()` mata **todas** las sesiones. Antes de `dispose()`,
   `closeSession` apila la config de la sesión (`sessionId`/skill/model/args/title/
   cols/rows) en `settings.closedSessions` (LIFO, tope `MAX_CLOSED_SESSIONS`=25,
-  **persistido en disco** vía `saveSettings`) para poder reabrirla.
+  **persistido en disco** vía `saveSettings`) para poder reabrirla, vía el helper
+  compartido **`rememberClosedSession(sess)`** (lo usa también `restart()` para
+  archivar la conversación vieja al reiniciar).
 - **Persistencia entre sesiones de Obsidian (clave del reopen + auto-restauración).**
   La persistencia ya NO es solo en memoria: `closedSessions` (pila de reopen) vive en
   `settings` (data.json) y, además, las pestañas que siguen **abiertas** se snapshotean
@@ -129,7 +131,13 @@ Reparto de responsabilidades:
   `claude --resume <uuid>` y se **recupera la conversación** exacta. Con `resume:true`,
   `maybeSendInitial` sale temprano (**no** reinyecta `/skill` ni startup commands: la
   conversación ya los trae). `restart()` regenera el `sessionId` (conversación nueva,
-  evita choque de `--session-id` con el `.jsonl` ya existente). `startHost` no inyecta
+  evita choque de `--session-id` con el `.jsonl` ya existente) y, **antes de regenerarlo**,
+  **archiva la conversación vieja en el historial** (`plugin.rememberClosedSession(this)`,
+  solo si `hasActivity()`) para que NO se pierda: queda reabrible con **Ctrl+Shift+Y** y en
+  el **sidebar de historial**, con su `.jsonl` intacto en disco. Tras archivar, `restart`
+  **resetea la identidad del tab** (`title`=skill|"Claude", `titleRank=0`, `firstPromptDone`
+  =false, `firstPromptBuf`="") para que la conversación nueva estrene su propio nombre y la
+  archivada conserve su título en el historial. `startHost` no inyecta
   el flag si el usuario ya puso `--session-id`/`--resume`/`-c` en "Extra arguments".
   VERIFICADO (en `-p`): `claude --session-id <uuid>` crea el `.jsonl` y
   `claude --resume <uuid>` recupera la conversación. CAVEAT (honesto): solo se probó

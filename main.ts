@@ -1784,10 +1784,19 @@ class Session {
     this.remoteUrlCaptured = false;
     this.awaitRemoteUrl = false;
     this.plugin.updateRemoteBtn();
+    // Archive the OLD conversation onto the reopen stack (if it had real content) so
+    // restarting doesn't lose it — it stays reopenable via Ctrl+Shift+Y / history, and
+    // its .jsonl survives on disk. Must run BEFORE we regenerate the sessionId below.
+    if (this.hasActivity()) this.plugin.rememberClosedSession(this);
     // Restart = fresh conversation. New id (so --session-id won't collide with the
-    // previous one's .jsonl) and clear resume mode.
+    // previous one's .jsonl) and clear resume mode. Reset the tab identity too, so the
+    // fresh conversation earns its own name and the archived one keeps its title.
     this.sessionId = newConversationId();
     this.resume = false;
+    this.title = this.skill || "Claude";
+    this.titleRank = 0;
+    this.firstPromptDone = false;
+    this.firstPromptBuf = "";
     this.killChild();
     this.term.reset();
     this.startHost();
@@ -2377,6 +2386,28 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     document.addEventListener("pointerup", onUp);
   }
 
+  /** Push a session's conversation metadata onto the reopen stack (Ctrl+Shift+Y /
+   *  history) so it can be recovered later — its .jsonl survives on disk, so a
+   *  reopen can --resume it. Capped at MAX_CLOSED_SESSIONS and persisted. Used both
+   *  when closing a tab (×) and when restarting a conversation (the old one is
+   *  archived before the sessionId is regenerated). No-op without a sessionId. */
+  rememberClosedSession(sess: Session) {
+    if (!sess.sessionId) return;
+    this.settings.closedSessions.push({
+      sessionId: sess.sessionId,
+      skill: sess.skill,
+      model: sess.model,
+      args: sess.args,
+      title: sess.title,
+      cols: sess.lastCols,
+      rows: sess.lastRows,
+      closedAt: Date.now(),
+    });
+    while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
+      this.settings.closedSessions.shift();
+    void this.saveSettings();
+  }
+
   /** Close a tab: kill that instance's claude process and drop it. Keeps at
    *  least one session alive so the panel stays usable. */
   closeSession(sess: Session) {
@@ -2385,21 +2416,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // Remember it for Ctrl+Shift+Y before we kill the process. Its conversation
     // survives on disk (~/.claude/projects/.../<sessionId>.jsonl), so reopening
     // can --resume it.
-    if (sess.sessionId) {
-      this.settings.closedSessions.push({
-        sessionId: sess.sessionId,
-        skill: sess.skill,
-        model: sess.model,
-        args: sess.args,
-        title: sess.title,
-        cols: sess.lastCols,
-        rows: sess.lastRows,
-        closedAt: Date.now(),
-      });
-      while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
-        this.settings.closedSessions.shift();
-      void this.saveSettings();
-    }
+    this.rememberClosedSession(sess);
     if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
     sess.dispose();
     this.sessions.splice(idx, 1);
