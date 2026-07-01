@@ -59,9 +59,10 @@ Reparto de responsabilidades:
   `plugin.maybeAutoSwitch(session, chunk)` (usa el buffer **por-sesión**
   `session.autoSwitchBuf` pero la decisión —cooldown, baseline, verify— es
   **global**), `maybeAutoSaveAccount`, `maybeProbeOnActivity`.
-- `onload()` -> `ensureAtLeastOneSession()`: crea **una** `Session` (arranca aunque
-  no se abra el panel). Hay un único `css-change` registrado que re-tematiza todas
-  las sesiones (`s.applyTheme()`).
+- `onload()` -> `restoreOpenSessions()`: **restaura las pestañas que estaban abiertas
+  al cerrar Obsidian** (cada una con `--resume`), o crea **una** `Session` en blanco si
+  no había ninguna (arranca aunque no se abra el panel). Hay un único `css-change`
+  registrado que re-tematiza todas las sesiones (`s.applyTheme()`).
 - La `View` (`ClaudeCodeView`, un único `VIEW_TYPE`/leaf) solo presenta: `onOpen()`
   -> `plugin.attachView(contentEl)` (construye cabecera+pestañas y monta el host de
   la activa), `onClose()` -> `plugin.detachView()` (desmonta **sin matar**).
@@ -71,26 +72,36 @@ Reparto de responsabilidades:
   `closeSession` apila la config de la sesión (`sessionId`/skill/model/args/title/
   cols/rows) en `settings.closedSessions` (LIFO, tope `MAX_CLOSED_SESSIONS`=25,
   **persistido en disco** vía `saveSettings`) para poder reabrirla.
-- **Persistencia entre sesiones de Obsidian (clave del reopen).** El reopen ya NO
-  es solo en memoria: `closedSessions` vive en `settings` (data.json) y, además,
-  las pestañas que siguen **abiertas** se snapshotean en `settings.openSessions`.
+- **Persistencia entre sesiones de Obsidian (clave del reopen + auto-restauración).**
+  La persistencia ya NO es solo en memoria: `closedSessions` (pila de reopen) vive en
+  `settings` (data.json) y, además, las pestañas que siguen **abiertas** se snapshotean
+  en `settings.openSessions`.
   - `persistOpenSessions()` (debounce ~1,5 s) vuelca a `settings.openSessions` los
     tabs abiertos **con actividad** (`Session.hasActivity()` = `firstPromptDone ||
-    titleRank>0 || resume`, para no ensuciar la pila con tabs en blanco; el `resume`
-    incluye los tabs reabiertos, que nacen con `titleRank=0` y sin primer prompt
-    pero sí tienen conversación —si no, se descartarían y no se podrían re-recuperar)
-    y guarda. Se llama
+    titleRank>0 || resume`, para no restaurar tabs en blanco; el `resume`
+    incluye los tabs reabiertos/restaurados, que nacen con `titleRank=0` y sin primer
+    prompt pero sí tienen conversación —si no, se descartarían y no se podrían
+    re-restaurar). Se llama
     desde `newSession`/`closeSession`/`moveSession`/`Session.restart` (cambia el
     `sessionId`) y `Session.setTitleFrom` (el título se persiste). `onunload` hace
     un `flushOpenSessions()` directo (best-effort; el debounce ya cubre el apagón
     duro, porque `saveData` es asíncrono y puede no vaciarse al cerrar el SO).
-  - `foldPreviousOpenSessions()` corre en `onload` **tras `loadSettings` y antes de
-    crear ninguna sesión**: anexa las `openSessions` de la ejecución anterior al
-    **final** de `closedSessions` (final = se extraen primero con `pop()` → más
-    reciente primero), dedupe por `sessionId`, aplica el tope, y vacía
-    `openSessions`. Así `Ctrl+Shift+Y` recupera tanto las cerradas con × como las
-    que quedaron abiertas al salir, **otro día/tras apagar el PC**. Recuperación
-    **bajo demanda** (una a una); NO hay restauración automática al arrancar.
+  - **`restoreOpenSessions()` (auto-restauración; corre en `onload`, en el mismo punto
+    donde antes se creaba la única sesión):** re-abre **automáticamente** cada tab de
+    `settings.openSessions` de la ejecución anterior como pestaña **viva**, vía
+    `newSession({...info, resume:true})` (recupera su conversación con `--resume`), en su
+    orden original, dejando activa la **primera**. Si no hay ninguna, cae a
+    `ensureAtLeastOneSession()` (una sesión en blanco). Así, al reabrir Obsidian y abrir
+    el panel de Claude Code, **reaparecen las mismas pestañas** que tenías abiertas, sin
+    reabrirlas a mano. **NO** vacía `openSessions`: los tabs restaurados (vivos) se
+    re-persisten solos (`flushOpenSessions` **reemplaza**, no anexa → idempotente), así
+    que un cierre/crash antes del debounce vuelve a restaurar en el siguiente arranque.
+    Rompe el alias de `closedSessions` con `DEFAULT_SETTINGS` (copia defensiva) por si es
+    primera ejecución. CAVEAT (honesto): esto lanza **N procesos `claude --resume` al
+    arrancar Obsidian** (uno por tab abierto), igual que antes se lanzaba 1; si tenías
+    muchas pestañas, el arranque crea todas de golpe (idle hasta que escribas). Las
+    pestañas cerradas con × siguen yendo a `closedSessions` (historial / Ctrl+Shift+Y),
+    no se auto-restauran.
 - **Reabrir pestaña cerrada (Ctrl+Shift+Y, estilo Chrome)** -> `reopenClosedSession()`
   hace `pop()` de `settings.closedSessions` (+ `saveSettings` para no re-popearla) y
   `newSession({...info, resume:true})`. CLAVE: cada

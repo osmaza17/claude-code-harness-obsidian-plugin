@@ -2060,9 +2060,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    // Make the previous run's still-open tabs reopenable via Ctrl+Shift+Y, before
-    // any session is created.
-    this.foldPreviousOpenSessions();
     this.injectFont();
 
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
@@ -2171,9 +2168,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
     this.sweepTempImages(); // remove leftover paste PNGs from previous runs
 
-    // Start one session as soon as Obsidian loads, even if the user never opens
-    // the panel. xterm buffers all output until the panel is shown.
-    this.ensureAtLeastOneSession();
+    // Re-open the tabs that were open when Obsidian last quit (each resuming its
+    // conversation), or start one blank session. Done even if the user never opens
+    // the panel — xterm buffers all output until the panel is shown.
+    this.restoreOpenSessions();
 
     // Token keep-alive + live usage (see refreshAccount()). Every 3 min we CHECK
     // every account and refresh its OAuth token if it's expired/about to expire,
@@ -2410,8 +2408,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Chrome-style Ctrl+Shift+Y: reopen the most recently closed tab and recover
    *  its conversation via `claude --resume <sessionId>`. The stack is persisted
-   *  in settings, so this works across Obsidian restarts (and includes tabs that
-   *  were still open when Obsidian last quit — see foldPreviousOpenSessions). */
+   *  in settings, so this works across Obsidian restarts. (Tabs left open at quit
+   *  are auto-restored by restoreOpenSessions, so they don't land here.) */
   async reopenClosedSession() {
     const info = this.settings.closedSessions.pop();
     if (!info) {
@@ -2463,9 +2461,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   /** Snapshot the currently-open tabs into settings.openSessions (debounced), so
-   *  that on the NEXT launch foldPreviousOpenSessions() can make them reopenable
+   *  that on the NEXT launch restoreOpenSessions() can re-open them automatically
    *  even though Obsidian quit without closing them. Only tabs with real activity
-   *  are kept, to avoid cluttering the reopen stack with pristine blank tabs. */
+   *  are kept, to avoid restoring pristine blank tabs. */
   persistOpenSessions() {
     if (this.persistOpenTimer !== null) window.clearTimeout(this.persistOpenTimer);
     this.persistOpenTimer = window.setTimeout(() => {
@@ -2491,27 +2489,38 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     void this.saveSettings();
   }
 
-  /** At launch, fold the previous run's still-open tabs into the reopen stack so
-   *  Ctrl+Shift+Y can recover them. Appended at the END (popped first, newest
-   *  first), deduped by sessionId against tabs already in the stack, capped. */
-  private foldPreviousOpenSessions() {
+  /** At launch, RE-OPEN the tabs that were still open when Obsidian last quit, each
+   *  resuming its stored conversation (claude --resume <sessionId>), so the user
+   *  gets their workspace back automatically. Falls back to a single blank session
+   *  if there were none. Replaces the old behaviour of merely folding them into the
+   *  Ctrl+Shift+Y history — they now come back on their own. (Tabs closed with × are
+   *  unaffected: they still go to the history stack via closeSession.)
+   *
+   *  We do NOT clear settings.openSessions here: the restored (live) tabs re-persist
+   *  themselves via persistOpenSessions, overwriting the snapshot with the current
+   *  open set. Leaving it means a crash before that debounce fires still restores
+   *  next launch (idempotent — flushOpenSessions replaces, never appends). */
+  private restoreOpenSessions() {
     // Defensive copy: loadSettings does a shallow Object.assign, so on a first run
-    // (no saved data) these would alias the DEFAULT_SETTINGS arrays and our
-    // push/shift would mutate the module-level defaults. Spreading breaks the alias.
-    const prev = [...(this.settings.openSessions || [])];
+    // (no saved data) closedSessions would alias the DEFAULT_SETTINGS array and
+    // closeSession's push would mutate the module-level default. Spreading un-aliases.
     this.settings.closedSessions = [...(this.settings.closedSessions || [])];
-    if (prev.length) {
-      const seen = new Set(this.settings.closedSessions.map((c) => c.sessionId));
-      for (const info of prev) {
-        if (!info.sessionId || seen.has(info.sessionId)) continue;
-        seen.add(info.sessionId);
-        this.settings.closedSessions.push(info);
-      }
-      while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
-        this.settings.closedSessions.shift();
+    const prev = [...(this.settings.openSessions || [])].filter((s) => s.sessionId);
+    if (!prev.length) {
+      this.ensureAtLeastOneSession();
+      return;
     }
-    this.settings.openSessions = [];
-    void this.saveSettings();
+    for (const info of prev) {
+      this.newSession({
+        skill: info.skill,
+        model: info.model,
+        args: info.args,
+        title: info.title,
+        sessionId: info.sessionId,
+        resume: true,
+      });
+    }
+    this.activeIndex = 0; // show the first restored tab when the panel opens
   }
 
   /** Mount the panel: build the header (tabs + toolbar) and show the active

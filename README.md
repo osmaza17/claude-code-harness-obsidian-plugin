@@ -28,10 +28,17 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   `claude --resume <id>`, así que continúas la misma conversación, no una nueva.
   Funciona en orden inverso al cierre (las últimas 25). **Persiste entre sesiones
   de Obsidian**: la pila se guarda en disco, así que al día siguiente —incluso tras
-  apagar el PC— `Ctrl+Shift+Y` sigue recuperando tanto las pestañas que cerraste
-  con la × como las que **dejaste abiertas** al cerrar Obsidian (de la más reciente
-  a la más antigua). La recuperación es **bajo demanda** (una pestaña por pulsación),
-  no una restauración automática al arrancar.
+  apagar el PC— `Ctrl+Shift+Y` sigue recuperando las pestañas que cerraste con la ×,
+  de la más reciente a la más antigua. La recuperación es **bajo demanda** (una
+  pestaña por pulsación). (Las pestañas que dejas **abiertas** al cerrar Obsidian
+  ya no van a esta pila: se **restauran solas** al reabrir — ver abajo.)
+- **Restaurar la sesión de trabajo al reabrir Obsidian**: las pestañas que tengas
+  **abiertas** al cerrar Obsidian se **guardan** y, al volver a abrir Obsidian y el
+  panel de Claude Code, **reaparecen automáticamente** las mismas pestañas (en su
+  orden, cada una recuperando su conversación con `--resume`). No hay que reabrirlas
+  a mano. Solo se restauran las pestañas con conversación real (las recién abiertas
+  y en blanco se ignoran). Nota: esto lanza un proceso `claude` por pestaña al
+  arrancar Obsidian.
 - **Historial de conversaciones (estilo ChatGPT/Claude web)**: un botón en el
   **extremo izquierdo** de la cabecera (icono 🕘 *history*, junto al de @) —o el
   comando "Open Claude session history"— abre un **panel lateral** que se **superpone
@@ -54,7 +61,8 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   dependen del texto que imprime Claude, que puede cambiar.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de
   Obsidian (claro/oscuro) y se reaplican al cambiarlo.
-- **Sesiones persistentes**: arrancan al abrir Obsidian aunque no abras el panel,
+- **Sesiones persistentes**: arrancan al abrir Obsidian aunque no abras el panel
+  (restaurando las que tenías abiertas — ver "Restaurar la sesión de trabajo"),
   y no se cierran al cerrar el panel — siguen vivas hasta que cierras su pestaña,
   cierras Obsidian o desactivas el plugin.
 - **Comandos de inicio + skill** configurables: comandos slash que se ejecutan
