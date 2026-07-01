@@ -43,6 +43,10 @@ type ClosedSessionInfo = {
   title: string;
   cols: number;
   rows: number;
+  // When this tab was closed / last snapshotted (epoch ms). Optional so old
+  // persisted entries (before this field existed) still load. Used by the
+  // history menu to show a relative "closed 3h ago" subtitle.
+  closedAt?: number;
 };
 
 interface HarnessSettings {
@@ -132,6 +136,7 @@ interface HarnessSettings {
   btnRemote: boolean;
   btnAutoSwitch: boolean;
   btnTokenDashboard: boolean;
+  btnHistory: boolean;
   btnZoom: boolean;
   // Chrome-style "reopen closed tab" (Ctrl+Shift+Y), persisted across Obsidian
   // restarts. closedSessions = LIFO stack of reopenable tabs (closed with × or
@@ -177,6 +182,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   btnRemote: true,
   btnAutoSwitch: true,
   btnTokenDashboard: true,
+  btnHistory: true,
   btnZoom: true,
   closedSessions: [],
   openSessions: [],
@@ -1991,6 +1997,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private accountBtn: HTMLElement | null = null;
   private autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
   private remoteBtn: HTMLElement | null = null;
+  private historyBtn: HTMLElement | null = null;
   private tempImages: string[] = []; // temp PNGs from image paste, cleaned on unload
   // Bundled Token Dashboard server process (null when not running).
   tokenDashboardChild: any = null;
@@ -2083,6 +2090,15 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "open-session-history",
+      name: "Open Claude session history",
+      callback: async () => {
+        await this.activateView();
+        this.openHistoryMenu();
+      },
+    });
+
+    this.addCommand({
       id: "send-active-note",
       name: "Send active note to Claude",
       callback: () => this.sendActiveNote(),
@@ -2168,6 +2184,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   onunload() {
     this.closeAccountMenu();
+    this.closeHistorySidebar();
     // Best-effort final snapshot of the open tabs so Ctrl+Shift+Y can recover them
     // next launch (the debounced snapshot already covers a hard shutdown).
     if (this.persistOpenTimer !== null) {
@@ -2228,6 +2245,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   setActive(i: number) {
     if (i < 0 || i >= this.sessions.length) return;
     if (i === this.activeIndex && this.activeSession()?.host?.isConnected) return;
+    this.closeHistorySidebar(); // stale overlay if the header/host is rebuilt
     if (this.viewRoot) this.activeSession()?.detachHost();
     this.activeIndex = i;
     this.rebuildHeader();
@@ -2355,6 +2373,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         title: sess.title,
         cols: sess.lastCols,
         rows: sess.lastRows,
+        closedAt: Date.now(),
       });
       while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
         this.settings.closedSessions.shift();
@@ -2391,6 +2410,25 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       return;
     }
     void this.saveSettings(); // persist the shorter stack so it isn't re-popped
+    await this.reopenInfo(info);
+  }
+
+  /** Reopen a SPECIFIC closed session (used by the history menu, which can pick
+   *  any entry — not just the most recent). Removes it from the reopen stack (by
+   *  sessionId) so it doesn't linger in history while it's open again, then
+   *  recreates the tab with --resume. */
+  async reopenSession(info: ClosedSessionInfo) {
+    const i = this.settings.closedSessions.findIndex(
+      (c) => c.sessionId === info.sessionId
+    );
+    if (i >= 0) this.settings.closedSessions.splice(i, 1);
+    void this.saveSettings();
+    await this.reopenInfo(info);
+  }
+
+  /** Shared body of reopenClosedSession/reopenSession: open the panel and spawn a
+   *  new tab that resumes the stored conversation. */
+  private async reopenInfo(info: ClosedSessionInfo) {
     await this.activateView(); // open the panel if it isn't already
     this.newSession({
       skill: info.skill,
@@ -2401,6 +2439,18 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       resume: true,
     });
     new Notice("Reopened session: " + info.title);
+  }
+
+  /** Remove a session from the history stack without reopening it (the × in the
+   *  history menu). Its .jsonl on disk is left untouched. */
+  deleteClosedSession(info: ClosedSessionInfo) {
+    const i = this.settings.closedSessions.findIndex(
+      (c) => c.sessionId === info.sessionId
+    );
+    if (i >= 0) {
+      this.settings.closedSessions.splice(i, 1);
+      void this.saveSettings();
+    }
   }
 
   /** Snapshot the currently-open tabs into settings.openSessions (debounced), so
@@ -2427,6 +2477,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         title: s.title,
         cols: s.lastCols,
         rows: s.lastRows,
+        closedAt: Date.now(),
       }));
     void this.saveSettings();
   }
@@ -2465,6 +2516,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Unmount the panel WITHOUT killing any session. Called from the view's onClose. */
   detachView() {
+    this.closeHistorySidebar(); // it lives inside viewRoot
     this.activeSession()?.detachHost();
     this.viewRoot = null;
   }
@@ -2738,6 +2790,123 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }, 0);
     this.accountPopupCleanup = () => {
       document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }
+
+  // --- History sidebar (reopen any past session, ChatGPT-style drawer) ------
+  // A drawer that slides in from the LEFT, OVERLAYING the conversation (it does
+  // not compress it) so the full session titles are readable. Mounted inside the
+  // panel (viewRoot) below the header, dismissed by its × / Escape / backdrop.
+  private historyOverlay: HTMLElement | null = null;
+  private historyOverlayCleanup: (() => void) | null = null;
+
+  closeHistorySidebar() {
+    this.historyOverlayCleanup?.();
+    this.historyOverlay?.remove();
+    this.historyOverlay = null;
+    this.historyOverlayCleanup = null;
+  }
+
+  /** Compact "3h ago" / "yesterday" label for a close timestamp. */
+  private relativeTime(ms: number): string {
+    const diff = Date.now() - ms;
+    if (diff < 0) return "just now";
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.floor(hr / 24);
+    if (day === 1) return "yesterday";
+    if (day < 30) return `${day}d ago`;
+    const mo = Math.floor(day / 30);
+    if (mo < 12) return `${mo}mo ago`;
+    return `${Math.floor(mo / 12)}y ago`;
+  }
+
+  /** Toggle the conversation-history drawer: a scrollable list of previously
+   *  closed sessions (most recent first), reusing the persisted closedSessions
+   *  stack that also feeds Ctrl+Shift+Y. Clicking an entry reopens it in a NEW
+   *  tab (via --resume). The drawer overlays the conversation from the left. */
+  openHistoryMenu() {
+    if (this.historyOverlay) {
+      this.closeHistorySidebar();
+      return;
+    }
+    const root = this.viewRoot;
+    if (!root) return; // panel not mounted (the command opens it first)
+
+    // Overlay covers the area BELOW the header (so the toolbar stays usable),
+    // dimming the conversation; the drawer sits on its left edge.
+    const headerH = root.querySelector<HTMLElement>(".cch-header")?.offsetHeight ?? 0;
+    const overlay = root.createDiv({ cls: "cch-history-overlay" });
+    overlay.style.top = headerH + "px";
+    this.historyOverlay = overlay;
+
+    const drawer = overlay.createDiv({ cls: "cch-history-sidebar" });
+
+    // Title bar with a close ×.
+    const bar = drawer.createDiv({ cls: "cch-hist-bar" });
+    bar.createDiv({ cls: "cch-hist-title", text: "Session history" });
+    const close = bar.createDiv({ cls: "cch-hist-close" });
+    setIcon(close, "x");
+    close.setAttr("aria-label", "Close history");
+    close.onclick = () => this.closeHistorySidebar();
+
+    const body = drawer.createDiv({ cls: "cch-hist-list" });
+    const render = () => {
+      body.empty();
+      // Newest first: closedSessions is a stack pushed at the end.
+      const list = [...this.settings.closedSessions].reverse();
+      if (!list.length) {
+        body.createDiv({ cls: "cch-hist-empty", text: "No closed sessions yet" });
+        return;
+      }
+      for (const info of list) {
+        const row = body.createDiv({ cls: "cch-hist-row" });
+        const main = row.createDiv({ cls: "cch-hist-main" });
+        main.createDiv({
+          cls: "cch-hist-name",
+          text: info.title || "Untitled session",
+        });
+        const sub = main.createDiv({ cls: "cch-hist-sub" });
+        const bits: string[] = [];
+        if (info.closedAt) bits.push(this.relativeTime(info.closedAt));
+        if (info.skill) bits.push("/" + info.skill);
+        else if (info.model) bits.push(info.model);
+        sub.setText(bits.join(" · "));
+        main.setAttr("aria-label", "Reopen this conversation in a new tab");
+        main.onclick = () => {
+          this.closeHistorySidebar();
+          void this.reopenSession(info);
+        };
+
+        // × removes it from history without reopening (the .jsonl stays on disk).
+        const del = row.createDiv({ cls: "cch-hist-del" });
+        setIcon(del, "x");
+        del.setAttr("aria-label", "Remove from history");
+        del.onclick = (e) => {
+          e.stopPropagation();
+          this.deleteClosedSession(info);
+          render(); // rebuild the list in place
+        };
+      }
+    };
+    render();
+
+    // Click on the dim backdrop (outside the drawer) or Escape closes it.
+    overlay.onmousedown = (e) => {
+      if (e.target === overlay) this.closeHistorySidebar();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeHistorySidebar();
+      }
+    };
+    setTimeout(() => document.addEventListener("keydown", onKey, true), 0);
+    this.historyOverlayCleanup = () => {
       document.removeEventListener("keydown", onKey, true);
     };
   }
@@ -4224,6 +4393,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.accountBtn = null;
     this.remoteBtn = null;
     this.autoSwitchBtn = null;
+    this.historyBtn = null;
     this.zoomLabel = null;
 
     const header = container.createDiv({ cls: "cch-header" });
@@ -4290,6 +4460,21 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         void this.sendActiveNote()
       );
     }
+
+    // History (next to @, far left): a ChatGPT-style drawer of previously-closed
+    // sessions that can be reopened in a new tab (reuses the reopen stack; global).
+    if (s.btnHistory) {
+      const histBtn = bar.createEl("button", { cls: "cch-btn" });
+      setIcon(histBtn, "history");
+      histBtn.setAttr("aria-label", "Session history");
+      histBtn.title = "Session history (reopen a past conversation)";
+      this.historyBtn = histBtn;
+      histBtn.onclick = (e) => {
+        e.preventDefault();
+        this.openHistoryMenu();
+      };
+    }
+
     bar.createDiv({ cls: "cch-spacer" });
 
     // Model selector (active session's model).
@@ -5583,6 +5768,7 @@ class HarnessSettingTab extends PluginSettingTab {
         | "btnRemote"
         | "btnAutoSwitch"
         | "btnTokenDashboard"
+        | "btnHistory"
         | "btnZoom"
     ) =>
       new Setting(containerEl).setName(name).addToggle((t) =>
@@ -5599,6 +5785,7 @@ class HarnessSettingTab extends PluginSettingTab {
     buttonToggle("Remote control", "btnRemote");
     buttonToggle("Auto-switch toggle", "btnAutoSwitch");
     buttonToggle("Token Dashboard", "btnTokenDashboard");
+    buttonToggle("Session history", "btnHistory");
     buttonToggle("Zoom controls", "btnZoom");
 
     new Setting(containerEl)

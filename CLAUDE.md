@@ -116,6 +116,33 @@ Reparto de responsabilidades:
   de **Ctrl+Shift+Y** en el key handler del terminal (como Ctrl+R) ->
   `reopenClosedSession()`. NO se usa Ctrl+Shift+T: Obsidian lo reserva para reabrir
   pestañas de notas y lo captura globalmente antes de que llegue al harness.
+- **Sidebar de historial (drawer estilo ChatGPT/Claude web)** -> `openHistoryMenu()`
+  (toggle) / `closeHistorySidebar()`: botón de cabecera (icono `history`, toggle
+  `btnHistory`, colocado **a la izquierda del todo, junto al botón @**) + comando
+  **"Open Claude session history"**. En vez de un popup, abre un **cajón lateral que
+  se SUPERPONE** sobre la conversación (no la comprime): un `div` `.cch-history-overlay`
+  montado **dentro del `viewRoot`** (posición `absolute`, `top` inline = altura del
+  `.cch-header` medida con `offsetHeight`, así la toolbar sigue usable), que atenúa el
+  resto y contiene el `.cch-history-sidebar` (ancho ~340px, desliza desde la izquierda).
+  Cierre por su × / Escape / click en el backdrop (`overlay.onmousedown` cuando
+  `target===overlay`); refs `historyOverlay`/`historyOverlayCleanup`, limpiadas en
+  `onunload`, `detachView` (vive dentro de `viewRoot`) y `setActive` (evita overlay
+  obsoleto al reconstruir header/host). REQUIERE panel montado (`viewRoot`); el comando
+  hace `activateView()` antes. Reutiliza **la misma pila persistida
+  `settings.closedSessions`** que alimenta Ctrl+Shift+Y (no una fuente nueva): la
+  renderiza como lista **más-reciente-primero** (`[...closedSessions].reverse()`), cada
+  fila con el título + subtítulo (`relativeTime(closedAt)` "3h ago"/"yesterday" ·
+  skill/modelo). Click en la fila -> `reopenSession(info)` reabre **esa** conversación
+  (no solo la última) en una **pestaña nueva** vía `--resume` y la **quita** de la pila
+  (por `sessionId`, para que no quede en el historial mientras está abierta; al cerrarla
+  se re-apila). La × de cada fila -> `deleteClosedSession(info)` la borra del historial
+  **sin** reabrir (el `.jsonl` en disco queda intacto) y re-renderiza la lista in situ.
+  `reopenClosedSession`/`reopenSession` comparten `reopenInfo(info)` (activateView +
+  `newSession({...info, resume:true})` + Notice). CAVEAT: el historial es la pila de
+  reopen (tope `MAX_CLOSED_SESSIONS`=25 metadatos, cerradas + plegadas de la sesión
+  anterior); NO lista **todas** las conversaciones del disco (los `.jsonl` viejos no
+  purgados no aparecen si su metadato ya salió de la pila). `ClosedSessionInfo` lleva
+  ahora `closedAt?` (epoch ms, opcional; sellado en `closeSession` y `flushOpenSessions`).
 
 Por eso cada `host` (el div donde xterm pinta) se conserva en su `Session` y solo
 se mueve entre fuera-del-DOM y el `contentEl` del panel; `term.open()` nunca se
@@ -340,19 +367,23 @@ llama dos veces por sesión (xterm no lo soporta).
          del CLI; si un cuestionario concreto no enciende el rojo (o enciende de más),
          ajustar `PROMPT_SENTENCE_RE`/`PROMPT_NAV_HINT_RE`/`PROMPT_ACT_HINT_RE`
          (idealmente copiando el texto real del prompt).
-  2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), selector
+  2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), **botón
+     de historial** (icono `history`, pegado al @ en el extremo izquierdo;
+     `openHistoryMenu()` abre el drawer lateral —ver "Sidebar de historial"), selector
      de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
      skills de `~/.claude/skills` **+ "Open skills folder"** → `activeSession().selectSkill`),
      **toggle remote control** (icono `smartphone`; `activeSession().toggleRemoteControl()`),
      **toggle auto-switch** (icono `repeat`; **global**; `openAutoSwitchMenu()` con
      modo Threshold/Rotate y presets —threshold 70/80/85/90/95; rotate +5/10/15/20/25—;
-     estado por `updateAutoSwitchBtn()`), zoom (**global**, aplica a todas), ajustes
-     (`openSettings()`), reiniciar (`activeSession().restart()`).
+     estado por `updateAutoSwitchBtn()`), **Token Dashboard** (icono `bar-chart-3`),
+     zoom (**global**, aplica a todas), ajustes (`openSettings()`), reiniciar
+     (`activeSession().restart()`).
   Los botones modelo/skill/remote reflejan la **sesión activa**
-  (`updateModelBtn`/`updateSkillBtn`/`updateRemoteBtn` leen `activeSession()`); cuenta
-  y auto-switch son globales. Cada botón (salvo ajustes/reiniciar) se oculta desde
-  ajustes (`btnSendNote/btnAccount/btnModel/btnSkill/btnRemote/btnAutoSwitch/btnZoom`).
+  (`updateModelBtn`/`updateSkillBtn`/`updateRemoteBtn` leen `activeSession()`); cuenta,
+  auto-switch e historial son globales. Cada botón (salvo ajustes/reiniciar) se oculta
+  desde ajustes (`btnSendNote/btnAccount/btnModel/btnSkill/btnRemote/btnAutoSwitch/
+  btnTokenDashboard/btnHistory/btnZoom`).
   `rebuildHeader()` (alias `refreshHeader()` para la página de ajustes) borra
   `.cch-header` y la reconstruye **conservando el host montado** (es un hijo aparte
   del contenedor); `buildHeader` resetea las refs a null y hace `container.prepend(header)`
@@ -772,6 +803,8 @@ llama dos veces por sesión (xterm no lo soporta).
   panel y crea otra instancia con `newSession()`), "Restart Claude Code session"
   (sobre la activa), **"Reopen closed Claude session"** (hotkey `Mod+Shift+Y`;
   `reopenClosedSession()` reabre la última pestaña cerrada con `--resume`),
+  **"Open Claude session history"** (`openHistoryMenu()` abre la lista de
+  conversaciones cerradas para reabrir cualquiera en pestaña nueva),
   "Send active note to Claude" (inserta `@<ruta>` de la nota
   activa en la activa), "Toggle remote control" (hotkey `Mod+R`; sobre la activa),
   "Save current Claude account", "Diagnose

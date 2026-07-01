@@ -32,6 +32,16 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   con la × como las que **dejaste abiertas** al cerrar Obsidian (de la más reciente
   a la más antigua). La recuperación es **bajo demanda** (una pestaña por pulsación),
   no una restauración automática al arrancar.
+- **Historial de conversaciones (estilo ChatGPT/Claude web)**: un botón en el
+  **extremo izquierdo** de la cabecera (icono 🕘 *history*, junto al de @) —o el
+  comando "Open Claude session history"— abre un **panel lateral** que se **superpone
+  sobre la conversación** (no la comprime), con espacio para leer bien los títulos.
+  Lista las conversaciones que has cerrado, la más reciente arriba, con su título y
+  cuándo se cerró ("3h ago", "yesterday"). **Haz clic en cualquiera** para reabrirla
+  en una **pestaña nueva** recuperando su conversación (no solo la última, como hace
+  `Ctrl+Shift+Y`); la **×** de cada fila la quita del historial sin reabrirla. Se
+  cierra con su ×, con `Escape` o clicando fuera del panel. Es la misma pila
+  persistente que usa `Ctrl+Shift+Y` (las últimas 25, guardadas en disco).
 - **Estado de cada pestaña de un vistazo**: cada pestaña lleva un **punto** y, del
   mismo color, **su reborde**, para ver sin abrirla si Claude está **trabajando**
   (amarillo), **terminado/inactivo** (verde), **esperando tu respuesta** (rojo:

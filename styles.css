@@ -229,6 +229,8 @@
   display: flex;
   flex-direction: column;
   background: var(--background-primary);
+  /* Anchor for the history drawer overlay (position:absolute inside the panel). */
+  position: relative;
 }
 .claude-code-harness .cch-header {
   flex: 0 0 auto;
@@ -559,6 +561,128 @@
 }
 .cch-account-menu .cch-acct-row.cch-acct-capped:hover {
   background: rgba(220, 76, 76, 0.16);
+}
+
+/* Conversation-history drawer: a ChatGPT-style sidebar that slides in from the
+   left and OVERLAYS the conversation (it does not compress it), so the full
+   session titles are readable. Mounted inside the panel below the header. The
+   overlay dims the rest of the panel and closes on click; the drawer holds the
+   scrollable list. Clicking a row reopens it in a new tab; the × drops it. */
+.cch-history-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* top is set inline to the header height so the toolbar stays usable. */
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+}
+.cch-history-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  max-width: 85%;
+  height: 100%;
+  background: var(--background-secondary);
+  border-right: 1px solid var(--background-modifier-border);
+  box-shadow: 2px 0 12px rgba(0, 0, 0, 0.35);
+  animation: cch-hist-slide 0.14s ease-out;
+}
+@keyframes cch-hist-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+.cch-history-sidebar .cch-hist-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.cch-history-sidebar .cch-hist-title {
+  flex: 1 1 auto;
+  font-size: 11px;
+  font-weight: var(--font-bold, 600);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cch-history-sidebar .cch-hist-close {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-s, 4px);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.cch-history-sidebar .cch-hist-close:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.cch-history-sidebar .cch-hist-empty {
+  color: var(--text-muted);
+  padding: 12px;
+  font-size: 13px;
+}
+.cch-history-sidebar .cch-hist-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px;
+}
+.cch-history-sidebar .cch-hist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 6px 7px 10px;
+  border-radius: var(--radius-s, 4px);
+}
+.cch-history-sidebar .cch-hist-row:hover {
+  background: var(--background-modifier-hover);
+}
+.cch-history-sidebar .cch-hist-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: pointer;
+}
+.cch-history-sidebar .cch-hist-name {
+  font-size: 13px;
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cch-history-sidebar .cch-hist-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cch-history-sidebar .cch-hist-del {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-s, 4px);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+}
+.cch-history-sidebar .cch-hist-row:hover .cch-hist-del { opacity: 1; }
+.cch-history-sidebar .cch-hist-del:hover {
+  background: var(--background-modifier-border);
+  color: var(--text-normal);
+}
+.cch-history-sidebar .cch-hist-del .svg-icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* Editor de franjas horarias prohibidas por cuenta (página de ajustes). Cabecera

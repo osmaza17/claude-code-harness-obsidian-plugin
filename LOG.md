@@ -3,6 +3,34 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-01
+
+- **Historial de conversaciones estilo ChatGPT/Claude web (sidebar superpuesto).**
+  Nuevo botón de cabecera (icono `history`, toggle de ajustes `btnHistory`) en el
+  **extremo izquierdo, junto al botón @**, y comando "Open Claude session history"
+  que abren `openHistoryMenu()` (toggle): un **cajón lateral que se SUPERPONE** sobre
+  la conversación (no la comprime), no un popup. `.cch-history-overlay` se monta
+  **dentro del `viewRoot`** (`position:absolute`, `top` inline = altura de `.cch-header`
+  vía `offsetHeight`, para no tapar la toolbar), atenúa el resto y contiene el
+  `.cch-history-sidebar` (~340px, desliza desde la izquierda). Cierre por su × /
+  Escape / click en el backdrop; refs `historyOverlay`/`historyOverlayCleanup`
+  limpiadas en `onunload`, `detachView` y `setActive`. **Reutiliza la pila persistida
+  `settings.closedSessions`** (la misma que `Ctrl+Shift+Y`), renderizada
+  **más-reciente-primero**: cada fila con título + subtítulo (`relativeTime(closedAt)`
+  + skill/modelo). Click en la fila → `reopenSession(info)` reabre **esa** conversación
+  (cualquiera, no solo la última) en pestaña nueva vía `--resume` y la quita de la
+  pila por `sessionId`; la × → `deleteClosedSession(info)` la borra del historial sin
+  reabrir (el `.jsonl` en disco intacto) y re-renderiza in situ.
+  `reopenClosedSession`/`reopenSession` comparten `reopenInfo(info)`.
+  - `ClosedSessionInfo` gana `closedAt?` (epoch ms, opcional para no romper
+    entradas persistidas viejas), sellado en `closeSession` y `flushOpenSessions`.
+  - CSS `.cch-history-overlay`/`.cch-history-sidebar` (drawer scrollable con animación
+    de entrada, filas con hover y × que aparece al pasar el ratón); `.claude-code-harness`
+    pasa a `position:relative` como ancla del overlay. Añadido a los toggles de
+    "Header buttons".
+  - CAVEAT: el historial es la pila de reopen (tope `MAX_CLOSED_SESSIONS`=25), no
+    un índice de **todos** los `.jsonl` del disco.
+
 ## 2026-06-27
 
 - **Revertida por completo la función de "aviso al terminar una sesión".** Se había
