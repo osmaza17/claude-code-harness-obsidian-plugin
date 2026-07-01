@@ -62,8 +62,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   te ha hecho un prompt de permiso, una aprobación de plan o un cuestionario y está
   bloqueado hasta que contestes) o **detenido por alcanzar el límite de uso/tokens**
   (también rojo; se distinguen por el tooltip al pasar el ratón), y **salido** (gris).
-  El rojo de "esperando respuesta" se apaga al responder (escribir) o cuando Claude
-  reanuda; el del límite se limpia al volver a escribir o al reiniciar la sesión.
+  El rojo de "esperando tu respuesta" **parpadea** cuando el cuestionario está en una
+  pestaña **que no estás mirando** (te avisa de que vayas a esa pestaña) y se queda en
+  **rojo fijo** cuando estás **en** esa pestaña con el cuestionario aún sin responder
+  (te recuerda que debes contestarlo para que Claude continúe). Se apaga al responder
+  (escribir) o cuando Claude reanuda; el del límite se limpia al volver a escribir o
+  al reiniciar la sesión.
   (Tanto la detección de "esperando respuesta" como la del límite son best-effort:
   dependen del texto que imprime Claude, que puede cambiar.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de

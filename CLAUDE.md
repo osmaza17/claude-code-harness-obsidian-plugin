@@ -371,6 +371,15 @@ llama dos veces por sesión (xterm no lo soporta).
          que `is-limit` queda en rojo **fijo**; el parpadeo señala que hay una **acción
          pendiente** que debes hacer para que Claude continúe. Además el tooltip los
          separa: "Waiting for your answer" vs "Usage limit reached".
+         - **Parpadea SOLO si el cuestionario está en una pestaña NO activa** (te dice
+           "ve a esa pestaña a responder"); si el cuestionario está en la pestaña **activa**,
+           se queda en **rojo fijo** (te recuerda "aún no has respondido; hazlo para que
+           Claude siga"). Puro CSS: las reglas de 3 clases
+           `.cch-tab.is-await.cch-tab-active` y `.cch-tab-active .cch-tab-dot.is-await` ponen
+           `animation:none` + rojo fijo, y ganan por especificidad a las reglas de parpadeo
+           de 2 clases. Funciona en vivo porque `setActive`→`rebuildHeader` reasigna
+           `cch-tab-active` al cambiar de pestaña, y `refreshTabStatus` (que actualiza las
+           clases `is-*` in situ) no toca `cch-tab-active`.
          - **Detección leyendo la PANTALLA renderizada, no el flujo de bytes**
            (`screenShowsPrompt`): recorre las filas **visibles** del buffer de xterm
            (`term.buffer.active`, de `baseY` a `baseY+rows`, `translateToString(true)`) y
