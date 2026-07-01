@@ -329,6 +329,9 @@
 }
 .claude-code-harness .cch-tab-dot.is-await {
   background: var(--color-red, #f85149);
+  /* Blink so "waiting for your answer" grabs attention (limit-reached stays
+     solid), signalling there is a pending action you must take. */
+  animation: cch-await-blink 1s steps(1, end) infinite;
 }
 /* Tab border mirrors the heartbeat dot so the state is obvious at a glance:
    green = idle/done, yellow = working, red = waiting for your answer OR stopped at
@@ -352,6 +355,31 @@
   border-color: var(--color-red, #f85149);
   background: rgba(248, 81, 73, 0.14);
   color: var(--text-normal);
+  /* Pulse the border + background so a pending question is unmissable
+     (limit-reached stays solid red; only await blinks). */
+  animation: cch-await-tab-blink 1s steps(1, end) infinite;
+}
+/* Blink keyframes for the "awaiting your answer" state. steps(1,end) gives a
+   hard on/off flash rather than a soft fade, which is far more attention-grabbing. */
+@keyframes cch-await-blink {
+  0%, 50% {
+    background: var(--color-red, #f85149);
+    opacity: 1;
+  }
+  50.01%, 100% {
+    background: var(--color-red, #f85149);
+    opacity: 0.2;
+  }
+}
+@keyframes cch-await-tab-blink {
+  0%, 50% {
+    border-color: var(--color-red, #f85149);
+    background: rgba(248, 81, 73, 0.28);
+  }
+  50.01%, 100% {
+    border-color: rgba(248, 81, 73, 0.35);
+    background: rgba(248, 81, 73, 0.05);
+  }
 }
 .claude-code-harness .cch-tab-rename {
   width: 120px;

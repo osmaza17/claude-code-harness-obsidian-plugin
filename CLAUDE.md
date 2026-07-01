@@ -330,8 +330,13 @@ llama dos veces por sesión (xterm no lo soporta).
          plan, o un **cuestionario `AskUserQuestion`**) se queda **en silencio**
          esperando, así que el heartbeat lo daba por **terminado** (verde) y no se
          distinguía "acabó" de "necesita que respondas". Pinta la pestaña de **rojo**
-         (clase `is-await`, mismo color que `is-limit` por petición del usuario; se
-         distinguen por el tooltip: "Waiting for your answer" vs "Usage limit reached").
+         (clase `is-await`, mismo color rojo que `is-limit`; ahora se distinguen a
+         simple vista porque **`is-await` PARPADEA** —flash duro on/off ~1s vía
+         `@keyframes cch-await-blink` (punto) y `cch-await-tab-blink` (borde+fondo de la
+         pestaña), con `steps(1,end)` para un parpadeo brusco y no un fundido— mientras
+         que `is-limit` queda en rojo **fijo**; el parpadeo señala que hay una **acción
+         pendiente** que debes hacer para que Claude continúe. Además el tooltip los
+         separa: "Waiting for your answer" vs "Usage limit reached".
          - **Detección leyendo la PANTALLA renderizada, no el flujo de bytes**
            (`screenShowsPrompt`): recorre las filas **visibles** del buffer de xterm
            (`term.buffer.active`, de `baseY` a `baseY+rows`, `translateToString(true)`) y
