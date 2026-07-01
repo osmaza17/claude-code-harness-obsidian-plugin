@@ -239,11 +239,17 @@ const LIMIT_STOP_RE =
 // wording can change between CLI versions — tune these three regexes if needed.
 const PROMPT_SENTENCE_RE =
   /No,?\s+and tell Claude what to do|Do you want to (proceed|make|create|run|allow|apply|continue|edit)\b|Would you like to proceed/i;
-// Also matches arrow GLYPHS ("↑/↓ to navigate") — some CLI versions print the
-// footer with ↑↓←→ instead of the words "arrow"/"keys", which slipped past before.
+// The footer stays ENGLISH on the CLIs seen so far even when the question is in
+// Spanish/French (the TUI chrome isn't localised — only the question text Claude
+// writes is), so the nav+act path is language-independent. Also matches arrow
+// GLYPHS ("↑/↓ to navigate") — some CLI versions print ↑↓←→ instead of the words
+// "arrow"/"keys", which slipped past before. As cheap insurance we ALSO accept the
+// FRENCH footer verbs ("naviguer", "Entrée/Échap pour …") in case a future or
+// localised CLI ever translates the footer. Best-effort — tune with real text.
 const PROMPT_NAV_HINT_RE =
-  /\bkeys? to navigate\b|\b(arrow|tab)\b[^\n]{0,24}\bnavigate\b|[↑↓←→][^\n]{0,24}\bnavigate\b/i;
-const PROMPT_ACT_HINT_RE = /\benter to (select|submit|confirm)\b|\besc to cancel\b/i;
+  /\bkeys? to navigate\b|\b(arrow|tab)\b[^\n]{0,24}\bnavigate\b|[↑↓←→][^\n]{0,24}\b(navigate|naviguer)\b|\b(fl[èe]ches?|tab)\b[^\n]{0,24}\bnaviguer\b|\bpour naviguer\b/i;
+const PROMPT_ACT_HINT_RE =
+  /\benter to (select|submit|confirm)\b|\besc to cancel\b|\bentr[ée]e pour (s[ée]lectionner|valider|confirmer|soumettre)\b|\b[ée]chap\w* pour annuler\b/i;
 function looksLikePrompt(text: string): boolean {
   if (PROMPT_SENTENCE_RE.test(text)) return true;
   return PROMPT_NAV_HINT_RE.test(text) && PROMPT_ACT_HINT_RE.test(text);

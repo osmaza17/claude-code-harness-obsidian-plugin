@@ -362,6 +362,11 @@ llama dos veces por sesión (xterm no lo soporta).
            keys to navigate · Esc to cancel") y que la prosa casi nunca combina. Las pistas
            del pie son **independientes del idioma** (el pie va en inglés aunque la pregunta
            esté en español; verificado contra un formulario `AskUserQuestion` en español).
+           Como **seguro barato** por si un CLI futuro/localizado tradujera el pie, las regex
+           aceptan **también los verbos franceses** ("naviguer", "Entrée/Échap pour
+           sélectionner/valider/annuler", con o sin acentos); no verificado en vivo (nunca se
+           ha visto el pie traducido), pero no añade falsos positivos porque sigue exigiendo
+           nav+act juntos.
          - **Disparo y limpieza**: `scheduleAwaitScan()` (en `case "data"` tras
            `maybeLimitReached`, y en `term.onData`) **deduplica** los escaneos con un
            timer de ~80 ms —xterm parsea sus writes de forma asíncrona, así que se espera
