@@ -299,6 +299,20 @@
   min-width: 0;
   flex: 0 1 auto;
 }
+/* Pinned tab (Chrome-style): compact, dot-only — no label, no × (close it from
+   its right-click menu). Fixed width so it never grows or compresses with the
+   strip; the hover tooltip carries the session title. */
+.claude-code-harness .cch-tab.cch-tab-pinned {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+.claude-code-harness .cch-tab-pinned .cch-tab-label,
+.claude-code-harness .cch-tab-pinned .cch-tab-close {
+  display: none;
+}
 /* Interactive reorder (Chrome-style): the dragged tab is lifted and follows
    the pointer while siblings slide out of the way (animated inline in JS). */
 .claude-code-harness .cch-tab-dragging {

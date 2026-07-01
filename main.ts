@@ -47,6 +47,13 @@ type ClosedSessionInfo = {
   // persisted entries (before this field existed) still load. Used by the
   // history menu to show a relative "closed 3h ago" subtitle.
   closedAt?: number;
+  // Chrome-style pinned tab: rendered compact (dot only) and ALWAYS persisted /
+  // restored across Obsidian restarts until the user closes it manually.
+  pinned?: boolean;
+  // The tab had no conversation yet when snapshotted (only possible for pinned
+  // tabs — unpinned blank tabs aren't persisted). Restored with --session-id
+  // instead of --resume, since there is no .jsonl to resume.
+  blank?: boolean;
 };
 
 interface HarnessSettings {
@@ -509,6 +516,10 @@ class Session {
   // (that's the shared/global "Extra arguments"); injected at command-build time.
   sessionId: string;
   resume = false; // start with --resume <sessionId> (recovered tab) vs --session-id
+  // Chrome-style pin: a pinned tab renders compact (dot only, no ×) at the left
+  // end of the strip and is always restored on the next Obsidian run until the
+  // user closes it manually (via the tab's right-click menu).
+  pinned = false;
 
   term: Terminal | null = null;
   fit: FitAddon | null = null;
@@ -612,6 +623,7 @@ class Session {
       resume?: boolean;
       cols?: number;
       rows?: number;
+      pinned?: boolean;
     }
   ) {
     this.plugin = plugin;
@@ -623,6 +635,7 @@ class Session {
     this.title = opts?.title || this.skill || "Claude";
     this.sessionId = opts?.sessionId || newConversationId();
     this.resume = !!opts?.resume;
+    this.pinned = !!opts?.pinned;
     // Reopened/restored tabs carry their archived grid size: spawn claude at it
     // so the --resume repaint matches (0/undefined falls back to settings).
     if (opts?.cols && opts?.rows) {
@@ -2166,6 +2179,15 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "toggle-pin-session",
+      name: "Pin/unpin current Claude tab",
+      callback: () => {
+        const a = this.activeSession();
+        if (a) this.setPinned(a, !a.pinned);
+      },
+    });
+
+    this.addCommand({
       id: "open-session-history",
       name: "Open Claude session history",
       callback: async () => {
@@ -2307,6 +2329,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     resume?: boolean;
     cols?: number;
     rows?: number;
+    pinned?: boolean;
   }): Session {
     if (this.viewRoot) this.activeSession()?.detachHost();
     const sess = new Session(this, opts);
@@ -2329,6 +2352,27 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.activeIndex = i;
     this.rebuildHeader();
     if (this.viewRoot) this.activeSession()?.attachInto(this.viewRoot);
+  }
+
+  /** Pin/unpin a tab (Chrome-style). Pinning renders it compact (dot only) and
+   *  moves it to the end of the pinned group at the left of the strip; unpinning
+   *  leaves it in place (right after the pinned group). Pinned tabs are always
+   *  persisted and restored across Obsidian runs until closed manually. */
+  setPinned(sess: Session, pinned: boolean) {
+    if (sess.pinned === pinned) return;
+    sess.pinned = pinned;
+    const idx = this.sessions.indexOf(sess);
+    // Keep the pinned group contiguous at the left (the drag clamp relies on
+    // it). The right slot is the same in both directions: pinning appends to
+    // the end of the pinned group; unpinning (possibly from its middle) drops
+    // the tab just after the remaining pinned ones.
+    const target = this.sessions.filter((s) => s !== sess && s.pinned).length;
+    if (idx >= 0 && idx !== target) {
+      this.moveSession(idx, target); // rebuilds header + persists
+      return;
+    }
+    this.rebuildHeader();
+    this.persistOpenSessions();
   }
 
   /** Reorder tabs. Moves the session at `from` so it ends up at index `to` in
@@ -2364,6 +2408,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const draggedRect = rects[from];
     const gap = 4; // matches .cch-tabs gap in styles.css
     const slot = draggedRect.width + gap; // space the dragged tab leaves behind
+    // Chrome-style pin regions: pinned tabs occupy the leftmost slots, and a
+    // drag can't cross the boundary (a pinned tab stays in the pinned group,
+    // an unpinned one stays after it).
+    const draggedPinned = this.sessions[from]?.pinned ?? false;
+    const pinnedCount = this.sessions.filter((s) => s.pinned).length;
     let started = false;
     let to = from;
 
@@ -2398,6 +2447,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           if (center > r.left + frac * r.width) idx++;
         }
       }
+      // Clamp to the dragged tab's pin region so the groups never interleave.
+      if (draggedPinned) idx = Math.min(idx, pinnedCount - 1);
+      else idx = Math.max(idx, pinnedCount);
       to = idx;
       // Slide the siblings to open the slot where the dragged tab will land.
       for (let j = 0; j < tabEls.length; j++) {
@@ -2467,6 +2519,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       cols: sess.lastCols,
       rows: sess.lastRows,
       closedAt: Date.now(),
+      pinned: sess.pinned || undefined,
     });
     while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
       this.settings.closedSessions.shift();
@@ -2543,6 +2596,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       resume: true,
       cols: info.cols,
       rows: info.rows,
+      pinned: info.pinned,
     });
     new Notice("Reopened session: " + info.title);
   }
@@ -2579,8 +2633,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // This holds even if some session exists (rare: created without the panel
     // ever mounting), since flushing then would drop the unrestored tabs.
     if (this.pendingOpen && this.pendingOpen.length) return;
+    // Pinned tabs are ALWAYS snapshotted (that's the point of the pin); unpinned
+    // ones only with real activity, so blank tabs aren't restored. A pinned tab
+    // with no conversation yet is marked `blank` so the restore starts it with
+    // --session-id instead of --resume (there is no .jsonl to resume).
     this.settings.openSessions = this.sessions
-      .filter((s) => s.sessionId && s.hasActivity())
+      .filter((s) => s.sessionId && (s.hasActivity() || s.pinned))
       .map((s) => ({
         sessionId: s.sessionId,
         skill: s.skill,
@@ -2590,6 +2648,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         cols: s.lastCols,
         rows: s.lastRows,
         closedAt: Date.now(),
+        pinned: s.pinned || undefined,
+        blank: s.hasActivity() ? undefined : true,
       }));
     void this.saveSettings();
   }
@@ -2622,9 +2682,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         args: info.args,
         title: info.title,
         sessionId: info.sessionId,
-        resume: true,
+        // A blank pinned tab has no conversation → fresh start (--session-id
+        // with the same id); anything else resumes its .jsonl.
+        resume: !info.blank,
         cols: info.cols,
         rows: info.rows,
+        pinned: info.pinned,
       });
     }
     // Detach the last-created (currently active + mounted) tab and make the first
@@ -4588,11 +4651,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const st = this.tabState(sess);
       const tab = tabs.createDiv({
         cls:
-          "cch-tab " + st.cls + (i === this.activeIndex ? " cch-tab-active" : ""),
+          "cch-tab " +
+          st.cls +
+          (i === this.activeIndex ? " cch-tab-active" : "") +
+          (sess.pinned ? " cch-tab-pinned" : ""),
       });
       const dot = tab.createSpan({ cls: "cch-tab-dot " + st.cls });
       dot.setAttr("aria-label", st.label);
-      tab.setAttr("title", st.label);
+      tab.setAttr("title", this.tabTooltip(sess, st.label));
       const label = tab.createSpan({
         cls: "cch-tab-label" + (sess.exited ? " cch-tab-exited" : ""),
         text: sess.title || "Claude",
@@ -4610,6 +4676,26 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         e.preventDefault();
         e.stopPropagation();
         this.closeSession(sess);
+      };
+      // Right-click: pin/unpin + close (a pinned tab hides its ×, like Chrome,
+      // so this menu is also how it gets closed).
+      tab.oncontextmenu = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const menu = new Menu();
+        menu.addItem((item) =>
+          item
+            .setTitle(sess.pinned ? "Unpin tab" : "Pin tab")
+            .setIcon("pin")
+            .onClick(() => this.setPinned(sess, !sess.pinned))
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle("Close tab")
+            .setIcon("x")
+            .onClick(() => this.closeSession(sess))
+        );
+        menu.showAtMouseEvent(e);
       };
       // Pointer-based interactive reorder (Chrome-style: siblings slide out of
       // the way as you drag). A plain click (no drag) activates the tab.
@@ -4862,6 +4948,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return { cls: "is-idle", label: "Idle" };
   }
 
+  /** Tab tooltip: a pinned tab hides its label, so hover must show its NAME
+   *  (plus the state); a normal tab just shows the state. */
+  private tabTooltip(sess: Session, stateLabel: string): string {
+    return sess.pinned
+      ? `📌 ${sess.title || "Claude"} — ${stateLabel}`
+      : stateLabel;
+  }
+
   refreshTabStatus() {
     if (!this.viewRoot) return;
     const states = ["is-busy", "is-idle", "is-exited", "is-limit", "is-await"];
@@ -4879,7 +4973,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       if (tab) {
         tab.removeClasses(states);
         tab.addClass(st.cls);
-        tab.setAttr("title", st.label);
+        tab.setAttr("title", this.tabTooltip(sess, st.label));
       }
     });
   }

@@ -83,11 +83,13 @@ Reparto de responsabilidades:
   `settings` (data.json) y, además, las pestañas que siguen **abiertas** se snapshotean
   en `settings.openSessions`.
   - `persistOpenSessions()` (debounce ~1,5 s) vuelca a `settings.openSessions` los
-    tabs abiertos **con actividad** (`Session.hasActivity()` = `firstPromptDone ||
-    titleRank>0 || resume`, para no restaurar tabs en blanco; el `resume`
-    incluye los tabs reabiertos/restaurados, que nacen con `titleRank=0` y sin primer
-    prompt pero sí tienen conversación —si no, se descartarían y no se podrían
-    re-restaurar). Se llama
+    tabs abiertos **con actividad O pineados** (`Session.hasActivity()` =
+    `firstPromptDone || titleRank>0 || resume`, para no restaurar tabs en blanco;
+    el `resume` incluye los tabs reabiertos/restaurados, que nacen con `titleRank=0`
+    y sin primer prompt pero sí tienen conversación —si no, se descartarían y no se
+    podrían re-restaurar—; un tab **pineado** se snapshotea SIEMPRE, con `blank:true`
+    si aún no tiene conversación para que la restauración use `--session-id` en vez
+    de `--resume`). Se llama
     desde `newSession`/`closeSession`/`moveSession`/`Session.restart` (cambia el
     `sessionId`) y `Session.setTitleFrom` (el título se persiste). `onunload` hace
     un `flushOpenSessions()` directo (best-effort; el debounce ya cubre el apagón
@@ -292,6 +294,23 @@ llama dos veces por sesión (xterm no lo soporta).
      la pestaña → `setActive(i)`; `.cch-tab-active` marca la activa; `.cch-tab-exited`
      tacha la que salió). Al final, botón **+** (`.cch-tab-new`) → `openNewSessionMenu()`
      (crea sesión con skill por defecto / sin skill / con una skill de `listSkills()`).
+     - **Pestañas pineadas (estilo Chrome)** (`Session.pinned`, persistido como
+       `ClosedSessionInfo.pinned`): **click derecho** en una pestaña abre un menú
+       (Obsidian `Menu`) con "Pin/Unpin tab" y "Close tab"; también hay comando
+       **"Pin/unpin current Claude tab"**. `setPinned(sess, on)` marca la sesión y
+       la **mueve al final del grupo pineado** (los pineados ocupan siempre los
+       huecos de la izquierda; `beginTabDrag` **clampa** el índice destino a la
+       región del tab arrastrado para que los grupos no se entremezclen). Una
+       pestaña pineada se pinta **compacta** (`.cch-tab-pinned`: ancho fijo 30px,
+       solo el punto de estado; label y × ocultos por CSS — se cierra desde su menú
+       contextual, como en Chrome) y su tooltip lleva `📌 título — estado`
+       (`tabTooltip`, usado por `buildHeader` y `refreshTabStatus`). CLAVE de la
+       persistencia: un tab pineado **se restaura SIEMPRE** al reabrir Obsidian
+       (entra en `settings.openSessions` aunque no tenga actividad; si está en
+       blanco se marca `blank:true` y se restaura con `--session-id` en vez de
+       `--resume`), hasta que el usuario lo cierre manualmente. El pin viaja
+       también por `closedSessions` (reabrir desde historial/Ctrl+Shift+Y recupera
+       el estado pineado) y sobrevive a `restart()`.
      - **Compresión + ancho uniforme (no scroll lateral por defecto)**: todas las
        pestañas tienen **el mismo ancho** en todo momento y se **encogen** juntas
        al abrir más (`.cch-tab` = `flex: 1 1 0`: basis cero + grow/shrink iguales,
@@ -886,6 +905,7 @@ llama dos veces por sesión (xterm no lo soporta).
   panel y crea otra instancia con `newSession()`), "Restart Claude Code session"
   (sobre la activa), **"Reopen closed Claude session"** (hotkey `Mod+Shift+Y`;
   `reopenClosedSession()` reabre la última pestaña cerrada con `--resume`),
+  **"Pin/unpin current Claude tab"** (`setPinned()` sobre la activa),
   **"Open Claude session history"** (`openHistoryMenu()` abre la lista de
   conversaciones cerradas para reabrir cualquiera en pestaña nueva),
   "Send active note to Claude" (inserta `@<ruta>` de la nota

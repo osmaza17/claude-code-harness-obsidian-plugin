@@ -39,9 +39,19 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   panel de Claude Code, **reaparecen automáticamente** las mismas pestañas (en su
   orden, cada una recuperando su conversación con `--resume`), la primera activa. No
   hay que reabrirlas a mano. Solo se restauran las pestañas con conversación real
-  (las recién abiertas y en blanco se ignoran). La restauración ocurre al **abrir el
+  (las recién abiertas y en blanco se ignoran — salvo que estén **pineadas**, ver
+  abajo). La restauración ocurre al **abrir el
   panel** (no antes), lo que evita cualquier corrupción visual del terminal; nota que
   al abrirlo se lanza un proceso `claude` por pestaña restaurada.
+- **Pestañas pineadas (estilo Chrome)**: haz **clic derecho** en una pestaña y elige
+  **"Pin tab"** (o usa el comando "Pin/unpin current Claude tab"). La pestaña se
+  vuelve **compacta** (solo el punto de estado, ancho fijo, sin ×, siempre a la
+  izquierda de la barra, como en Chrome) y queda **fijada**: se restaura **siempre**
+  al reabrir Obsidian —aunque otras pestañas se hayan descartado— hasta que la
+  cierres tú manualmente (clic derecho → "Close tab", ya que la pineada no muestra
+  la ×). Ideal para conversaciones importantes que continúas durante varias sesiones
+  de Obsidian. El nombre completo aparece al pasar el ratón (📌 título — estado), y
+  el pin sobrevive a reinicios de la conversación y a reabrirla desde el historial.
 - **Reiniciar guarda la conversación anterior**: al reiniciar una conversación con
   el botón de la cabecera (icono de flecha circular), la sesión empieza de cero pero
   la conversación anterior **no se pierde**: se archiva en el historial, así que
