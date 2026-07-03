@@ -59,7 +59,8 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   conversación sigue en disco). La pestaña reinicia también su nombre para que la
   conversación nueva estrene el suyo.
 - **Historial de conversaciones (estilo ChatGPT/Claude web)**: un botón en el
-  **extremo izquierdo** de la cabecera (icono 🕘 *history*, junto al de @) —o el
+  lado **derecho** de la cabecera (icono 🕘 *history*, justo a la izquierda del de
+  recargar; de derecha a izquierda: recargar · historial · ajustes · zoom) —o el
   comando "Open Claude session history"— abre un **panel lateral** que se **superpone
   sobre la conversación** (no la comprime), con espacio para leer bien los títulos.
   Lista las conversaciones que has cerrado, la más reciente arriba, con su título y
@@ -89,10 +90,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   "Restaurar la sesión de trabajo"). No se cierran al cerrar el panel — siguen vivas
   hasta que cierras su pestaña, cierras Obsidian o desactivas el plugin.
 - **Comandos de inicio + skill** configurables: al arrancar una sesión nueva se
-  envía primero `/model <id>` (el modelo que muestra la cabecera es el que la
-  sesión usa de verdad), luego los comandos slash configurados (vacío por defecto)
-  y por último la skill. Se envían se abra o no el panel; las pestañas restauradas
-  con `--resume` no reciben nada (su conversación ya lo trae).
+  envían primero los comandos slash configurados (vacío por defecto) y por último
+  la skill. **No** se envía `/model`: la pestaña se queda en el modelo por defecto
+  de `claude` y tú lo cambias a mano con el selector de la cabecera cuando quieras
+  (por eso la etiqueta de modelo puede no coincidir con el modelo real hasta que
+  elijas uno). Se envían se abra o no el panel; las pestañas restauradas con
+  `--resume` no reciben nada (su conversación ya lo trae).
 - **Selector de skills**: lista las skills de Claude Code en `~/.claude/skills`
   (cada subcarpeta con un `SKILL.md`) y la invoca como `/<nombre>`. Cámbiala desde
   un botón (icono ✨) en la cabecera **para la pestaña activa**; por defecto

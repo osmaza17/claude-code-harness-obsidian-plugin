@@ -322,6 +322,7 @@ const MODELS: { id: string; label: string }[] = [
   { id: "haiku", label: "Haiku 4.5" },
   { id: "sonnet", label: "Sonnet 4.6" },
   { id: "opus", label: "Opus 4.8" },
+  { id: "fable", label: "Fable 5" },
 ];
 
 // Known browsers for the remote-control "browser per account" mapping. `exes`
@@ -1732,11 +1733,11 @@ class Session {
     if (this.resume) return;
 
     const steps: string[] = [];
-    // Make the session's model real: the header tab shows session.model, but a
-    // fresh claude starts on ITS default — send /model first so the label never
-    // lies (same /model pattern the header selector uses; resumed tabs return
-    // above and keep their conversation's model).
-    if (this.model) steps.push("/model " + this.model);
+    // NOTE: we deliberately do NOT auto-send "/model <id>" here. The user wants a
+    // fresh tab to keep whatever model claude starts on by default and change it
+    // themselves via the header selector. Consequence: the header's model label
+    // may show session.model while claude is actually on its own default until the
+    // user picks one (selectModel sends /model and re-syncs the label).
     const startup = this.plugin.settings.startupCommands || "";
     for (const line of startup.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
       steps.push(line);
@@ -4730,20 +4731,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       );
     }
 
-    // History (next to @, far left): a ChatGPT-style drawer of previously-closed
-    // sessions that can be reopened in a new tab (reuses the reopen stack; global).
-    if (s.btnHistory) {
-      const histBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(histBtn, "history");
-      histBtn.setAttr("aria-label", "Session history");
-      histBtn.title = "Session history (reopen a past conversation)";
-      this.historyBtn = histBtn;
-      histBtn.onclick = (e) => {
-        e.preventDefault();
-        this.openHistoryMenu();
-      };
-    }
-
     bar.createDiv({ cls: "cch-spacer" });
 
     // Model selector (active session's model).
@@ -4875,6 +4862,22 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
 
     iconBtn("settings", "Plugin settings", () => this.openSettings());
+
+    // History (right side, just left of Restart): a ChatGPT-style drawer of
+    // previously-closed sessions reopenable in a new tab (reuses the reopen
+    // stack; global). Right-to-left order: Restart · History · Settings · Zoom.
+    if (s.btnHistory) {
+      const histBtn = bar.createEl("button", { cls: "cch-btn" });
+      setIcon(histBtn, "history");
+      histBtn.setAttr("aria-label", "Session history");
+      histBtn.title = "Session history (reopen a past conversation)";
+      this.historyBtn = histBtn;
+      histBtn.onclick = (e) => {
+        e.preventDefault();
+        this.openHistoryMenu();
+      };
+    }
+
     iconBtn("rotate-ccw", "Restart session", () => this.activeSession()?.restart());
 
     // Keep the header as the first child so it survives a rebuild (rebuildHeader

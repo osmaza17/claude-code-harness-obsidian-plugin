@@ -160,7 +160,9 @@ Reparto de responsabilidades:
   pestañas de notas y lo captura globalmente antes de que llegue al harness.
 - **Sidebar de historial (drawer estilo ChatGPT/Claude web)** -> `openHistoryMenu()`
   (toggle) / `closeHistorySidebar()`: botón de cabecera (icono `history`, toggle
-  `btnHistory`, colocado **a la izquierda del todo, junto al botón @**) + comando
+  `btnHistory`, colocado **a la derecha, justo a la izquierda del botón de
+  reiniciar** —orden derecha→izquierda: reiniciar · historial · ajustes · zoom—)
+  + comando
   **"Open Claude session history"**. En vez de un popup, abre un **cajón lateral que
   se SUPERPONE** sobre la conversación (no la comprime): un `div` `.cch-history-overlay`
   montado **dentro del `viewRoot`** (posición `absolute`, `top` inline = altura del
@@ -450,18 +452,19 @@ llama dos veces por sesión (xterm no lo soporta).
          del CLI; si un cuestionario concreto no enciende el rojo (o enciende de más),
          ajustar `PROMPT_SENTENCE_RE`/`PROMPT_NAV_HINT_RE`/`PROMPT_ACT_HINT_RE`
          (idealmente copiando el texto real del prompt).
-  2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa), **botón
-     de historial** (icono `history`, pegado al @ en el extremo izquierdo;
-     `openHistoryMenu()` abre el drawer lateral —ver "Sidebar de historial"), selector
-     de modelo (Haiku/Sonnet/Opus → `activeSession().selectModel`), selector de
+  2. **Toolbar** (`.cch-toolbar`): botón @ (enviar nota activa, a la activa),
+     selector de modelo
+     (Haiku/Sonnet/Opus/**Fable** → `activeSession().selectModel`), selector de
      cuenta (icono `user-round`; **global**), selector de skill (icono `sparkles`;
      skills de `~/.claude/skills` **+ "Open skills folder"** → `activeSession().selectSkill`),
      **toggle remote control** (icono `smartphone`; `activeSession().toggleRemoteControl()`),
      **toggle auto-switch** (icono `repeat`; **global**; `openAutoSwitchMenu()` con
      modo Threshold/Rotate y presets —threshold 70/80/85/90/95; rotate +5/10/15/20/25—;
      estado por `updateAutoSwitchBtn()`), **Token Dashboard** (icono `bar-chart-3`),
-     zoom (**global**, aplica a todas), ajustes (`openSettings()`), reiniciar
-     (`activeSession().restart()`).
+     zoom (**global**, aplica a todas), ajustes (`openSettings()`), **botón de
+     historial** (icono `history`; `openHistoryMenu()` abre el drawer lateral —ver
+     "Sidebar de historial"), reiniciar (`activeSession().restart()`). Los tres
+     últimos, de derecha a izquierda: **reiniciar · historial · ajustes · zoom**.
   Los botones modelo/skill/remote reflejan la **sesión activa**
   (`updateModelBtn`/`updateSkillBtn`/`updateRemoteBtn` leen `activeSession()`); cuenta,
   auto-switch e historial son globales. Cada botón (salvo ajustes/reiniciar) se oculta
@@ -900,7 +903,10 @@ llama dos veces por sesión (xterm no lo soporta).
 - **Selector de modelo** (`selectModel`): envía `\x15/model <id>\r` (el Ctrl+U
   inicial limpia cualquier borrador para que el comando vaya en su propia línea;
   restaurable con Ctrl+Y). Argumentos válidos comprobados: `haiku`, `sonnet`,
-  `opus`.
+  `opus`. Se añadió `fable` (Fable 5) como cuarta opción del menú a petición del
+  usuario; NO lo he verificado en vivo contra el CLI, así que si `/model fable` no
+  fuese un argumento aceptado por esta versión de `claude`, habría que quitarlo o
+  ajustar el id.
 - **Comandos**: "Open Claude Code panel", **"New Claude Code session"** (abre el
   panel y crea otra instancia con `newSession()`), "Restart Claude Code session"
   (sobre la activa), **"Reopen closed Claude session"** (hotkey `Mod+Shift+Y`;
@@ -917,13 +923,16 @@ llama dos veces por sesión (xterm no lo soporta).
   nº de cuentas— a partir de `lastDiagInfo`, que `maybeAutoSwitch` rellena en
   cada chunk; útil para saber por qué no cambia).
 - **Instrucciones predefinidas**: ajuste "Extra arguments" (se anexa al comando,
-  p. ej. `--append-system-prompt "..."`) y "Skill". `maybeSendInitial` envía
-  primero `/model <id>` (para que el modelo de la pestaña sea REAL: antes la
-  cabecera mostraba `session.model` pero claude arrancaba con su propio default),
-  luego corre los `startupCommands` (p. ej. `/remote-control`) y por último invoca
-  la skill activa (`/<skill>`) cuando llega la primera salida de claude, **se abra
-  o no el panel**. En tabs con `resume:true` no se envía nada (la conversación ya
-  trae su modelo/skill). Cada paso se manda al pty con `pasteToPty()` (entrada IPC directa, con
+  p. ej. `--append-system-prompt "..."`) y "Skill". `maybeSendInitial`
+  **NO** envía `/model` (decisión del usuario: una pestaña nueva se queda en el
+  modelo por defecto de `claude` y el usuario lo cambia a mano con el selector de
+  cabecera). CONSECUENCIA (honesta): la etiqueta de modelo de la cabecera muestra
+  `session.model` aunque `claude` corra en su propio default, hasta que el usuario
+  elija uno (`selectModel` sí envía `/model` y re-sincroniza la etiqueta).
+  `maybeSendInitial` primero corre los `startupCommands` (p. ej. `/remote-control`)
+  y por último invoca la skill activa (`/<skill>`) cuando llega la primera salida
+  de claude, **se abra o no el panel**. En tabs con `resume:true` no se envía nada
+  (la conversación ya trae su modelo/skill). Cada paso se manda al pty con `pasteToPty()` (entrada IPC directa, con
   marcadores de bracketed-paste si el modo está activo) en vez de `term.paste()`,
   que requería la vista montada — por eso antes fallaba si nunca se abría la
   ventana.
