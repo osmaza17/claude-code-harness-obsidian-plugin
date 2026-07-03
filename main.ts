@@ -575,20 +575,10 @@ class Session {
   private awaitScanTimer: number | null = null;
 
   // Remote control toggle (/remote-control). remoteOn drives the button's green
-  // state; while awaiting the menu we scrape the session URL to the clipboard.
+  // state. Activating just CONNECTS (sends /remote-control); the URL is left for
+  // the user to read/copy from Claude's own panel — we deliberately do NOT auto-
+  // reopen the menu, scrape the URL, or open a browser on activation anymore.
   remoteOn = false;
-  private awaitRemoteActive = false;
-  private remoteActiveBuf = "";
-  private remoteActiveDeadline = 0;
-  // The menu (with the URL) only renders once the session is actually connected,
-  // which can take longer than one early attempt. So we RETRY: reopen the menu
-  // every few seconds until the URL shows up (bounded), instead of a single shot.
-  private remoteMenuLoopActive = false; // a retry chain is running
-  private remoteMenuAttempts = 0;
-  private remoteUrlCaptured = false; // stop retrying once we have the URL
-  private awaitRemoteUrl = false;
-  private remoteUrlBuf = "";
-  private remoteUrlDeadline = 0;
 
   // After a /model switch, Claude may show a "Switch model?" confirmation. We
   // watch the stream and auto-confirm (option 1 is pre-selected).
@@ -1579,10 +1569,10 @@ class Session {
     this.send({ t: "input", d });
   }
 
-  /** Two-state remote control toggle (see the reference behaviour). The first
-   *  /remote-control connects; running it again while connected opens a menu that
-   *  prints the session URL. OFF→ON connects then scrapes + opens the URL;
-   *  ON→OFF opens the menu and arrows up to "Disconnect". */
+  /** Two-state remote control toggle. OFF→ON just CONNECTS (sends /remote-control);
+   *  the session URL is shown in Claude's own panel for the user to read/copy — we
+   *  no longer auto-reopen the menu, scrape the URL, or open a browser. ON→OFF opens
+   *  the menu and arrows up to "Disconnect". */
   toggleRemoteControl() {
     if (!this.child) {
       new Notice("No live session");
@@ -1592,18 +1582,7 @@ class Session {
       this.send({ t: "input", d: "\x15/remote-control\r" });
       this.remoteOn = true;
       this.plugin.updateRemoteBtn();
-      new Notice("Remote control connecting…");
-      // Reopen the menu to surface + copy the URL. Fast path: as soon as the
-      // output shows "/rc active" (maybeAfterRemoteActive). The retry loop below
-      // keeps reopening the menu until the URL renders (connection may be slow).
-      this.remoteMenuLoopActive = false;
-      this.remoteMenuAttempts = 0;
-      this.remoteUrlCaptured = false;
-      this.awaitRemoteUrl = false;
-      this.awaitRemoteActive = true;
-      this.remoteActiveBuf = "";
-      this.remoteActiveDeadline = Date.now() + 20000;
-      window.setTimeout(() => this.fireRemoteMenu(), 1000);
+      new Notice("Remote control connecting… (URL shown in the Claude panel)");
     } else {
       this.send({ t: "input", d: "\x15/remote-control\r" });
       // Menu default is "Continue"; Up x2 lands on "Disconnect this session".
@@ -1616,113 +1595,10 @@ class Session {
       window.setTimeout(() => this.send({ t: "input", d: up }), 820);
       window.setTimeout(() => this.send({ t: "input", d: "\r" }), 940);
       this.remoteOn = false;
-      this.awaitRemoteActive = false;
-      this.awaitRemoteUrl = false;
-      this.remoteMenuLoopActive = false;
       this.plugin.updateRemoteBtn();
       new Notice("Remote control off");
     }
     this.term?.focus();
-  }
-
-  /** Fast path: when the output shows "/rc active", open the menu immediately. */
-  private maybeAfterRemoteActive(chunk: string) {
-    if (!this.awaitRemoteActive) return;
-    if (Date.now() > this.remoteActiveDeadline) {
-      this.awaitRemoteActive = false;
-      return;
-    }
-    this.remoteActiveBuf = (this.remoteActiveBuf + chunk).slice(-4000);
-    const clean = this.remoteActiveBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    if (/\/rc active/i.test(clean)) this.fireRemoteMenu();
-  }
-
-  /** Start the menu retry loop (idempotent): kicked off by the fallback timer and
-   *  the "/rc active" fast path. Only one loop runs at a time. */
-  private fireRemoteMenu() {
-    if (!this.remoteOn || !this.child || this.remoteUrlCaptured) return;
-    if (this.remoteMenuLoopActive) return; // a retry chain is already running
-    this.remoteMenuLoopActive = true;
-    this.runRemoteMenuAttempt();
-  }
-
-  /** One attempt: reopen the menu (which prints the URL once the session is
-   *  actually connected), arm the URL capture, dismiss the menu shortly after to
-   *  stay connected, and schedule a retry if the URL hasn't shown up yet. The menu
-   *  doesn't render the URL until connected, so a single early attempt can miss it
-   *  — hence the retries (this is what fixed needing to press Ctrl+R twice). */
-  private runRemoteMenuAttempt() {
-    if (!this.remoteOn || !this.child || this.remoteUrlCaptured) {
-      this.remoteMenuLoopActive = false;
-      return;
-    }
-    if (this.remoteMenuAttempts >= 6) {
-      this.remoteMenuLoopActive = false;
-      this.awaitRemoteUrl = false;
-      console.log(
-        "[cch remote] gave up after retries. Last cleaned buffer:\n" +
-          this.remoteUrlBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").slice(-1200)
-      );
-      new Notice(
-        "Couldn't read the remote URL automatically. It should be shown in the Claude panel — copy it from there."
-      );
-      return;
-    }
-    this.remoteMenuAttempts++;
-    this.awaitRemoteActive = false;
-    this.send({ t: "input", d: "\x15/remote-control\r" });
-    this.awaitRemoteUrl = true;
-    this.remoteUrlBuf = "";
-    this.remoteUrlDeadline = Date.now() + 6000;
-    // Dismiss the menu so the next attempt can reopen it cleanly (and so we stay
-    // connected if this attempt already had the URL).
-    window.setTimeout(() => {
-      if (this.remoteOn && !this.remoteUrlCaptured) this.send({ t: "input", d: "\x1b" });
-    }, 900);
-    // Retry: if the URL still isn't captured, reopen the menu (connection may have
-    // completed by now).
-    window.setTimeout(() => {
-      if (this.remoteOn && !this.remoteUrlCaptured) this.runRemoteMenuAttempt();
-      else this.remoteMenuLoopActive = false;
-    }, 1500);
-  }
-
-  /** While awaiting the remote-control menu, scrape the session URL from the
-   *  terminal output and copy it to the clipboard (once). */
-  private maybeCaptureRemoteUrl(chunk: string) {
-    if (!this.awaitRemoteUrl || this.remoteUrlCaptured) return;
-    if (Date.now() > this.remoteUrlDeadline) {
-      // This attempt's window lapsed; the retry loop will reopen the menu.
-      this.awaitRemoteUrl = false;
-      return;
-    }
-    this.remoteUrlBuf = (this.remoteUrlBuf + chunk).slice(-8000);
-    const clean = this.remoteUrlBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    // Match the /code/<id> link. The id is word-chars only — NOT dots or slashes:
-    // the menu prints option labels ("Disconnect this session", "Show QR code")
-    // right after the URL with whitespace stripped, so including '.' would glue
-    // ".Disconnectthissession…" onto the URL (a broken link). Stopping at '.'
-    // yields the clean URL.
-    const m = clean.match(/https:\/\/claude\.ai\/code\/[\w-]+/);
-    if (m) {
-      this.awaitRemoteUrl = false;
-      this.remoteUrlCaptured = true; // stop the retry loop
-      this.remoteMenuLoopActive = false;
-      const url = m[0];
-      // Dismiss the menu so we stay connected (Continue is the default).
-      window.setTimeout(() => {
-        if (this.remoteOn) this.send({ t: "input", d: "\x1b" });
-      }, 200);
-      try {
-        const clip = nodeRequire("electron")?.clipboard;
-        if (clip) clip.writeText(url);
-        else void navigator.clipboard?.writeText(url).catch(() => {});
-      } catch {
-        /* clipboard unavailable */
-      }
-      const label = this.plugin.openInBrowser(url);
-      new Notice("Remote session opening in " + label + ":\n" + url);
-    }
   }
 
   /** Once claude is up, run the startup slash commands, then invoke this
@@ -1830,10 +1706,6 @@ class Session {
       this.awaitScanTimer = null;
     }
     this.remoteOn = false;
-    this.awaitRemoteActive = false;
-    this.remoteMenuLoopActive = false;
-    this.remoteUrlCaptured = false;
-    this.awaitRemoteUrl = false;
     this.plugin.updateRemoteBtn();
     // Archive the OLD conversation onto the reopen stack (if it had real content) so
     // restarting doesn't lose it — it stays reopenable via Ctrl+Shift+Y / history, and
@@ -1877,10 +1749,6 @@ class Session {
       this.awaitScanTimer = null;
     }
     this.remoteOn = false;
-    this.awaitRemoteActive = false;
-    this.remoteMenuLoopActive = false;
-    this.remoteUrlCaptured = false;
-    this.awaitRemoteUrl = false;
     this.plugin.updateRemoteBtn();
     // Same conversation → keep sessionId, title, titleRank, firstPromptDone. Resume
     // it with --resume if there is a .jsonl on disk (real activity); a never-used
@@ -2032,8 +1900,6 @@ class Session {
           // Per-session watchers (this terminal's TUI).
           this.maybeSendInitial();
           this.maybeConfirmModel(msg.d);
-          this.maybeAfterRemoteActive(msg.d);
-          this.maybeCaptureRemoteUrl(msg.d);
           // Global watchers (shared account / usage / auto-switch), fed this
           // session's output.
           this.plugin.maybeAutoSwitch(this, msg.d);
@@ -2057,8 +1923,6 @@ class Session {
             "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"
           );
           this.remoteOn = false;
-          this.awaitRemoteUrl = false;
-          this.remoteMenuLoopActive = false;
           this.plugin.updateRemoteBtn();
           this.plugin.rebuildHeader(); // mark the tab as exited
           break;

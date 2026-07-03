@@ -133,15 +133,15 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   el nombre queda **partido en varias líneas** (Claude lo corta a lo ancho, a veces
   a mitad de palabra). Se puede desactivar en ajustes ("Clickable note links").
 - **Remote control (toggle)**: botón (icono 📱) o **`Ctrl+R`** que activa/desactiva
-  `/remote-control`. Al activarlo se pone verde, copia al portapapeles el enlace
-  de la sesión (`https://claude.ai/code/…`) y lo abre para entrar directo a la
-  sesión remota; al desactivarlo, desconecta la sesión.
-- **Navegador por cuenta**: como el enlace remoto solo funciona en el navegador
-  donde está logueada la misma cuenta de Claude, cada cuenta elige su navegador
-  (Chrome / Firefox / Edge / Brave / Opera / Opera GX / ruta personalizada)
-  **desde su propia tarjeta** en ajustes (ver "Ajustes consolidados por cuenta").
-  La cuenta activa se lee de `~/.claude.json`; las que dejan "Use default" usan el
-  navegador por defecto global.
+  `/remote-control`. Al activarlo se pone verde y **conecta**; el enlace de la sesión
+  (`https://claude.ai/code/…`) lo muestra el propio panel de Claude, y lo copias/abres
+  desde ahí. Al desactivarlo, desconecta la sesión. (El plugin ya **no** captura ni
+  abre la URL automáticamente al activar; se quitó ese comportamiento automático.)
+- **Navegador por cuenta**: cada cuenta puede elegir su navegador (Chrome / Firefox /
+  Edge / Brave / Opera / Opera GX / ruta personalizada) **desde su propia tarjeta** en
+  ajustes (ver "Ajustes consolidados por cuenta"), usado por el botón de **re-login por
+  cuenta** (🔓) del menú 👤. La cuenta activa se lee de `~/.claude.json`; las que dejan
+  "Use default" usan el navegador por defecto global.
 - **Cambio de cuenta (sin interrupción)**: las cuentas se **guardan solas** al
   iniciar sesión con ellas, y te cambias entre varias desde el botón de cuenta de
   la cabecera (icono 👤) o la sección "Claude accounts" de ajustes. Hace un

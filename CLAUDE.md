@@ -46,9 +46,9 @@ Reparto de responsabilidades:
 
 - **`Session`** (estado por-instancia): `term`/`host`/`child`/`fit`/`webgl`,
   resize/fit, clipboard, el **data handler**, y los watchers **propios de su TUI**
-  (`maybeSendInitial`, `maybeConfirmModel`, remote-control: `toggleRemoteControl`/
-  `maybeAfterRemoteActive`/`maybeCaptureRemoteUrl`/`fireRemoteMenu`), más su
-  **config propia** (`skill`, `model`, `args`, `title`). `attachInto(parent)` monta
+  (`maybeSendInitial`, `maybeConfirmModel`, y el toggle de remote-control
+  `toggleRemoteControl` —que solo conecta/desconecta; sin auto-captura de URL), más
+  su **config propia** (`skill`, `model`, `args`, `title`). `attachInto(parent)` monta
   el host (llama `term.open()` una sola vez; luego solo mueve el host dentro/fuera
   del DOM), `detachHost()` lo desmonta sin matar, `dispose()` mata y destruye.
 - **Plugin** (gestor + servicios globales): `newSession`/`closeSession`/
@@ -856,17 +856,20 @@ llama dos veces por sesión (xterm no lo soporta).
   (muestra `/rc connecting…` → `/rc active` en la barra de estado) y NO imprime la
   URL; ejecutarlo **estando ya conectado** abre un menú (Disconnect · Show QR code
   · Continue) que sí imprime la URL `https://claude.ai/code/session_…`.
-  - **OFF→ON**: envía el comando (conecta) y, para reabrir el menú y sacar la URL,
-    usa `fireRemoteMenu()` (one-shot, guardado por `remoteMenuFired`): vía rápida =
-    `maybeAfterRemoteActive` lo dispara al ver `/rc active`; respaldo = un timer a
-    ~3,5 s (el menú aparece aunque siga en "connecting…", así que no se depende de
-    parsear la barra de estado). `fireRemoteMenu` reenvía `/remote-control`, arma
-    `awaitRemoteUrl` y, tras ~1,5 s, manda Esc para seguir conectado.
-    `maybeCaptureRemoteUrl` saca la URL de la salida del PTY (regex), la copia al
-    portapapeles y la abre en el navegador (`openInBrowser`). Abrir el navegador
-    con la URL reutiliza la ventana existente -> pestaña nueva -> entra directo a
-    la sesión. El botón se pone verde (clase CSS `cch-active`).
-  - **Navegador por cuenta**: la URL solo funciona en el navegador donde está
+  - **OFF→ON**: **solo conecta** (envía `\x15/remote-control\r`, pone `remoteOn=true`,
+    botón verde `cch-active`, Notice). La URL la muestra el **propio panel de Claude**;
+    el usuario la lee/copia de ahí. **ELIMINADO** (antes lo hacía, se quitó a petición
+    del usuario): toda la maquinaria que, al activar, **reabría el menú, raspaba la URL
+    del PTY, la copiaba al portapapeles y abría el navegador automáticamente**
+    (`fireRemoteMenu`/`runRemoteMenuAttempt`/`maybeAfterRemoteActive`/
+    `maybeCaptureRemoteUrl` + sus campos `awaitRemoteActive`/`awaitRemoteUrl`/
+    `remoteMenuLoopActive`/`remoteMenuAttempts`/`remoteUrlCaptured`/`remote*Buf`/
+    `remote*Deadline`). Si en el futuro se quiere recuperar, está en el historial de
+    git (commit del botón de recargar es el anterior a este). `openInBrowser`/
+    `launchBrowser` **siguen existiendo** porque los usa el login por cuenta
+    (`openLoginForAccount`), no el remote control.
+  - **Navegador por cuenta** (lo usa ahora `openLoginForAccount`, no el remote): la
+    URL solo funciona en el navegador donde está
     logueada la misma cuenta de Claude que la sesión. `currentAccountEmail()` lee
     `~/.claude.json` -> `oauthAccount.emailAddress` (la cuenta activa, se actualiza
     al hacer `/login`). `openInBrowser` busca ese email en `settings.browserMap`
@@ -897,25 +900,11 @@ llama dos veces por sesión (xterm no lo soporta).
     ese modo, y mandar `\x1b[A` no movía el cursor (el Enter caía en "Continue" y no
     desconectaba). Cada pulsación se envía con un pequeño desfase para que el TUI
     las registre.
-  Los tres watchers (`maybeAfterRemoteActive`, `maybeCaptureRemoteUrl`,
-  `maybeConfirmModel`) cuelgan del handler `data` de **cada `Session`**. `remoteOn`
-  vive en la `Session` y se resetea en `restart()` y cuando claude sale;
+  `maybeConfirmModel` sigue colgando del handler `data` de **cada `Session`**
+  (los watchers de remote-control se eliminaron). `remoteOn` vive en la `Session`
+  y se resetea en `restart()`/`reloadSession()` y cuando claude sale;
   `plugin.updateRemoteBtn()` refleja el estado de la **sesión activa** en el botón
-  (se reconstruye con la cabecera). La regex de captura es
-  `https://claude\.ai/code/[\w-]+` (acepta cualquier id tras `/code/`, no solo
-  `session_…`, pero **sin `.` ni `/`**: el menú imprime las etiquetas de sus
-  opciones —"Disconnect this session", "Show QR code"— pegadas tras la URL al
-  quitar los ANSI, así que incluir `.` colaba `.Disconnectthissession…` en la URL
-  y la rompía; parar en `.` da la URL limpia). **Captura con reintentos** (`runRemoteMenuAttempt`,
-  bucle guardado por `remoteMenuLoopActive`/`remoteUrlCaptured`, hasta 6 intentos
-  cada ~3,5 s): el menú solo imprime la URL cuando la sesión ya está **conectada**,
-  cosa que puede tardar más que un único intento temprano —por eso antes hacía
-  falta pulsar Ctrl+R dos veces—; el bucle reabre el menú hasta que la URL aparece,
-  la captura, abre el navegador y cierra el menú con Esc para seguir conectado. Si
-  agota los intentos, avisa al usuario en vez de fallar en silencio. Hay logs
-  `[cch remote] …` (console) para diagnosticar el flujo toggle→menú→captura→abrir.
-  La URL capturada se abre **siempre en un navegador externo** (`openInBrowser` →
-  `launchBrowser`), elegido por cuenta/por defecto en ajustes.
+  (se reconstruye con la cabecera). Ya no hay captura de URL ni logs `[cch remote]`.
 - **Selector de modelo** (`selectModel`): envía `\x15/model <id>\r` (el Ctrl+U
   inicial limpia cualquier borrador para que el comando vaya en su propia línea;
   restaurable con Ctrl+Y). Argumentos válidos comprobados: `haiku`, `sonnet`,
