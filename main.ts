@@ -144,6 +144,7 @@ interface HarnessSettings {
   btnAutoSwitch: boolean;
   btnTokenDashboard: boolean;
   btnHistory: boolean;
+  btnReload: boolean;
   btnZoom: boolean;
   // Chrome-style "reopen closed tab" (Ctrl+Shift+Y), persisted across Obsidian
   // restarts. closedSessions = LIFO stack of reopenable tabs (closed with × or
@@ -190,6 +191,7 @@ const DEFAULT_SETTINGS: HarnessSettings = {
   btnAutoSwitch: true,
   btnTokenDashboard: true,
   btnHistory: true,
+  btnReload: true,
   btnZoom: true,
   closedSessions: [],
   openSessions: [],
@@ -1855,6 +1857,44 @@ class Session {
     this.plugin.persistOpenSessions();
   }
 
+  /** Reload THIS tab into the EXACT SAME conversation: kill claude and relaunch it
+   *  with `--resume <sessionId>` in a freshly-reset terminal at the panel's real
+   *  size. Unlike restart() (fresh conversation, new id), this keeps the same
+   *  sessionId + tab identity and recovers the current conversation. It's the same
+   *  clean render path as Ctrl+Shift+Y / the attachView auto-restore (term.reset →
+   *  startHost → fit on an empty buffer at real size), so it fixes the duplicated /
+   *  garbled TUI a detached auto-restore leaves after an Obsidian restart — without
+   *  losing the conversation. A blank tab (no .jsonl to resume) relaunches fresh
+   *  with --session-id instead. */
+  reloadSession() {
+    if (!this.term) return;
+    this.closeWikilinkPicker(); // don't leave the [[ popup floating over the reset
+    this.limitReached = false;
+    this.limitBuf = "";
+    this.awaitingInput = false;
+    if (this.awaitScanTimer != null) {
+      window.clearTimeout(this.awaitScanTimer);
+      this.awaitScanTimer = null;
+    }
+    this.remoteOn = false;
+    this.awaitRemoteActive = false;
+    this.remoteMenuLoopActive = false;
+    this.remoteUrlCaptured = false;
+    this.awaitRemoteUrl = false;
+    this.plugin.updateRemoteBtn();
+    // Same conversation → keep sessionId, title, titleRank, firstPromptDone. Resume
+    // it with --resume if there is a .jsonl on disk (real activity); a never-used
+    // blank tab has nothing to resume, so relaunch fresh with --session-id.
+    this.resume = this.hasActivity();
+    this.killChild();
+    this.term.reset();
+    this.startHost();
+    this.fitNow();
+    this.plugin.rebuildHeader();
+    // resume flag may have flipped → re-snapshot the persisted open-tab entry.
+    this.plugin.persistOpenSessions();
+  }
+
   killChild() {
     const child = this.child;
     if (!child) return;
@@ -2169,6 +2209,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       id: "restart-claude-code",
       name: "Restart Claude Code session",
       callback: () => this.activeSession()?.restart(),
+    });
+
+    this.addCommand({
+      id: "reload-claude-code",
+      name: "Reload Claude Code session (same conversation)",
+      callback: () => this.activeSession()?.reloadSession(),
     });
 
     this.addCommand({
@@ -4865,7 +4911,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
     // History (right side, just left of Restart): a ChatGPT-style drawer of
     // previously-closed sessions reopenable in a new tab (reuses the reopen
-    // stack; global). Right-to-left order: Restart · History · Settings · Zoom.
+    // stack; global). Right-to-left order: Restart · Reload · History · Settings · Zoom.
     if (s.btnHistory) {
       const histBtn = bar.createEl("button", { cls: "cch-btn" });
       setIcon(histBtn, "history");
@@ -4876,6 +4922,16 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         e.preventDefault();
         this.openHistoryMenu();
       };
+    }
+
+    // Reload the SAME conversation (kill + `claude --resume` in a clean terminal).
+    // Fixes the duplicated/garbled TUI left by an auto-restored tab after an
+    // Obsidian restart, without losing the conversation. Distinct from Restart,
+    // which starts a fresh conversation.
+    if (s.btnReload) {
+      iconBtn("refresh-cw", "Reload session (same conversation)", () =>
+        this.activeSession()?.reloadSession()
+      );
     }
 
     iconBtn("rotate-ccw", "Restart session", () => this.activeSession()?.restart());
@@ -6055,6 +6111,7 @@ class HarnessSettingTab extends PluginSettingTab {
         | "btnAutoSwitch"
         | "btnTokenDashboard"
         | "btnHistory"
+        | "btnReload"
         | "btnZoom"
     ) =>
       new Setting(containerEl).setName(name).addToggle((t) =>
@@ -6072,6 +6129,7 @@ class HarnessSettingTab extends PluginSettingTab {
     buttonToggle("Auto-switch toggle", "btnAutoSwitch");
     buttonToggle("Token Dashboard", "btnTokenDashboard");
     buttonToggle("Session history", "btnHistory");
+    buttonToggle("Reload session (same conversation)", "btnReload");
     buttonToggle("Zoom controls", "btnZoom");
 
     new Setting(containerEl)

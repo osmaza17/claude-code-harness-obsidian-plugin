@@ -58,9 +58,19 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   puedes recuperarla más tarde desde el historial o con `Ctrl+Shift+Y` (su
   conversación sigue en disco). La pestaña reinicia también su nombre para que la
   conversación nueva estrene el suyo.
+- **Recargar la misma sesión** (arreglar bugs visuales sin perder la conversación):
+  un botón en la cabecera (icono 🔄 *refresh*, justo a la izquierda del de reiniciar)
+  —o el comando "Reload Claude Code session (same conversation)"— **cierra y vuelve a
+  abrir la MISMA conversación**: mata `claude` y lo relanza con `claude --resume`
+  sobre la misma pestaña recién limpiada. A diferencia de reiniciar, **no** empieza de
+  cero: recupera la conversación tal cual (mismo id, mismo nombre de pestaña). Sirve
+  para arreglar la TUI **duplicada o entremezclada** que a veces deja una pestaña
+  auto-restaurada al reabrir Obsidian: al recargarla, Claude repinta limpio al tamaño
+  real del panel.
 - **Historial de conversaciones (estilo ChatGPT/Claude web)**: un botón en el
   lado **derecho** de la cabecera (icono 🕘 *history*, justo a la izquierda del de
-  recargar; de derecha a izquierda: recargar · historial · ajustes · zoom) —o el
+  recargar; de derecha a izquierda: reiniciar · recargar · historial · ajustes · zoom)
+  —o el
   comando "Open Claude session history"— abre un **panel lateral** que se **superpone
   sobre la conversación** (no la comprime), con espacio para leer bien los títulos.
   Lista las conversaciones que has cerrado, la más reciente arriba, con su título y

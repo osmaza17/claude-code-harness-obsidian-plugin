@@ -152,6 +152,20 @@ Reparto de responsabilidades:
   en modo `--print`; el arranque interactivo con `--session-id` es muy probable pero
   no se verificó turno a turno; y cuánto scrollback repinta la TUI al resumir es
   variable (el contexto sí se recupera).
+- **Recargar la misma sesión** (`Session.reloadSession()`; botón `refresh-cw`,
+  comando "Reload Claude Code session (same conversation)", toggle `btnReload`):
+  a diferencia de `restart()` (conversación NUEVA, id nuevo), **conserva el mismo
+  `sessionId` y la identidad de la pestaña** (título/`titleRank`/`firstPromptDone`)
+  y **recupera la conversación actual**: mata `claude`, hace `term.reset()`, pone
+  `this.resume = hasActivity()` y relanza vía `startHost` → `claude --resume
+  <sessionId>` (una pestaña en blanco, sin `.jsonl`, cae a `--session-id`, arranque
+  limpio). Es exactamente la **ruta de render limpia** de Ctrl+Shift+Y / la
+  auto-restauración de `attachView` (reset → startHost → fit sobre buffer vacío al
+  tamaño real), así que **arregla la TUI duplicada/entremezclada que deja una
+  pestaña auto-restaurada tras reiniciar Obsidian**, sin perder la conversación.
+  Limpia el mismo estado transitorio que `restart()` (límite/await/remote,
+  wikilink picker) y re-persiste `openSessions` (el flag `resume` pudo cambiar).
+  NO archiva en el historial (es la misma conversación, sigue abierta).
 - Comando "Restart Claude Code session" -> `activeSession().restart()`. Comando
   **"New Claude Code session"** y el botón **+** de la barra -> `newSession({skill})`.
   Comando **"Reopen closed Claude session"** (hotkey **`Mod+Shift+Y`**) + intercepción
@@ -463,13 +477,15 @@ llama dos veces por sesión (xterm no lo soporta).
      estado por `updateAutoSwitchBtn()`), **Token Dashboard** (icono `bar-chart-3`),
      zoom (**global**, aplica a todas), ajustes (`openSettings()`), **botón de
      historial** (icono `history`; `openHistoryMenu()` abre el drawer lateral —ver
-     "Sidebar de historial"), reiniciar (`activeSession().restart()`). Los tres
-     últimos, de derecha a izquierda: **reiniciar · historial · ajustes · zoom**.
+     "Sidebar de historial"), **recargar misma sesión** (icono `refresh-cw`;
+     `activeSession().reloadSession()` —ver "Recargar la misma sesión"), reiniciar
+     (`activeSession().restart()`). De derecha a izquierda: **reiniciar · recargar ·
+     historial · ajustes · zoom**.
   Los botones modelo/skill/remote reflejan la **sesión activa**
   (`updateModelBtn`/`updateSkillBtn`/`updateRemoteBtn` leen `activeSession()`); cuenta,
   auto-switch e historial son globales. Cada botón (salvo ajustes/reiniciar) se oculta
   desde ajustes (`btnSendNote/btnAccount/btnModel/btnSkill/btnRemote/btnAutoSwitch/
-  btnTokenDashboard/btnHistory/btnZoom`).
+  btnTokenDashboard/btnHistory/btnReload/btnZoom`).
   `rebuildHeader()` (alias `refreshHeader()` para la página de ajustes) borra
   `.cch-header` y la reconstruye **conservando el host montado** (es un hijo aparte
   del contenedor); `buildHeader` resetea las refs a null y hace `container.prepend(header)`
