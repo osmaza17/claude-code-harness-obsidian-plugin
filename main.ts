@@ -1,15 +1,10 @@
 import {
-  App,
   FileSystemAdapter,
   ItemView,
-  Menu,
   Notice,
   Plugin,
-  PluginSettingTab,
   prepareFuzzySearch,
-  setIcon,
   sortSearchResults,
-  Setting,
   TAbstractFile,
   TFile,
   WorkspaceLeaf,
@@ -19,37 +14,14 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import * as path from "path";
-import type { ClosedSessionInfo, HarnessSettings, AccountUsage } from "./types";
+import type { HarnessSettings } from "./types";
 import {
   VIEW_TYPE,
   DEFAULT_SETTINGS,
   MIN_FONT,
   MAX_FONT,
-  MAX_CLOSED_SESSIONS,
-  DEFAULT_USAGE_RE,
-  SWITCH_CEILING_PCT,
-  WEEKLY_CEILING_PCT,
-  AUTH_FAIL_RE,
   LIMIT_STOP_RE,
   looksLikePrompt,
-  EMAIL_RE,
-  USAGE_API_URL,
-  USAGE_PROBE_MODEL,
-  OAUTH_BETA,
-  ANTHROPIC_VERSION,
-  OAUTH_TOKEN_URL,
-  OAUTH_CLIENT_ID,
-  CLAUDE_LOGIN_URL,
-  REFRESH_SKEW_MS,
-  H_5H_UTIL,
-  H_5H_RESET,
-  H_7D_UTIL,
-  H_7D_RESET,
-  H_5H_STATUS,
-  USAGE_FRESH_MS,
-  ACCOUNT_CACHE_MS,
-  MODELS,
-  BROWSERS,
   ANSI_DARK,
   ANSI_LIGHT,
 } from "./constants";
@@ -1177,7 +1149,13 @@ export class Session {
     this.initialSent = true;
     // Recovered tab (--resume): the conversation already has its skill + startup
     // context in history. Resume clean — don't re-inject anything.
-    if (this.resume) return;
+    // The [cch initial] logs are PERMANENT diagnostics (like [cch keepalive]):
+    // when the skill doesn't show up, the DevTools console tells you whether the
+    // injection was skipped, armed, or sent — no guessing.
+    if (this.resume) {
+      console.log("[cch initial] tab", this.id, "resume tab — skipping startup injection");
+      return;
+    }
 
     const steps: string[] = [];
     // NOTE: we deliberately do NOT auto-send "/model <id>" here. The user wants a
@@ -1190,11 +1168,19 @@ export class Session {
       steps.push(line);
     }
     if (this.skill) steps.push("/" + this.skill);
-    if (!steps.length) return;
+    if (!steps.length) {
+      console.log("[cch initial] tab", this.id, "nothing to inject (no skill / startup commands)");
+      return;
+    }
+    console.log("[cch initial] tab", this.id, "armed:", steps.join(" · "), "(first step in 1800ms)");
 
     let i = 0;
     const submit = (text: string, then: () => void) => {
-      if (!this.child) return;
+      if (!this.child) {
+        console.log("[cch initial] tab", this.id, "ABORTED — pty gone before step:", text);
+        return;
+      }
+      console.log("[cch initial] tab", this.id, "sending:", text);
       this.pasteToPty(text);
       window.setTimeout(() => {
         this.send({ t: "input", d: "\r" });
@@ -1208,7 +1194,12 @@ export class Session {
         if (i < steps.length) window.setTimeout(next, 1800);
       });
     };
-    // First step after claude has settled at its prompt.
+    // First step after claude has settled at its prompt. Fixed delay ON PURPOSE:
+    // a prompt-detection gate (screen scan + quiet window) was tried in 2026-07 and
+    // reverted at the user's request — it made the injection feel much slower (its
+    // 20s fallback cap kicked in when the detection missed). The restart-race that
+    // motivated it is fixed by the superseded-host guard in startHost's message
+    // handler, so the fixed timer anchors to the NEW claude's first output again.
     window.setTimeout(next, 1800);
   }
 
@@ -1263,39 +1254,13 @@ export class Session {
     }
   }
 
-  /** Kill this claude process and start a fresh one in the same terminal. */
+  /** Restart = replace this tab with a BRAND-NEW session (fresh conversation).
+   *  Delegates to the plugin so the flow is EXACTLY the new-tab path — same
+   *  constructor, fresh terminal and the same startup injection (/skill). The old
+   *  in-place relaunch (kill + term.reset + startHost on the shared terminal)
+   *  raced the dying claude and the /skill paste could get swallowed. */
   restart() {
-    if (!this.term) return;
-    this.closeWikilinkPicker(); // don't leave the [[ popup floating over the reset
-    this.limitReached = false;
-    this.limitBuf = "";
-    this.awaitingInput = false;
-    if (this.awaitScanTimer != null) {
-      window.clearTimeout(this.awaitScanTimer);
-      this.awaitScanTimer = null;
-    }
-    this.remoteOn = false;
-    this.plugin.header.updateRemoteBtn();
-    // Archive the OLD conversation onto the reopen stack (if it had real content) so
-    // restarting doesn't lose it — it stays reopenable via Ctrl+Shift+Y / history, and
-    // its .jsonl survives on disk. Must run BEFORE we regenerate the sessionId below.
-    if (this.hasActivity()) this.plugin.history.rememberClosedSession(this);
-    // Restart = fresh conversation. New id (so --session-id won't collide with the
-    // previous one's .jsonl) and clear resume mode. Reset the tab identity too, so the
-    // fresh conversation earns its own name and the archived one keeps its title.
-    this.sessionId = newConversationId();
-    this.resume = false;
-    this.title = this.skill || "Claude";
-    this.titleRank = 0;
-    this.firstPromptDone = false;
-    this.firstPromptBuf = "";
-    this.killChild();
-    this.term.reset();
-    this.startHost();
-    this.fitNow();
-    this.plugin.header.rebuildHeader();
-    // sessionId changed → update the persisted open-tab snapshot to the new id.
-    this.plugin.history.persistOpenSessions();
+    this.plugin.restartSession(this);
   }
 
   /** Reload THIS tab into the EXACT SAME conversation: kill claude and relaunch it
@@ -1443,6 +1408,7 @@ export class Session {
       );
     }
     const full = parts.join(" ");
+    console.log("[cch spawn] tab", this.id, "→", full);
     const args = isWin ? ["/c", full] : ["-lc", full];
     // Spawn at the remembered (or current) size so the first fit is a no-op.
     const cols = this.lastCols || this.plugin.settings.cols || 100;
@@ -1451,6 +1417,15 @@ export class Session {
     this.lastRows = rows;
 
     child.on("message", (msg: any) => {
+      // Drop messages from a SUPERSEDED host (killed by restart/reload — killChild
+      // nulls this.child before startHost sets the new one). The dying claude's
+      // buffered output is dispatched on later event-loop ticks, i.e. AFTER
+      // startHost() reset initialSent, so without this guard it (a) leaks into the
+      // freshly reset terminal and (b) triggers maybeSendInitial anchored to the
+      // OLD claude — the /skill paste then fires ~1.8s later, before the NEW claude
+      // reaches its prompt, and its raw-mode init swallows it (skill never sent on
+      // restart). A stale "exit" would even mark the new session exited.
+      if (this.child !== child) return;
       if (!msg || !this.term) return;
       switch (msg.t) {
         case "ready":
@@ -1803,6 +1778,29 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.activeIndex = active ? this.sessions.indexOf(active) : this.activeIndex;
     this.header.rebuildHeader();
     this.history.persistOpenSessions();
+  }
+
+  /** Restart a tab: archive its conversation and REPLACE it with a brand-new
+   *  Session (same skill/model/args/pin and tab position, fresh conversation id).
+   *  Deliberately the EXACT same code path as opening a new tab, so the startup
+   *  injection (/skill) behaves identically — the previous in-place relaunch
+   *  (kill + term.reset + startHost on the shared terminal) raced the dying
+   *  claude and the /skill paste could get swallowed on some restarts. */
+  restartSession(sess: Session) {
+    const idx = this.sessions.indexOf(sess);
+    if (idx < 0) return;
+    // Same archival as closing the tab (reopenable via Ctrl+Shift+Y / history).
+    if (sess.hasActivity()) this.history.rememberClosedSession(sess);
+    const { skill, model, args, pinned } = sess;
+    const cols = sess.lastCols;
+    const rows = sess.lastRows;
+    if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
+    sess.dispose();
+    this.sessions.splice(idx, 1);
+    this.newSession({ skill, model, args, cols, rows, pinned });
+    // newSession appends + activates the fresh tab; put it back in the old slot
+    // (moveSession keeps it active, rebuilds the header and re-persists the tabs).
+    this.moveSession(this.sessions.length - 1, idx);
   }
 
   /** Close a tab: kill that instance's claude process and drop it. Keeps at

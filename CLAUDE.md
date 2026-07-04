@@ -178,14 +178,20 @@ Reparto de responsabilidades:
   "el .jsonl más reciente" no las desambigua—, así que al reabrir se lanza
   `claude --resume <uuid>` y se **recupera la conversación** exacta. Con `resume:true`,
   `maybeSendInitial` sale temprano (**no** reinyecta `/skill` ni startup commands: la
-  conversación ya los trae). `restart()` regenera el `sessionId` (conversación nueva,
-  evita choque de `--session-id` con el `.jsonl` ya existente) y, **antes de regenerarlo**,
-  **archiva la conversación vieja en el historial** (`plugin.rememberClosedSession(this)`,
-  solo si `hasActivity()`) para que NO se pierda: queda reabrible con **Ctrl+Shift+Y** y en
-  el **sidebar de historial**, con su `.jsonl` intacto en disco. Tras archivar, `restart`
-  **resetea la identidad del tab** (`title`=skill|"Claude", `titleRank=0`, `firstPromptDone`
-  =false, `firstPromptBuf`="") para que la conversación nueva estrene su propio nombre y la
-  archivada conserve su título en el historial. `startHost` no inyecta
+  conversación ya los trae). `Session.restart()` delega en
+  **`plugin.restartSession(sess)`**, que **REEMPLAZA la pestaña por una `Session`
+  completamente nueva** (misma skill/model/args/pin, misma posición de pestaña;
+  primero **archiva la conversación vieja en el historial** —
+  `history.rememberClosedSession`, solo si `hasActivity()` — luego `dispose()` de
+  la vieja, `newSession({...})` y `moveSession` para devolverla a su hueco).
+  CLAVE del porqué: es **exactamente la misma ruta de código que abrir una
+  pestaña nueva** (constructor + terminal fresco + `maybeSendInitial`), así que
+  la inyección de la skill funciona idéntica por construcción; el antiguo
+  restart in-place (kill + `term.reset()` + `startHost` sobre el terminal
+  compartido) tenía carreras con el claude moribundo y a veces el paste de
+  `/<skill>` se perdía (NO REGRESAR al in-place). La identidad del tab
+  (título/`titleRank`/id) es nueva por construcción y la archivada conserva su
+  título en el historial. `startHost` no inyecta
   el flag si el usuario ya puso `--session-id`/`--resume`/`-c` en "Extra arguments".
   VERIFICADO (en `-p`): `claude --session-id <uuid>` crea el `.jsonl` y
   `claude --resume <uuid>` recupera la conversación. CAVEAT (honesto): solo se probó
@@ -1035,6 +1041,28 @@ llama dos veces por sesión (xterm no lo soporta).
 - **IPC seguro**: todos los envíos al host pasan por el helper `send()`, que
   traga `ERR_IPC_CHANNEL_CLOSED` si el proceso ya salió (el `'exit'` que pone
   `this.child = null` es asíncrono).
+- **Skill no inyectada al reiniciar (fix: guarda del host supersedido)**.
+  Síntoma: tras `restart()`, el `/<skill>` de `maybeSendInitial` no llegaba a
+  Claude (en pestañas nuevas sí). Causa: el handler `child.on("message")` de
+  `startHost` procesaba mensajes del host VIEJO — la salida moribunda del claude
+  matado por `killChild()` (siempre hay `data` en vuelo: refresca su barra de
+  estado incluso inactivo) llegaba en ticks posteriores, ya con `initialSent`
+  reseteado, se pintaba en el terminal recién reseteado y disparaba
+  `maybeSendInitial` anclado al claude VIEJO: el paste caía antes de que el
+  claude nuevo llegara a su prompt y su init en raw-mode se lo tragaba. Un
+  `exit` rezagado podía además marcar la sesión nueva como `exited` (bloqueando
+  los resize). Fix: descartar mensajes si `this.child !== child` (el handler de
+  proceso `child.on("exit")` ya llevaba esa guarda). La guarda no bastó en la
+  práctica (el síntoma reapareció), así que el fix DEFINITIVO fue rehacer el
+  restart como **reemplazo de la pestaña por una Session nueva**
+  (`plugin.restartSession`, ver ciclo de vida): al usar la misma ruta que una
+  pestaña nueva, no comparte terminal ni host con el claude moribundo y la
+  inyección no puede perderse. La guarda se conserva (sigue siendo correcta:
+  protege `reloadSession`, que sí relanza in-place). NO REGRESAR (2 intentos
+  fallidos, en el historial de git): (a) el restart in-place con temporizador
+  fijo perdía la skill; (b) sustituir el temporizador por detección de prompt
+  (escaneo de pantalla + silencio + tope 20s) era mucho más lento cuando la
+  detección no casaba y el usuario lo hizo revertir.
 
 ## Estructura
 
