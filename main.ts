@@ -55,6 +55,9 @@ import {
 } from "./constants";
 import { nodeRequire, stripDiacritics, newConversationId } from "./utils";
 import { AccountManager } from "./accounts";
+import { HarnessSettingTab } from "./settings-tab";
+import { SessionHistory } from "./history";
+import { HeaderView } from "./header";
 
 export { VIEW_TYPE };
 
@@ -290,10 +293,10 @@ export class Session {
     if (clean === this.title && rank === this.titleRank) return;
     this.title = clean;
     this.titleRank = rank;
-    this.plugin.refreshTabTitles();
+    this.plugin.header.refreshTabTitles();
     // The persisted open-tab snapshot stores the title; keep it current so a
     // reopened tab shows its real name (debounced, so frequent OSC updates are cheap).
-    this.plugin.persistOpenSessions();
+    this.plugin.history.persistOpenSessions();
   }
 
   /** Fallback title: gather the first line you type and commit it on Enter,
@@ -344,7 +347,7 @@ export class Session {
   private setBusy(b: boolean) {
     if (this.busy === b) return;
     this.busy = b;
-    this.plugin.refreshTabStatus();
+    this.plugin.header.refreshTabStatus();
   }
 
   /** Watch this session's output for a "usage/token limit reached" message and,
@@ -359,7 +362,7 @@ export class Session {
     if (LIMIT_STOP_RE.test(clean)) {
       this.limitReached = true;
       this.limitBuf = "";
-      this.plugin.refreshTabStatus();
+      this.plugin.header.refreshTabStatus();
     }
   }
 
@@ -369,7 +372,7 @@ export class Session {
     this.limitBuf = "";
     if (!this.limitReached) return;
     this.limitReached = false;
-    this.plugin.refreshTabStatus();
+    this.plugin.header.refreshTabStatus();
   }
 
   /** Coalesce a screen scan after output/keystrokes. xterm parses writes
@@ -409,7 +412,7 @@ export class Session {
     const waiting = this.screenShowsPrompt();
     if (waiting !== this.awaitingInput) {
       this.awaitingInput = waiting;
-      this.plugin.refreshTabStatus();
+      this.plugin.header.refreshTabStatus();
     }
   }
 
@@ -417,7 +420,7 @@ export class Session {
   private clearAwaiting() {
     if (!this.awaitingInput) return;
     this.awaitingInput = false;
-    this.plugin.refreshTabStatus();
+    this.plugin.header.refreshTabStatus();
   }
 
   /** Re-apply the Obsidian theme to this terminal (called on css-change). */
@@ -845,7 +848,7 @@ export class Session {
       if (key === "y" && ev.shiftKey && !ev.altKey) {
         ev.preventDefault();
         ev.stopPropagation();
-        void this.plugin.reopenClosedSession();
+        void this.plugin.history.reopenClosedSession();
         return false;
       }
       if (key === "c" && (ev.shiftKey || term.hasSelection())) {
@@ -1082,7 +1085,7 @@ export class Session {
     this.model = id;
     this.plugin.settings.model = id;
     void this.plugin.saveSettings();
-    this.plugin.updateModelBtn();
+    this.plugin.header.updateModelBtn();
     this.send({ t: "input", d: `\x15/model ${id}\r` });
     // Arm auto-confirm in case Claude asks "Switch model?" (mid-conversation).
     this.awaitModelConfirm = true;
@@ -1113,7 +1116,7 @@ export class Session {
     this.skill = name;
     this.plugin.settings.skill = name;
     void this.plugin.saveSettings();
-    this.plugin.updateSkillBtn();
+    this.plugin.header.updateSkillBtn();
     const label = name || "none";
     if (name && this.child) {
       this.send({ t: "input", d: `\x15/${name}\r` });
@@ -1147,7 +1150,7 @@ export class Session {
     if (!this.remoteOn) {
       this.send({ t: "input", d: "\x15/remote-control\r" });
       this.remoteOn = true;
-      this.plugin.updateRemoteBtn();
+      this.plugin.header.updateRemoteBtn();
       new Notice("Remote control connecting… (URL shown in the Claude panel)");
     } else {
       this.send({ t: "input", d: "\x15/remote-control\r" });
@@ -1161,7 +1164,7 @@ export class Session {
       window.setTimeout(() => this.send({ t: "input", d: up }), 820);
       window.setTimeout(() => this.send({ t: "input", d: "\r" }), 940);
       this.remoteOn = false;
-      this.plugin.updateRemoteBtn();
+      this.plugin.header.updateRemoteBtn();
       new Notice("Remote control off");
     }
     this.term?.focus();
@@ -1272,11 +1275,11 @@ export class Session {
       this.awaitScanTimer = null;
     }
     this.remoteOn = false;
-    this.plugin.updateRemoteBtn();
+    this.plugin.header.updateRemoteBtn();
     // Archive the OLD conversation onto the reopen stack (if it had real content) so
     // restarting doesn't lose it — it stays reopenable via Ctrl+Shift+Y / history, and
     // its .jsonl survives on disk. Must run BEFORE we regenerate the sessionId below.
-    if (this.hasActivity()) this.plugin.rememberClosedSession(this);
+    if (this.hasActivity()) this.plugin.history.rememberClosedSession(this);
     // Restart = fresh conversation. New id (so --session-id won't collide with the
     // previous one's .jsonl) and clear resume mode. Reset the tab identity too, so the
     // fresh conversation earns its own name and the archived one keeps its title.
@@ -1290,9 +1293,9 @@ export class Session {
     this.term.reset();
     this.startHost();
     this.fitNow();
-    this.plugin.rebuildHeader();
+    this.plugin.header.rebuildHeader();
     // sessionId changed → update the persisted open-tab snapshot to the new id.
-    this.plugin.persistOpenSessions();
+    this.plugin.history.persistOpenSessions();
   }
 
   /** Reload THIS tab into the EXACT SAME conversation: kill claude and relaunch it
@@ -1315,7 +1318,7 @@ export class Session {
       this.awaitScanTimer = null;
     }
     this.remoteOn = false;
-    this.plugin.updateRemoteBtn();
+    this.plugin.header.updateRemoteBtn();
     // Same conversation → keep sessionId, title, titleRank, firstPromptDone. Resume
     // it with --resume if there is a .jsonl on disk (real activity); a never-used
     // blank tab has nothing to resume, so relaunch fresh with --session-id.
@@ -1324,9 +1327,9 @@ export class Session {
     this.term.reset();
     this.startHost();
     this.fitNow();
-    this.plugin.rebuildHeader();
+    this.plugin.header.rebuildHeader();
     // resume flag may have flipped → re-snapshot the persisted open-tab entry.
-    this.plugin.persistOpenSessions();
+    this.plugin.history.persistOpenSessions();
   }
 
   killChild() {
@@ -1489,8 +1492,8 @@ export class Session {
             "\r\n\x1b[2m[claude exited — use the tab's Restart, or close the tab]\x1b[0m"
           );
           this.remoteOn = false;
-          this.plugin.updateRemoteBtn();
-          this.plugin.rebuildHeader(); // mark the tab as exited
+          this.plugin.header.updateRemoteBtn();
+          this.plugin.header.rebuildHeader(); // mark the tab as exited
           break;
         case "error":
           this.term.writeln("\r\n\x1b[2m[pty-host error] " + msg.message + "\x1b[0m");
@@ -1517,28 +1520,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // the panel; the rest keep running and buffering output in xterm. They live on
   // the plugin (not the view) so they survive the panel being closed/reopened.
   sessions: Session[] = []; // (read by AccountManager)
-  private activeIndex = 0;
-  // Chrome-style "reopen closed tab" (Ctrl+Shift+Y): the LIFO stack of reopenable
-  // tabs now lives in settings.closedSessions (persisted), so it survives an
-  // Obsidian restart. reopenClosedSession() pops one and recreates the tab with
-  // --resume <sessionId> to recover its conversation. The currently-open tabs are
-  // snapshotted (debounced) into settings.openSessions so they're reopenable too.
-  private persistOpenTimer: number | null = null;
-  // Previous run's open tabs, awaiting restoration on the FIRST panel open (see
-  // restorePendingOpenSessions). Non-null until consumed; while non-null and no
-  // sessions exist yet, flushOpenSessions won't clobber the saved snapshot.
-  private pendingOpen: ClosedSessionInfo[] | null = null;
-  private viewRoot: HTMLElement | null = null; // the panel contentEl while open
+  activeIndex = 0; // (read/written by SessionHistory)
+  // Tab persistence + reopen stack + history sidebar (see history.ts).
+  history = new SessionHistory(this);
+  viewRoot: HTMLElement | null = null; // (read by SessionHistory) // the panel contentEl while open
 
   private fontLink: HTMLLinkElement | null = null;
-  // Header button refs (single header, reflecting the ACTIVE session + global state).
-  private zoomLabel: HTMLElement | null = null;
-  private modelBtn: HTMLElement | null = null;
-  private skillBtn: HTMLElement | null = null;
-  accountBtn: HTMLElement | null = null; // (relabelled live by AccountManager)
-  private autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
-  private remoteBtn: HTMLElement | null = null;
-  private historyBtn: HTMLElement | null = null;
+  // Header UI (tabs strip + toolbar) — see header.ts.
+  header = new HeaderView(this);
   private tempImages: string[] = []; // temp PNGs from image paste, cleaned on unload
   // Bundled Token Dashboard server process (null when not running).
   tokenDashboardChild: any = null;
@@ -1562,7 +1551,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // then again after the fit, garbling the footer. Restoring on panel-open renders
     // cleanly (same as the Ctrl+Shift+Y reopen path).
     const saved = [...(this.settings.openSessions || [])].filter((s) => s.sessionId);
-    this.pendingOpen = saved.length ? saved : null;
+    this.history.pendingOpen = saved.length ? saved : null;
     this.injectFont();
 
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeCodeView(leaf, this));
@@ -1601,7 +1590,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       name: "Reopen closed Claude session",
       // Ctrl+Shift+T is taken by Obsidian (reopen closed note tab), so use Y.
       hotkeys: [{ modifiers: ["Mod", "Shift"], key: "y" }],
-      callback: () => void this.reopenClosedSession(),
+      callback: () => void this.history.reopenClosedSession(),
     });
 
     this.addCommand({
@@ -1618,7 +1607,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       name: "Open Claude session history",
       callback: async () => {
         await this.activateView();
-        this.openHistoryMenu();
+        this.history.openHistoryMenu();
       },
     });
 
@@ -1689,7 +1678,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // Start one blank background session now ONLY if there's nothing to restore.
     // If there is, we wait for the panel (restorePendingOpenSessions in attachView)
     // so restored tabs render at the right size without a garbled footer.
-    if (!this.pendingOpen) this.ensureAtLeastOneSession();
+    if (!this.history.pendingOpen) this.ensureAtLeastOneSession();
 
     // Token keep-alive + live usage (see refreshAccount()). Every 3 min we CHECK
     // every account and refresh its OAuth token if it's expired/about to expire,
@@ -1709,14 +1698,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   onunload() {
     this.accounts.closeAccountMenu();
-    this.closeHistorySidebar();
+    this.history.closeHistorySidebar();
     // Best-effort final snapshot of the open tabs so Ctrl+Shift+Y can recover them
     // next launch (the debounced snapshot already covers a hard shutdown).
-    if (this.persistOpenTimer !== null) {
-      window.clearTimeout(this.persistOpenTimer);
-      this.persistOpenTimer = null;
+    if (this.history.persistOpenTimer !== null) {
+      window.clearTimeout(this.history.persistOpenTimer);
+      this.history.persistOpenTimer = null;
     }
-    this.flushOpenSessions();
+    this.history.flushOpenSessions();
     for (const s of this.sessions) s.dispose();
     this.sessions = [];
     this.viewRoot = null;
@@ -1762,10 +1751,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.sessions.push(sess);
     this.activeIndex = this.sessions.length - 1;
     if (this.viewRoot) {
-      this.rebuildHeader();
+      this.header.rebuildHeader();
       sess.attachInto(this.viewRoot);
     }
-    this.persistOpenSessions();
+    this.history.persistOpenSessions();
     return sess;
   }
 
@@ -1773,10 +1762,10 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   setActive(i: number) {
     if (i < 0 || i >= this.sessions.length) return;
     if (i === this.activeIndex && this.activeSession()?.host?.isConnected) return;
-    this.closeHistorySidebar(); // stale overlay if the header/host is rebuilt
+    this.history.closeHistorySidebar(); // stale overlay if the header/host is rebuilt
     if (this.viewRoot) this.activeSession()?.detachHost();
     this.activeIndex = i;
-    this.rebuildHeader();
+    this.header.rebuildHeader();
     if (this.viewRoot) this.activeSession()?.attachInto(this.viewRoot);
   }
 
@@ -1797,8 +1786,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       this.moveSession(idx, target); // rebuilds header + persists
       return;
     }
-    this.rebuildHeader();
-    this.persistOpenSessions();
+    this.header.rebuildHeader();
+    this.history.persistOpenSessions();
   }
 
   /** Reorder tabs. Moves the session at `from` so it ends up at index `to` in
@@ -1812,144 +1801,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const [moved] = this.sessions.splice(from, 1);
     this.sessions.splice(to, 0, moved);
     this.activeIndex = active ? this.sessions.indexOf(active) : this.activeIndex;
-    this.rebuildHeader();
-    this.persistOpenSessions();
-  }
-
-  /** Interactive Chrome-style tab drag. The dragged tab follows the pointer
-   *  (translateX) while the other tabs slide to open a slot for it; on release
-   *  the session order is committed. A press with no movement is a plain click
-   *  that just activates the tab. Uses pointer events (HTML5 DnD can't animate
-   *  the siblings smoothly). */
-  private beginTabDrag(e: PointerEvent, tabsEl: HTMLElement, from: number) {
-    if (e.button !== 0) return; // left button only
-    const t0 = e.target as HTMLElement;
-    if (t0.closest(".cch-tab-close") || t0.closest("input.cch-tab-rename")) return;
-
-    const tabEls = Array.from(tabsEl.querySelectorAll<HTMLElement>(".cch-tab"));
-    const dragged = tabEls[from];
-    if (!dragged) return;
-    const rects = tabEls.map((t) => t.getBoundingClientRect());
-    const startX = e.clientX;
-    const draggedRect = rects[from];
-    const gap = 4; // matches .cch-tabs gap in styles.css
-    const slot = draggedRect.width + gap; // space the dragged tab leaves behind
-    // Chrome-style pin regions: pinned tabs occupy the leftmost slots, and a
-    // drag can't cross the boundary (a pinned tab stays in the pinned group,
-    // an unpinned one stays after it).
-    const draggedPinned = this.sessions[from]?.pinned ?? false;
-    const pinnedCount = this.sessions.filter((s) => s.pinned).length;
-    let started = false;
-    let to = from;
-
-    const onMove = (ev: PointerEvent) => {
-      const dx = ev.clientX - startX;
-      if (!started) {
-        if (Math.abs(dx) < 4) return; // movement threshold → still a click
-        started = true;
-        dragged.addClass("cch-tab-dragging");
-        dragged.style.position = "relative";
-        dragged.style.zIndex = "5";
-        dragged.style.transition = "none";
-      }
-      ev.preventDefault();
-      dragged.style.transform = `translateX(${dx}px)`;
-      // The dragged tab's current visual centre.
-      const center = draggedRect.left + draggedRect.width / 2 + dx;
-      // New index = how many OTHER tabs should end up before the dragged one. A
-      // neighbour reacts as soon as the dragged centre crosses TRIGGER — a small
-      // fraction `frac` into that neighbour from the edge facing the drag — so a
-      // smaller `frac` makes neighbours slide out of the way sooner.
-      const frac = 0.25;
-      let idx = 0;
-      for (let j = 0; j < tabEls.length; j++) {
-        if (j === from) continue;
-        const r = rects[j];
-        if (j < from) {
-          // Left neighbour: stays "before" until the drag pushes past its right.
-          if (center >= r.left + (1 - frac) * r.width) idx++;
-        } else {
-          // Right neighbour: becomes "before" once the drag passes its left.
-          if (center > r.left + frac * r.width) idx++;
-        }
-      }
-      // Clamp to the dragged tab's pin region so the groups never interleave.
-      if (draggedPinned) idx = Math.min(idx, pinnedCount - 1);
-      else idx = Math.max(idx, pinnedCount);
-      to = idx;
-      // Slide the siblings to open the slot where the dragged tab will land.
-      for (let j = 0; j < tabEls.length; j++) {
-        if (j === from) continue;
-        let shift = 0;
-        if (to > from && j > from && j <= to) shift = -slot;
-        else if (to < from && j >= to && j < from) shift = slot;
-        tabEls[j].style.transition = "transform 0.15s ease";
-        tabEls[j].style.transform = shift ? `translateX(${shift}px)` : "";
-      }
-    };
-
-    // Always clear the inline drag styles before committing: if the index didn't
-    // change (e.g. dragged a corner tab past the edge) moveSession is a no-op and
-    // won't rebuild, so without this the tab would stay where the cursor left it
-    // instead of snapping back into its slot.
-    const clearDragStyles = () => {
-      for (const t of tabEls) {
-        t.style.transform = "";
-        t.style.transition = "";
-        t.style.zIndex = "";
-        t.style.position = "";
-      }
-      dragged.removeClass("cch-tab-dragging");
-    };
-    const unlisten = () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onCancel);
-    };
-
-    const onUp = () => {
-      unlisten();
-      if (started) {
-        clearDragStyles();
-        if (to !== from) this.moveSession(from, to); // rebuilds the header
-      } else {
-        this.setActive(from); // it was a click, not a drag
-      }
-    };
-
-    // Aborted drag (pen/touch cancel, pointer capture lost): revert without
-    // committing — previously this left the listeners and transforms hanging.
-    const onCancel = () => {
-      unlisten();
-      if (started) clearDragStyles();
-    };
-
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onCancel);
-  }
-
-  /** Push a session's conversation metadata onto the reopen stack (Ctrl+Shift+Y /
-   *  history) so it can be recovered later — its .jsonl survives on disk, so a
-   *  reopen can --resume it. Capped at MAX_CLOSED_SESSIONS and persisted. Used both
-   *  when closing a tab (×) and when restarting a conversation (the old one is
-   *  archived before the sessionId is regenerated). No-op without a sessionId. */
-  rememberClosedSession(sess: Session) {
-    if (!sess.sessionId) return;
-    this.settings.closedSessions.push({
-      sessionId: sess.sessionId,
-      skill: sess.skill,
-      model: sess.model,
-      args: sess.args,
-      title: sess.title,
-      cols: sess.lastCols,
-      rows: sess.lastRows,
-      closedAt: Date.now(),
-      pinned: sess.pinned || undefined,
-    });
-    while (this.settings.closedSessions.length > MAX_CLOSED_SESSIONS)
-      this.settings.closedSessions.shift();
-    void this.saveSettings();
+    this.header.rebuildHeader();
+    this.history.persistOpenSessions();
   }
 
   /** Close a tab: kill that instance's claude process and drop it. Keeps at
@@ -1961,11 +1814,11 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // survives on disk (~/.claude/projects/.../<sessionId>.jsonl), so reopening
     // can --resume it. Blank tabs are skipped (same guard as restart()): they
     // have no .jsonl, so --resume on reopen would fail on a dead conversation.
-    if (sess.hasActivity()) this.rememberClosedSession(sess);
+    if (sess.hasActivity()) this.history.rememberClosedSession(sess);
     if (this.viewRoot && idx === this.activeIndex) sess.detachHost();
     sess.dispose();
     this.sessions.splice(idx, 1);
-    this.persistOpenSessions();
+    this.history.persistOpenSessions();
     if (!this.sessions.length) {
       this.activeIndex = 0;
       this.newSession(); // always keep one
@@ -1974,7 +1827,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     if (this.activeIndex > idx) this.activeIndex--;
     else if (this.activeIndex >= this.sessions.length)
       this.activeIndex = this.sessions.length - 1;
-    this.rebuildHeader();
+    this.header.rebuildHeader();
     if (this.viewRoot) {
       const a = this.activeSession();
       if (a && !a.host?.isConnected) a.attachInto(this.viewRoot);
@@ -1982,156 +1835,16 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     }
   }
 
-  /** Chrome-style Ctrl+Shift+Y: reopen the most recently closed tab and recover
-   *  its conversation via `claude --resume <sessionId>`. The stack is persisted
-   *  in settings, so this works across Obsidian restarts. (Tabs left open at quit
-   *  are auto-restored by restoreOpenSessions, so they don't land here.) */
-  async reopenClosedSession() {
-    const info = this.settings.closedSessions.pop();
-    if (!info) {
-      new Notice("No closed Claude sessions to reopen");
-      return;
-    }
-    void this.saveSettings(); // persist the shorter stack so it isn't re-popped
-    await this.reopenInfo(info);
-  }
-
-  /** Reopen a SPECIFIC closed session (used by the history menu, which can pick
-   *  any entry — not just the most recent). Removes it from the reopen stack (by
-   *  sessionId) so it doesn't linger in history while it's open again, then
-   *  recreates the tab with --resume. */
-  async reopenSession(info: ClosedSessionInfo) {
-    const i = this.settings.closedSessions.findIndex(
-      (c) => c.sessionId === info.sessionId
-    );
-    if (i >= 0) this.settings.closedSessions.splice(i, 1);
-    void this.saveSettings();
-    await this.reopenInfo(info);
-  }
-
-  /** Shared body of reopenClosedSession/reopenSession: open the panel and spawn a
-   *  new tab that resumes the stored conversation. */
-  private async reopenInfo(info: ClosedSessionInfo) {
-    await this.activateView(); // open the panel if it isn't already
-    this.newSession({
-      skill: info.skill,
-      model: info.model,
-      args: info.args,
-      title: info.title,
-      sessionId: info.sessionId,
-      resume: true,
-      cols: info.cols,
-      rows: info.rows,
-      pinned: info.pinned,
-    });
-    new Notice("Reopened session: " + info.title);
-  }
-
-  /** Remove a session from the history stack without reopening it (the × in the
-   *  history menu). Its .jsonl on disk is left untouched. */
-  deleteClosedSession(info: ClosedSessionInfo) {
-    const i = this.settings.closedSessions.findIndex(
-      (c) => c.sessionId === info.sessionId
-    );
-    if (i >= 0) {
-      this.settings.closedSessions.splice(i, 1);
-      void this.saveSettings();
-    }
-  }
-
-  /** Snapshot the currently-open tabs into settings.openSessions (debounced), so
-   *  that on the NEXT launch restoreOpenSessions() can re-open them automatically
-   *  even though Obsidian quit without closing them. Only tabs with real activity
-   *  are kept, to avoid restoring pristine blank tabs. */
-  persistOpenSessions() {
-    if (this.persistOpenTimer !== null) window.clearTimeout(this.persistOpenTimer);
-    this.persistOpenTimer = window.setTimeout(() => {
-      this.persistOpenTimer = null;
-      this.flushOpenSessions();
-    }, 1500);
-  }
-
-  /** Write the open-tab snapshot immediately (used by the debounce and onunload). */
-  private flushOpenSessions() {
-    // If restoration is still pending (the panel was never opened this run), keep
-    // the saved snapshot rather than clobbering it with the live session list —
-    // otherwise closing Obsidian without opening the panel would lose the tabs.
-    // This holds even if some session exists (rare: created without the panel
-    // ever mounting), since flushing then would drop the unrestored tabs.
-    if (this.pendingOpen && this.pendingOpen.length) return;
-    // Pinned tabs are ALWAYS snapshotted (that's the point of the pin); unpinned
-    // ones only with real activity, so blank tabs aren't restored. A pinned tab
-    // with no conversation yet is marked `blank` so the restore starts it with
-    // --session-id instead of --resume (there is no .jsonl to resume).
-    this.settings.openSessions = this.sessions
-      .filter((s) => s.sessionId && (s.hasActivity() || s.pinned))
-      .map((s) => ({
-        sessionId: s.sessionId,
-        skill: s.skill,
-        model: s.model,
-        args: s.args,
-        title: s.title,
-        cols: s.lastCols,
-        rows: s.lastRows,
-        closedAt: Date.now(),
-        pinned: s.pinned || undefined,
-        blank: s.hasActivity() ? undefined : true,
-      }));
-    void this.saveSettings();
-  }
-
-  /** First panel open: RE-OPEN the tabs that were still open when Obsidian last
-   *  quit, each resuming its conversation (claude --resume <sessionId>), so the user
-   *  gets their workspace back automatically. Consumes pendingOpen (runs once).
-   *
-   *  Deferred to here (not onload) on purpose: newSession mounts each tab into the
-   *  now-sized panel, so every terminal is term.open()'d and fit at the REAL size
-   *  BEFORE Claude --resume renders. Doing it detached at onload made Claude paint
-   *  its TUI at the spawn size and then repaint after the fit, garbling the footer.
-   *
-   *  newSession leaves the LAST-created tab active + mounted; we detach it and set
-   *  the first tab active so attachView mounts a single host. Each tab was briefly
-   *  mounted during its newSession iteration (empty buffer → clean open+fit), so
-   *  even the non-active tabs render correctly when later switched to.
-   *
-   *  Tabs closed with × are unaffected: they still go to the history stack. We do
-   *  NOT clear settings.openSessions — the restored (live) tabs re-persist themselves
-   *  via persistOpenSessions (flushOpenSessions replaces, never appends → idempotent). */
-  private restorePendingOpenSessions() {
-    const saved = this.pendingOpen;
-    this.pendingOpen = null; // consume: restore at most once per run
-    if (!saved || !saved.length) return;
-    for (const info of saved) {
-      this.newSession({
-        skill: info.skill,
-        model: info.model,
-        args: info.args,
-        title: info.title,
-        sessionId: info.sessionId,
-        // A blank pinned tab has no conversation → fresh start (--session-id
-        // with the same id); anything else resumes its .jsonl.
-        resume: !info.blank,
-        cols: info.cols,
-        rows: info.rows,
-        pinned: info.pinned,
-      });
-    }
-    // Detach the last-created (currently active + mounted) tab and make the first
-    // active; attachView then mounts exactly that one.
-    if (this.viewRoot) this.activeSession()?.detachHost();
-    this.activeIndex = 0;
-  }
-
   /** Mount the panel: restore the previous run's tabs (first open only), build the
    *  header (tabs + toolbar) and show the active session. Called from the view's
    *  onOpen. */
   attachView(root: HTMLElement) {
     this.viewRoot = root;
-    this.restorePendingOpenSessions(); // re-create last session's tabs (once)
+    this.history.restorePendingOpenSessions(); // re-create last session's tabs (once)
     this.ensureAtLeastOneSession(); // blank fallback if there were none
     // rebuildHeader (remove-then-build), not buildHeader: the restore loop may have
     // left a header behind, and rebuildHeader is idempotent (no-op remove on first open).
-    this.rebuildHeader();
+    this.header.rebuildHeader();
     const a = this.activeSession();
     if (a && !a.host?.isConnected) a.attachInto(root);
     else a?.scheduleFit();
@@ -2139,7 +1852,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Unmount the panel WITHOUT killing any session. Called from the view's onClose. */
   detachView() {
-    this.closeHistorySidebar(); // it lives inside viewRoot
+    this.history.closeHistorySidebar(); // it lives inside viewRoot
     this.activeSession()?.detachHost();
     this.viewRoot = null;
   }
@@ -2183,7 +1896,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.settings.fontSize = clamped;
     void this.saveSettings();
     for (const s of this.sessions) s.applyFontSize(clamped);
-    if (this.zoomLabel) this.zoomLabel.setText(clamped + "px");
+    if (this.header.zoomLabel) this.header.zoomLabel.setText(clamped + "px");
   }
 
   zoomBy(delta: number) {
@@ -2197,246 +1910,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       this.settings.rows = rows;
       void this.saveSettings();
     }
-  }
-
-  // --- Header buttons reflecting the active session -----------------------
-
-  updateModelBtn() {
-    if (!this.modelBtn) return;
-    const id = this.activeSession()?.model ?? this.settings.model;
-    this.modelBtn.setText(MODELS.find((m) => m.id === id)?.label ?? "Model");
-  }
-
-  updateSkillBtn() {
-    if (!this.skillBtn) return;
-    const skill = this.activeSession()?.skill ?? this.settings.skill;
-    this.skillBtn.title = "Skill: " + (skill || "none");
-  }
-
-  /** Reflect the active session's remoteOn on the header button (green when ON). */
-  updateRemoteBtn() {
-    if (!this.remoteBtn) return;
-    const on = this.activeSession()?.remoteOn ?? false;
-    this.remoteBtn.toggleClass("cch-active", on);
-    this.remoteBtn.title = on
-      ? "Remote control ON — click to disconnect"
-      : "Activate remote control (/remote-control)";
-  }
-
-  /** Reflect the auto-switch state on its header button (green = ON), with a
-   *  tooltip summarising the active mode + percentage. */
-  updateAutoSwitchBtn() {
-    if (!this.autoSwitchBtn) return;
-    const on = this.settings.autoSwitch;
-    this.autoSwitchBtn.toggleClass("cch-active", on);
-    const mode = this.settings.autoSwitchMode || "threshold";
-    const detail =
-      mode === "rotate"
-        ? "rotate every +" + (this.settings.autoSwitchDelta || 10) + "%"
-        : "at " + (this.settings.autoSwitchThreshold || 90) + "%";
-    this.autoSwitchBtn.setAttr("aria-label", "Auto-switch accounts");
-    this.autoSwitchBtn.title = on
-      ? "Auto-switch ON (" + detail + ") — click to configure"
-      : "Auto-switch OFF — click to enable";
-  }
-
-  // --- History sidebar (reopen any past session, ChatGPT-style drawer) ------
-  // A drawer that slides in from the LEFT, OVERLAYING the conversation (it does
-  // not compress it) so the full session titles are readable. Mounted inside the
-  // panel (viewRoot) below the header, dismissed by its × / Escape / backdrop.
-  private historyOverlay: HTMLElement | null = null;
-  private historyOverlayCleanup: (() => void) | null = null;
-
-  closeHistorySidebar() {
-    this.historyOverlayCleanup?.();
-    this.historyOverlay?.remove();
-    this.historyOverlay = null;
-    this.historyOverlayCleanup = null;
-  }
-
-  /** Compact "3h ago" / "yesterday" label for a close timestamp. */
-  private relativeTime(ms: number): string {
-    const diff = Date.now() - ms;
-    if (diff < 0) return "just now";
-    const min = Math.floor(diff / 60000);
-    if (min < 1) return "just now";
-    if (min < 60) return `${min}m ago`;
-    const hr = Math.floor(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    const day = Math.floor(hr / 24);
-    if (day === 1) return "yesterday";
-    if (day < 30) return `${day}d ago`;
-    const mo = Math.floor(day / 30);
-    if (mo < 12) return `${mo}mo ago`;
-    return `${Math.floor(mo / 12)}y ago`;
-  }
-
-  /** Toggle the conversation-history drawer: a scrollable list of previously
-   *  closed sessions (most recent first), reusing the persisted closedSessions
-   *  stack that also feeds Ctrl+Shift+Y. Clicking an entry reopens it in a NEW
-   *  tab (via --resume). The drawer overlays the conversation from the left. */
-  openHistoryMenu() {
-    if (this.historyOverlay) {
-      this.closeHistorySidebar();
-      return;
-    }
-    const root = this.viewRoot;
-    if (!root) return; // panel not mounted (the command opens it first)
-
-    // Overlay covers the area BELOW the header (so the toolbar stays usable),
-    // dimming the conversation; the drawer sits on its left edge.
-    const headerH = root.querySelector<HTMLElement>(".cch-header")?.offsetHeight ?? 0;
-    const overlay = root.createDiv({ cls: "cch-history-overlay" });
-    overlay.style.top = headerH + "px";
-    this.historyOverlay = overlay;
-
-    const drawer = overlay.createDiv({ cls: "cch-history-sidebar" });
-
-    // Title bar with a close ×.
-    const bar = drawer.createDiv({ cls: "cch-hist-bar" });
-    bar.createDiv({ cls: "cch-hist-title", text: "Session history" });
-    const close = bar.createDiv({ cls: "cch-hist-close" });
-    setIcon(close, "x");
-    close.setAttr("aria-label", "Close history");
-    close.onclick = () => this.closeHistorySidebar();
-
-    const body = drawer.createDiv({ cls: "cch-hist-list" });
-    const render = () => {
-      body.empty();
-      // Newest first: closedSessions is a stack pushed at the end.
-      const list = [...this.settings.closedSessions].reverse();
-      if (!list.length) {
-        body.createDiv({ cls: "cch-hist-empty", text: "No closed sessions yet" });
-        return;
-      }
-      for (const info of list) {
-        const row = body.createDiv({ cls: "cch-hist-row" });
-        const main = row.createDiv({ cls: "cch-hist-main" });
-        main.createDiv({
-          cls: "cch-hist-name",
-          text: info.title || "Untitled session",
-        });
-        const sub = main.createDiv({ cls: "cch-hist-sub" });
-        const bits: string[] = [];
-        if (info.closedAt) bits.push(this.relativeTime(info.closedAt));
-        if (info.skill) bits.push("/" + info.skill);
-        else if (info.model) bits.push(info.model);
-        sub.setText(bits.join(" · "));
-        main.setAttr("aria-label", "Reopen this conversation in a new tab");
-        main.onclick = () => {
-          this.closeHistorySidebar();
-          void this.reopenSession(info);
-        };
-
-        // × removes it from history without reopening (the .jsonl stays on disk).
-        const del = row.createDiv({ cls: "cch-hist-del" });
-        setIcon(del, "x");
-        del.setAttr("aria-label", "Remove from history");
-        del.onclick = (e) => {
-          e.stopPropagation();
-          this.deleteClosedSession(info);
-          render(); // rebuild the list in place
-        };
-      }
-    };
-    render();
-
-    // Click on the dim backdrop (outside the drawer) or Escape closes it.
-    overlay.onmousedown = (e) => {
-      if (e.target === overlay) this.closeHistorySidebar();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        this.closeHistorySidebar();
-      }
-    };
-    setTimeout(() => document.addEventListener("keydown", onKey, true), 0);
-    this.historyOverlayCleanup = () => {
-      document.removeEventListener("keydown", onKey, true);
-    };
-  }
-
-  /** Menu to toggle auto-switch and pick its mode + percentage from the header. */
-  private openAutoSwitchMenu(anchor: HTMLElement) {
-    const menu = new Menu();
-    const s = this.settings;
-
-    menu.addItem((item) =>
-      item
-        .setTitle(s.autoSwitch ? "Auto-switch is ON" : "Auto-switch is OFF")
-        .setIcon(s.autoSwitch ? "toggle-right" : "toggle-left")
-        .setChecked(s.autoSwitch)
-        .onClick(async () => {
-          s.autoSwitch = !s.autoSwitch;
-          this.accounts.resetRotationBaseline();
-          await this.saveSettings();
-          this.updateAutoSwitchBtn();
-          if (s.autoSwitch) {
-            // Refresh + probe every account now so the first destination pick uses
-            // fresh, alive tokens instead of waiting for the next 3-min tick.
-            void this.accounts.refreshUsage({ refreshTokens: true });
-            if (this.accounts.listSavedAccounts().length < 2) {
-              new Notice(
-                "Auto-switch needs at least 2 saved accounts — log in with /login to save more."
-              );
-            }
-          }
-        })
-    );
-
-    menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Mode").setDisabled(true));
-    const modes: { id: string; label: string }[] = [
-      { id: "threshold", label: "Threshold (fixed %)" },
-      { id: "rotate", label: "Rotate by increment" },
-    ];
-    for (const m of modes) {
-      menu.addItem((item) =>
-        item
-          .setTitle(m.label)
-          .setChecked((s.autoSwitchMode || "threshold") === m.id)
-          .onClick(async () => {
-            s.autoSwitchMode = m.id;
-            this.accounts.resetRotationBaseline();
-            await this.saveSettings();
-            this.updateAutoSwitchBtn();
-          })
-      );
-    }
-
-    menu.addSeparator();
-    const rotate = (s.autoSwitchMode || "threshold") === "rotate";
-    menu.addItem((item) =>
-      item.setTitle(rotate ? "Increment per rotation" : "Switch at usage %").setDisabled(true)
-    );
-    const presets = rotate ? [5, 10, 15, 20, 25] : [70, 80, 85, 90, 95];
-    const current = rotate ? s.autoSwitchDelta || 10 : s.autoSwitchThreshold || 90;
-    for (const p of presets) {
-      menu.addItem((item) =>
-        item
-          .setTitle((rotate ? "+" : "") + p + "%")
-          .setChecked(current === p)
-          .onClick(async () => {
-            if (rotate) s.autoSwitchDelta = p;
-            else s.autoSwitchThreshold = p;
-            this.accounts.resetRotationBaseline();
-            await this.saveSettings();
-            this.updateAutoSwitchBtn();
-          })
-      );
-    }
-
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle("More options…")
-        .setIcon("settings")
-        .onClick(() => this.openSettings())
-    );
-
-    const r = anchor.getBoundingClientRect();
-    menu.showAtPosition({ x: r.left, y: r.bottom });
   }
 
   // --- Skills -------------------------------------------------------------
@@ -2607,403 +2080,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap";
     document.head.appendChild(link);
     this.fontLink = link;
-  }
-
-  // --- Header (tabs + toolbar) -------------------------------------------
-
-  /** Build the panel header: a row of session tabs (each with a close ×, plus a
-   *  + button to spawn a new instance) over the toolbar (@ · model · account ·
-   *  skill · remote · auto-switch · zoom · settings · restart). The toolbar acts
-   *  on the ACTIVE session. Rebuilt whenever the active session or the set of
-   *  sessions changes; the terminal host is appended after it. */
-  private buildHeader(container: HTMLElement) {
-    // Drop stale references from a previous build (a hidden button stays null).
-    this.modelBtn = null;
-    this.skillBtn = null;
-    this.accountBtn = null;
-    this.remoteBtn = null;
-    this.autoSwitchBtn = null;
-    this.historyBtn = null;
-    this.zoomLabel = null;
-
-    const header = container.createDiv({ cls: "cch-header" });
-    const s = this.settings;
-
-    // --- Tab strip: one tab per session + a "new session" button. ---
-    const tabs = header.createDiv({ cls: "cch-tabs" });
-    this.sessions.forEach((sess, i) => {
-      const st = this.tabState(sess);
-      const tab = tabs.createDiv({
-        cls:
-          "cch-tab " +
-          st.cls +
-          (i === this.activeIndex ? " cch-tab-active" : "") +
-          (sess.pinned ? " cch-tab-pinned" : ""),
-      });
-      const dot = tab.createSpan({ cls: "cch-tab-dot " + st.cls });
-      dot.setAttr("aria-label", st.label);
-      tab.setAttr("title", this.tabTooltip(sess, st.label));
-      const label = tab.createSpan({
-        cls: "cch-tab-label" + (sess.exited ? " cch-tab-exited" : ""),
-        text: sess.title || "Claude",
-      });
-      // Double-click the label to rename the tab manually (overrides auto-title).
-      label.ondblclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.startTabRename(tab, label, sess);
-      };
-      const close = tab.createSpan({ cls: "cch-tab-close" });
-      setIcon(close, "x");
-      close.setAttr("aria-label", "Close session");
-      close.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.closeSession(sess);
-      };
-      // Right-click: pin/unpin + close (a pinned tab hides its ×, like Chrome,
-      // so this menu is also how it gets closed).
-      tab.oncontextmenu = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const menu = new Menu();
-        menu.addItem((item) =>
-          item
-            .setTitle(sess.pinned ? "Unpin tab" : "Pin tab")
-            .setIcon("pin")
-            .onClick(() => this.setPinned(sess, !sess.pinned))
-        );
-        menu.addItem((item) =>
-          item
-            .setTitle("Close tab")
-            .setIcon("x")
-            .onClick(() => this.closeSession(sess))
-        );
-        menu.showAtMouseEvent(e);
-      };
-      // Pointer-based interactive reorder (Chrome-style: siblings slide out of
-      // the way as you drag). A plain click (no drag) activates the tab.
-      tab.addEventListener("pointerdown", (e) => this.beginTabDrag(e, tabs, i));
-    });
-    const add = tabs.createEl("button", { cls: "cch-btn cch-tab-new" });
-    setIcon(add, "plus");
-    add.setAttr("aria-label", "New Claude session");
-    add.title = "New Claude session";
-    add.onclick = (e) => {
-      e.preventDefault();
-      this.openNewSessionMenu(add);
-    };
-
-    // --- Toolbar: buttons that act on the active session / global state. ---
-    const bar = header.createDiv({ cls: "cch-toolbar" });
-    const iconBtn = (icon: string, title: string, onClick: () => void) => {
-      const b = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(b, icon);
-      b.setAttr("aria-label", title);
-      b.title = title;
-      b.onclick = (e) => {
-        e.preventDefault();
-        onClick();
-      };
-    };
-
-    // Left corner: mention the active note with @.
-    if (s.btnSendNote) {
-      iconBtn("at-sign", "Send active note to Claude", () =>
-        void this.sendActiveNote()
-      );
-    }
-
-    bar.createDiv({ cls: "cch-spacer" });
-
-    // Model selector (active session's model).
-    if (s.btnModel) {
-      const id = this.activeSession()?.model ?? s.model;
-      const modelBtn = bar.createEl("button", {
-        cls: "cch-btn cch-model",
-        text: MODELS.find((m) => m.id === id)?.label ?? "Model",
-      });
-      modelBtn.title = "Select model";
-      this.modelBtn = modelBtn;
-      modelBtn.onclick = (e) => {
-        e.preventDefault();
-        const menu = new Menu();
-        const a = this.activeSession();
-        for (const m of MODELS) {
-          menu.addItem((item) =>
-            item
-              .setTitle(m.label)
-              .setChecked((a?.model ?? s.model) === m.id)
-              .onClick(() => a?.selectModel(m.id, m.label))
-          );
-        }
-        const r = modelBtn.getBoundingClientRect();
-        menu.showAtPosition({ x: r.left, y: r.bottom });
-      };
-    }
-
-    // Account: save the current Claude account / switch to a saved one (global).
-    if (s.btnAccount) {
-      const accountBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(accountBtn, "user-round");
-      this.accountBtn = accountBtn;
-      const curEmail = this.accounts.barAccountEmail || this.accounts.currentAccountEmail();
-      accountBtn.setAttr("aria-label", "Claude account");
-      accountBtn.title = "Account: " + (curEmail || "unknown");
-      accountBtn.onclick = (e) => {
-        e.preventDefault();
-        this.accounts.openAccountMenu(accountBtn);
-      };
-    }
-
-    // Skill selector (active session's skill).
-    if (s.btnSkill) {
-      const skillBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(skillBtn, "sparkles");
-      const cur = this.activeSession()?.skill ?? s.skill;
-      skillBtn.setAttr("aria-label", "Skill");
-      skillBtn.title = "Skill: " + (cur || "none");
-      this.skillBtn = skillBtn;
-      skillBtn.onclick = (e) => {
-        e.preventDefault();
-        const menu = new Menu();
-        const a = this.activeSession();
-        const skills = this.listSkills();
-        if (!skills.length) {
-          menu.addItem((item) =>
-            item.setTitle("No skills in .claude/skills").setDisabled(true)
-          );
-        } else {
-          for (const sk of skills) {
-            menu.addItem((item) =>
-              item
-                .setTitle(sk)
-                .setChecked((a?.skill ?? s.skill) === sk)
-                .onClick(() => a?.selectSkill(sk))
-            );
-          }
-        }
-        menu.addSeparator();
-        menu.addItem((item) =>
-          item
-            .setTitle("Open skills folder")
-            .setIcon("folder-open")
-            .onClick(() => this.openSkillsFolder())
-        );
-        const r = skillBtn.getBoundingClientRect();
-        menu.showAtPosition({ x: r.left, y: r.bottom });
-      };
-    }
-
-    // Remote control toggle (active session; green while ON).
-    if (s.btnRemote) {
-      const remoteBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(remoteBtn, "smartphone");
-      this.remoteBtn = remoteBtn;
-      remoteBtn.onclick = (e) => {
-        e.preventDefault();
-        this.activeSession()?.toggleRemoteControl();
-      };
-      this.updateRemoteBtn();
-    }
-
-    // Auto-switch toggle + mode/percentage picker (global; green while ON).
-    if (s.btnAutoSwitch) {
-      const asBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(asBtn, "repeat");
-      this.autoSwitchBtn = asBtn;
-      asBtn.onclick = (e) => {
-        e.preventDefault();
-        this.openAutoSwitchMenu(asBtn);
-      };
-      this.updateAutoSwitchBtn();
-    }
-
-    // Token Dashboard: launch the bundled local usage dashboard and open it in
-    // the default browser (global; equivalent to the old "Lanzar Token Dashboard.bat").
-    if (s.btnTokenDashboard) {
-      const tdBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(tdBtn, "bar-chart-3");
-      tdBtn.setAttr("aria-label", "Token Dashboard");
-      tdBtn.title = "Open Token Dashboard (token usage)";
-      tdBtn.onclick = (e) => {
-        e.preventDefault();
-        void this.launchTokenDashboard();
-      };
-    }
-
-    if (s.btnZoom) {
-      iconBtn("minus", "Zoom out (Ctrl -)", () => this.zoomBy(-1));
-      const zl = bar.createEl("button", {
-        cls: "cch-btn cch-zoom",
-        text: (this.settings.fontSize || 14) + "px",
-      });
-      zl.title = "Reset zoom (Ctrl 0)";
-      zl.onclick = () => this.setFontSize(14);
-      this.zoomLabel = zl;
-      iconBtn("plus", "Zoom in (Ctrl +)", () => this.zoomBy(1));
-    }
-
-    iconBtn("settings", "Plugin settings", () => this.openSettings());
-
-    // History (right side, just left of Restart): a ChatGPT-style drawer of
-    // previously-closed sessions reopenable in a new tab (reuses the reopen
-    // stack; global). Right-to-left order: Restart · Reload · History · Settings · Zoom.
-    if (s.btnHistory) {
-      const histBtn = bar.createEl("button", { cls: "cch-btn" });
-      setIcon(histBtn, "history");
-      histBtn.setAttr("aria-label", "Session history");
-      histBtn.title = "Session history (reopen a past conversation)";
-      this.historyBtn = histBtn;
-      histBtn.onclick = (e) => {
-        e.preventDefault();
-        this.openHistoryMenu();
-      };
-    }
-
-    // Reload the SAME conversation (kill + `claude --resume` in a clean terminal).
-    // Fixes the duplicated/garbled TUI left by an auto-restored tab after an
-    // Obsidian restart, without losing the conversation. Distinct from Restart,
-    // which starts a fresh conversation.
-    if (s.btnReload) {
-      iconBtn("refresh-cw", "Reload session (same conversation)", () =>
-        this.activeSession()?.reloadSession()
-      );
-    }
-
-    iconBtn("rotate-ccw", "Restart session", () => this.activeSession()?.restart());
-
-    // Keep the header as the first child so it survives a rebuild (rebuildHeader
-    // removes the old one and calls this while the terminal host is already in).
-    container.prepend(header);
-  }
-
-  /** Menu shown by the + tab button: spawn a new session with a chosen skill. */
-  private openNewSessionMenu(anchor: HTMLElement) {
-    const menu = new Menu();
-    menu.addItem((item) =>
-      item
-        .setTitle("New session (default skill)")
-        .setIcon("plus")
-        .onClick(() => this.newSession())
-    );
-    menu.addItem((item) =>
-      item.setTitle("New session (no skill)").onClick(() => this.newSession({ skill: "" }))
-    );
-    const skills = this.listSkills();
-    if (skills.length) {
-      menu.addSeparator();
-      for (const sk of skills) {
-        menu.addItem((item) =>
-          item.setTitle("New: /" + sk).onClick(() => this.newSession({ skill: sk }))
-        );
-      }
-    }
-    const r = anchor.getBoundingClientRect();
-    menu.showAtPosition({ x: r.left, y: r.bottom });
-  }
-
-  /** Rebuild the header in the open panel (tabs + toolbar), preserving the
-   *  mounted terminal host. Also called from the settings tab as refreshHeader. */
-  rebuildHeader() {
-    if (!this.viewRoot) return;
-    this.viewRoot.querySelector(".cch-header")?.remove();
-    this.buildHeader(this.viewRoot);
-  }
-
-  refreshHeader() {
-    this.rebuildHeader();
-  }
-
-  /** Update just the tab labels in place (cheap; avoids a full header rebuild on
-   *  every auto-title change). Walks the TABS (in session order) and finds each
-   *  one's label — a flat label list would shift indexes while one tab's label is
-   *  replaced by the inline-rename input, mislabelling the tabs after it. */
-  refreshTabTitles() {
-    if (!this.viewRoot) return;
-    const tabs = this.viewRoot.findAll(".cch-tabs .cch-tab");
-    this.sessions.forEach((sess, i) =>
-      tabs[i]
-        ?.querySelector<HTMLElement>(".cch-tab-label")
-        ?.setText(sess.title || "Claude")
-    );
-  }
-
-  /** Update the per-tab heartbeat dot in place (busy / idle / exited) without a
-   *  full header rebuild. Dots are in session order, so index aligns. */
-  /** Shared tab state: drives both the heartbeat dot and the tab border colour.
-   *  Priority: exited (grey) > limit reached (red) > awaiting user (orange) >
-   *  busy (yellow) > idle (green). Awaiting outranks busy so the prompt-draw chunk
-   *  (which also marks the session busy) shows orange immediately. */
-  private tabState(sess: Session): { cls: string; label: string } {
-    if (sess.exited) return { cls: "is-exited", label: "Exited" };
-    if (sess.limitReached) return { cls: "is-limit", label: "Usage limit reached" };
-    if (sess.awaitingInput)
-      return { cls: "is-await", label: "Waiting for your answer" };
-    if (sess.busy) return { cls: "is-busy", label: "Working…" };
-    return { cls: "is-idle", label: "Idle" };
-  }
-
-  /** Tab tooltip: a pinned tab hides its label, so hover must show its NAME
-   *  (plus the state); a normal tab just shows the state. */
-  private tabTooltip(sess: Session, stateLabel: string): string {
-    return sess.pinned
-      ? `📌 ${sess.title || "Claude"} — ${stateLabel}`
-      : stateLabel;
-  }
-
-  refreshTabStatus() {
-    if (!this.viewRoot) return;
-    const states = ["is-busy", "is-idle", "is-exited", "is-limit", "is-await"];
-    const tabEls = this.viewRoot.findAll(".cch-tabs .cch-tab");
-    const dots = this.viewRoot.findAll(".cch-tabs .cch-tab-dot");
-    this.sessions.forEach((sess, i) => {
-      const st = this.tabState(sess);
-      const dot = dots[i];
-      if (dot) {
-        dot.removeClasses(states);
-        dot.addClass(st.cls);
-        dot.setAttr("aria-label", st.label);
-      }
-      const tab = tabEls[i];
-      if (tab) {
-        tab.removeClasses(states);
-        tab.addClass(st.cls);
-        tab.setAttr("title", this.tabTooltip(sess, st.label));
-      }
-    });
-  }
-
-  /** Inline-edit a tab title (double-click). Commits on Enter/blur as a "manual"
-   *  title (which outranks the auto sources), cancels on Escape. */
-  private startTabRename(tab: HTMLElement, label: HTMLElement, sess: Session) {
-    if (tab.querySelector("input.cch-tab-rename")) return; // already editing
-    tab.setAttr("draggable", "false"); // don't fight text selection while editing
-    const input = document.createElement("input");
-    input.type = "text";
-    input.addClass("cch-tab-rename");
-    input.value = sess.title || "";
-    label.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const commit = (save: boolean) => {
-      if (done) return;
-      done = true;
-      if (save && input.value.trim()) sess.setTitleFrom(input.value, "manual");
-      this.rebuildHeader();
-    };
-    input.onkeydown = (e) => {
-      e.stopPropagation();
-      if (e.key === "Enter") {
-        e.preventDefault();
-        commit(true);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        commit(false);
-      }
-    };
-    input.onblur = () => commit(true);
   }
 
   // --- Node / paths -------------------------------------------------------
@@ -3516,592 +2592,5 @@ class ClaudeCodeView extends ItemView {
     this.resizeObserver = null;
     // Detach the terminal but leave the claude processes running on the plugin.
     this.plugin.detachView();
-  }
-}
-
-class HarnessSettingTab extends PluginSettingTab {
-  plugin: ClaudeCodeHarnessPlugin;
-
-  constructor(app: App, plugin: ClaudeCodeHarnessPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-
-    new Setting(containerEl)
-      .setName("Command")
-      .setDesc(
-        "Command run inside the terminal when the session starts. Defaults to 'claude'."
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("claude")
-          .setValue(this.plugin.settings.command)
-          .onChange(async (value) => {
-            this.plugin.settings.command = value.trim() || "claude";
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Extra arguments")
-      .setDesc(
-        'Appended to the claude command. E.g. --model opus --append-system-prompt "Be concise".'
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder('--append-system-prompt "..."')
-          .setValue(this.plugin.settings.args)
-          .onChange(async (value) => {
-            this.plugin.settings.args = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Startup commands")
-      .setDesc(
-        "Slash commands run at session start, one per line, BEFORE the skill. E.g. /remote-control."
-      )
-      .addTextArea((ta) => {
-        ta.setValue(this.plugin.settings.startupCommands).onChange(
-          async (value) => {
-            this.plugin.settings.startupCommands = value;
-            await this.plugin.saveSettings();
-          }
-        );
-        ta.inputEl.rows = 2;
-        ta.inputEl.style.width = "100%";
-      });
-
-    new Setting(containerEl)
-      .setName("Skill")
-      .setDesc(
-        "Default Claude Code skill invoked as /<name> when a new session starts (after the startup commands). Skills live in the vault's .claude/skills — add your own there, or pick one per-session from the panel header."
-      )
-      .addDropdown((d) => {
-        d.addOption("", "(none)");
-        for (const s of this.plugin.listSkills()) {
-          d.addOption(s, s);
-        }
-        d.setValue(this.plugin.settings.skill || "");
-        d.onChange(async (value) => {
-          this.plugin.settings.skill = value;
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("Notify on bell")
-      .setDesc(
-        "Show an Obsidian notice when the terminal rings the bell — Claude tends to ring it when a long task finishes."
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.notifyOnBell).onChange(async (v) => {
-          this.plugin.settings.notifyOnBell = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Clickable note links")
-      .setDesc(
-        "Turn coloured note references in Claude's output (and [[wikilinks]]) into clickable links that open the matching .md note. Hover to underline, click to open (Ctrl/Cmd-click for a new tab)."
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.linkifyNotes).onChange(async (v) => {
-          this.plugin.settings.linkifyNotes = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("[[ note suggester")
-      .setDesc(
-        "Type [[ in the terminal to open Obsidian's note picker at the cursor — the same suggestions you'd get typing [[ in a note. Arrows to move, Enter/Tab/click to pick, Escape to cancel. Picking a note replaces [[query with an @<path> reference (Claude Code's file-reference syntax)."
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.wikilinkPicker).onChange(async (v) => {
-          this.plugin.settings.wikilinkPicker = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Claude accounts")
-      .setDesc(
-        "Accounts are saved automatically when you log in with /login. Switch between them here or from the header — it hot-swaps ~/.claude/.credentials.json with no restart, so every running session keeps going and uses the new account on its next message. Saved under ~/.claude/cch-accounts (never committed)."
-      )
-      .setHeading();
-
-    new Setting(containerEl)
-      .setName("Save current account")
-      .setDesc("Snapshot the account currently logged in (read from ~/.claude.json).")
-      .addButton((b) =>
-        b.setButtonText("Save current account").onClick(() => {
-          this.plugin.accounts.saveCurrentAccount();
-          this.display();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Auto-switch on usage")
-      .setDesc(
-        "Switch saved accounts automatically based on the 5h usage % (read from the status line). It hot-swaps the credentials with no restart, so the running turn isn't interrupted — the new account applies to the next message. Needs at least 2 saved accounts."
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.autoSwitch).onChange(async (v) => {
-          this.plugin.settings.autoSwitch = v;
-          this.plugin.accounts.resetRotationBaseline();
-          await this.plugin.saveSettings();
-          this.plugin.updateAutoSwitchBtn();
-          if (v) {
-            void this.plugin.accounts.refreshUsage({ refreshTokens: true });
-            if (this.plugin.accounts.listSavedAccounts().length < 2) {
-              new Notice(
-                "Auto-switch needs at least 2 saved accounts — log in with /login to save more."
-              );
-            }
-          }
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Auto-switch mode")
-      .setDesc(
-        "Threshold: switch when usage reaches a fixed %. Rotate by increment: switch every time usage rises by a set amount, distributing spend across all accounts."
-      )
-      .addDropdown((d) => {
-        d.addOption("threshold", "Threshold (fixed %)");
-        d.addOption("rotate", "Rotate by increment");
-        d.setValue(this.plugin.settings.autoSwitchMode || "threshold");
-        d.onChange(async (v) => {
-          this.plugin.settings.autoSwitchMode = v;
-          this.plugin.accounts.resetRotationBaseline();
-          await this.plugin.saveSettings();
-          this.plugin.updateAutoSwitchBtn();
-          this.display(); // swap which slider is shown
-        });
-      });
-
-    if ((this.plugin.settings.autoSwitchMode || "threshold") === "rotate") {
-      const deltaSetting = new Setting(containerEl)
-        .setName("Switch every +% — " + (this.plugin.settings.autoSwitchDelta || 10) + "%")
-        .setDesc(
-          "Increment in 5h usage since the account became active that triggers a rotation to the next account."
-        )
-        .addSlider((s) =>
-          s
-            .setLimits(1, 50, 1)
-            .setValue(this.plugin.settings.autoSwitchDelta || 10)
-            .setDynamicTooltip()
-            .onChange(async (v) => {
-              this.plugin.settings.autoSwitchDelta = v;
-              await this.plugin.saveSettings();
-              this.plugin.updateAutoSwitchBtn();
-              deltaSetting.setName("Switch every +% — " + v + "%");
-            })
-        );
-    } else {
-      const thresholdSetting = new Setting(containerEl)
-        .setName(
-          "Switch at usage % — " + (this.plugin.settings.autoSwitchThreshold || 90) + "%"
-        )
-        .setDesc("Usage % of the 5h limit at which to switch to the next account.")
-        .addSlider((s) =>
-          s
-            .setLimits(50, 99, 1)
-            .setValue(this.plugin.settings.autoSwitchThreshold || 90)
-            .setDynamicTooltip()
-            .onChange(async (v) => {
-              this.plugin.settings.autoSwitchThreshold = v;
-              await this.plugin.saveSettings();
-              this.plugin.updateAutoSwitchBtn();
-              thresholdSetting.setName("Switch at usage % — " + v + "%");
-            })
-        );
-    }
-
-    new Setting(containerEl)
-      .setName("Live usage (API)")
-      .setDesc(
-        "Read the real 5h/7d usage % from the Anthropic API (rate-limit headers) instead of only scraping the status bar, and probe every saved account so their % shows in the account menu. Makes tiny per-account calls with each account's saved token. Off = scraping only."
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.usageProbe).onChange(async (v) => {
-          this.plugin.settings.usageProbe = v;
-          await this.plugin.saveSettings();
-          if (v) void this.plugin.accounts.refreshUsage({});
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Usage probe model (advanced)")
-      .setDesc(
-        "Model id for the minimal usage probe call. Leave empty for the default: " +
-          USAGE_PROBE_MODEL
-      )
-      .addText((t) =>
-        t
-          .setPlaceholder(USAGE_PROBE_MODEL)
-          .setValue(this.plugin.settings.usageProbeModel)
-          .onChange(async (v) => {
-            this.plugin.settings.usageProbeModel = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Usage % pattern (advanced)")
-      .setDesc(
-        "Regex to read the 5h usage % from the status line, used as a fallback when Live usage is off or the API call fails (needs a capture group). Leave empty for the default: " +
-          DEFAULT_USAGE_RE
-      )
-      .addText((t) =>
-        t
-          .setPlaceholder(DEFAULT_USAGE_RE)
-          .setValue(this.plugin.settings.autoSwitchUsageRegex)
-          .onChange(async (v) => {
-            this.plugin.settings.autoSwitchUsageRegex = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    const browserOptions: Record<string, string> = {
-      chrome: "Chrome",
-      firefox: "Firefox",
-      edge: "Edge",
-      brave: "Brave",
-      opera: "Opera",
-      operagx: "Opera GX",
-      zen: "Zen",
-      helium: "Helium",
-      vivaldi: "Vivaldi",
-      waterfox: "Waterfox",
-      floorp: "Floorp",
-      mullvad: "Mullvad Browser",
-    };
-
-    new Setting(containerEl)
-      .setName("Default browser")
-      .setDesc(
-        "Browser used to open a remote/login URL when an account has no browser of its own set below (or its email can't be read). The remote session URL only works in the browser where that Claude account is logged in."
-      )
-      .addDropdown((d) => {
-        for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
-        d.addOption("default", "System default");
-        d.setValue(this.plugin.settings.defaultBrowser || "chrome");
-        d.onChange(async (v) => {
-          this.plugin.settings.defaultBrowser = v;
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("Per-account settings")
-      .setDesc(
-        "Everything for each saved account in one place: usage, whether auto-switch may use it, which browser its remote/login URL opens in, and the time windows when it's forbidden."
-      )
-      .setHeading();
-
-    for (const a of this.plugin.accounts.listSavedAccounts()) {
-      const name = this.plugin.settings.usageProbe
-        ? a.email + " — " + this.plugin.accounts.usageLabel(a.email)
-        : a.email;
-      const eligible = this.plugin.accounts.isAccountEligible(a.email);
-      const blockedNow = this.plugin.accounts.isTimeBlocked(a.email);
-      let desc = eligible
-        ? "Auto-switch: allowed"
-        : "Auto-switch: blocked (e.g. a friend's account — its tokens won't be spent automatically)";
-      if (blockedNow)
-        desc += ` · ⛔ prohibida ahora por horario (${this.plugin.accounts.scheduleBlockLabel(a.email)})`;
-      new Setting(containerEl)
-        .setName(name)
-        .setDesc(desc)
-        .addExtraButton((b) =>
-          b
-            .setIcon(eligible ? "repeat" : "ban")
-            .setTooltip(
-              eligible
-                ? "Eligible for auto-switch — click to block"
-                : "Blocked from auto-switch — click to allow"
-            )
-            .onClick(async () => {
-              await this.plugin.accounts.toggleAccountEligible(a.email);
-              this.display();
-            })
-        )
-        .addButton((b) =>
-          b.setButtonText("Switch").onClick(() => this.plugin.accounts.switchToAccount(a.email))
-        )
-        .addExtraButton((b) =>
-          b
-            .setIcon("trash")
-            .setTooltip("Delete saved account")
-            .onClick(() => {
-              this.plugin.accounts.deleteSavedAccount(a.email);
-              this.display();
-            })
-        );
-
-      // Browser this account's remote/login URL opens in (its SSO/cookie lives there).
-      const bmap = this.plugin.accounts.browserFor(a.email);
-      const browserRow = new Setting(containerEl)
-        .setClass("cch-account-sub")
-        .setName("Browser")
-        .setDesc("Where this account's remote/login URL opens. Default = the browser above.");
-      browserRow.addDropdown((d) => {
-        d.addOption("", "Use default");
-        for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
-        d.addOption("custom", "Custom path…");
-        d.setValue(bmap?.browser || "");
-        d.onChange(async (v) => {
-          if (!v) {
-            const i = this.plugin.settings.browserMap.findIndex(
-              (m) => m.email.trim().toLowerCase() === a.email.trim().toLowerCase()
-            );
-            if (i >= 0) this.plugin.settings.browserMap.splice(i, 1);
-          } else {
-            this.plugin.accounts.browserFor(a.email, true)!.browser = v;
-          }
-          await this.plugin.saveSettings();
-          this.display(); // show/hide the custom-path field
-        });
-      });
-      if (bmap?.browser === "custom") {
-        browserRow.addText((t) =>
-          t
-            .setPlaceholder("C:\\path\\to\\browser.exe")
-            .setValue(bmap.path)
-            .onChange(async (v) => {
-              this.plugin.accounts.browserFor(a.email, true)!.path = v.trim();
-              await this.plugin.saveSettings();
-            })
-        );
-      }
-
-      // Forbidden time windows for this account (auto-switch never lands here while
-      // inside one; if it's the active account, the plugin jumps away or stops).
-      const sched = this.plugin.accounts.scheduleFor(a.email);
-      const dayLabels = ["L", "M", "X", "J", "V", "S", "D"]; // Mon..Sun (display)
-      const dayNums = [1, 2, 3, 4, 5, 6, 0]; // JS getDay for each label
-      const ranges = sched?.ranges || [];
-
-      // Header for the windows block + the "Add range" button (so the button isn't
-      // floating alone in an empty row, and the rows below have a clear label).
-      const schedHead = new Setting(containerEl)
-        .setClass("cch-account-sub")
-        .setClass("cch-schedule-head")
-        .setName("Forbidden time windows")
-        .setDesc(
-          ranges.length
-            ? "Auto-switch won't use this account during these windows; if it's active when one starts, it switches away (or stops Claude if there's nowhere to go)."
-            : "None. Add a window below to forbid this account at certain hours/days."
-        );
-      schedHead.addButton((b) =>
-        b.setButtonText("Add range").onClick(async () => {
-          const e = this.plugin.accounts.scheduleFor(a.email, true)!;
-          e.ranges.push({ start: "23:00", end: "07:00", days: [1, 2, 3, 4, 5] });
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-
-      ranges.forEach((r, ri) => {
-        const row = new Setting(containerEl).setClass("cch-schedule-row");
-        row.infoEl.remove(); // compact: no name/desc column
-        row.controlEl.createSpan({ text: "from", cls: "cch-schedule-lead" });
-        row.addText((t) =>
-          t
-            .setPlaceholder("23:00")
-            .setValue(r.start)
-            .onChange(async (v) => {
-              r.start = v.trim();
-              await this.plugin.saveSettings();
-            })
-        );
-        row.controlEl.createSpan({ text: "to", cls: "cch-schedule-dash" });
-        row.addText((t) =>
-          t
-            .setPlaceholder("07:00")
-            .setValue(r.end)
-            .onChange(async (v) => {
-              r.end = v.trim();
-              await this.plugin.saveSettings();
-            })
-        );
-        const days = row.controlEl.createDiv({ cls: "cch-day-group" });
-        dayLabels.forEach((dl, di) => {
-          const dn = dayNums[di];
-          const on = (r.days || []).includes(dn);
-          const chip = days.createEl("button", {
-            text: dl,
-            cls: "cch-day-toggle",
-            attr: { type: "button", "aria-label": dl, title: dl },
-          });
-          chip.toggleClass("cch-day-on", on);
-          chip.onclick = async () => {
-            r.days = r.days || [];
-            const i = r.days.indexOf(dn);
-            if (i >= 0) r.days.splice(i, 1);
-            else r.days.push(dn);
-            await this.plugin.saveSettings();
-            this.display();
-          };
-        });
-        row.addExtraButton((b) =>
-          b
-            .setIcon("trash")
-            .setTooltip("Remove this window")
-            .onClick(async () => {
-              sched!.ranges.splice(ri, 1);
-              await this.plugin.saveSettings();
-              this.display();
-            })
-        );
-      });
-    }
-
-    // Browser mappings for emails that are NOT saved accounts (saved accounts set
-    // their browser inline in their card above). Lets you pre-map an account you
-    // haven't logged into yet; normally empty since accounts auto-save on /login.
-    const savedEmails = new Set(
-      this.plugin.accounts.listSavedAccounts().map((a) => a.email.trim().toLowerCase())
-    );
-    const orphans = this.plugin.settings.browserMap
-      .map((row, i) => ({ row, i }))
-      .filter(({ row }) => !savedEmails.has(row.email.trim().toLowerCase()));
-
-    if (orphans.length) {
-      new Setting(containerEl)
-        .setName("Other browser mappings")
-        .setDesc(
-          "Browser mappings for emails that aren't saved accounts yet. Once an account is saved, set its browser from its card above instead."
-        )
-        .setHeading();
-
-      for (const { row, i } of orphans) {
-        const setting = new Setting(containerEl)
-          .addText((t) =>
-            t
-              .setPlaceholder("account@gmail.com")
-              .setValue(row.email)
-              .onChange(async (v) => {
-                this.plugin.settings.browserMap[i].email = v;
-                await this.plugin.saveSettings();
-              })
-          )
-          .addDropdown((d) => {
-            for (const [id, label] of Object.entries(browserOptions)) d.addOption(id, label);
-            d.addOption("custom", "Custom path…");
-            d.setValue(row.browser || "chrome");
-            d.onChange(async (v) => {
-              this.plugin.settings.browserMap[i].browser = v;
-              await this.plugin.saveSettings();
-              this.display(); // show/hide the custom-path field
-            });
-          });
-        if (row.browser === "custom") {
-          setting.addText((t) =>
-            t
-              .setPlaceholder("C:\\path\\to\\browser.exe")
-              .setValue(row.path)
-              .onChange(async (v) => {
-                this.plugin.settings.browserMap[i].path = v.trim();
-                await this.plugin.saveSettings();
-              })
-          );
-        }
-        setting.addExtraButton((b) =>
-          b
-            .setIcon("trash")
-            .setTooltip("Remove")
-            .onClick(async () => {
-              this.plugin.settings.browserMap.splice(i, 1);
-              await this.plugin.saveSettings();
-              this.display();
-            })
-        );
-      }
-    }
-
-    new Setting(containerEl).addButton((b) =>
-      b.setButtonText("Add browser mapping (unsaved account)").onClick(async () => {
-        this.plugin.settings.browserMap.push({ email: "", browser: "chrome", path: "" });
-        await this.plugin.saveSettings();
-        this.display();
-      })
-    );
-
-    new Setting(containerEl).setName("Header buttons").setHeading();
-    const buttonToggle = (
-      name: string,
-      key:
-        | "btnSendNote"
-        | "btnAccount"
-        | "btnModel"
-        | "btnSkill"
-        | "btnRemote"
-        | "btnAutoSwitch"
-        | "btnTokenDashboard"
-        | "btnHistory"
-        | "btnReload"
-        | "btnZoom"
-    ) =>
-      new Setting(containerEl).setName(name).addToggle((t) =>
-        t.setValue(this.plugin.settings[key]).onChange(async (v) => {
-          this.plugin.settings[key] = v;
-          await this.plugin.saveSettings();
-          this.plugin.refreshHeader();
-        })
-      );
-    buttonToggle("Send active note (@)", "btnSendNote");
-    buttonToggle("Account switcher", "btnAccount");
-    buttonToggle("Model selector", "btnModel");
-    buttonToggle("Skill selector", "btnSkill");
-    buttonToggle("Remote control", "btnRemote");
-    buttonToggle("Auto-switch toggle", "btnAutoSwitch");
-    buttonToggle("Token Dashboard", "btnTokenDashboard");
-    buttonToggle("Session history", "btnHistory");
-    buttonToggle("Reload session (same conversation)", "btnReload");
-    buttonToggle("Zoom controls", "btnZoom");
-
-    new Setting(containerEl)
-      .setName("Node.js path")
-      .setDesc(
-        "Optional. Full path to node.exe. node-pty needs a real Node runtime (Obsidian's binary can't run as Node). Leave empty to auto-detect."
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("C:\\Program Files\\nodejs\\node.exe")
-          .setValue(this.plugin.settings.nodePath)
-          .onChange(async (value) => {
-            this.plugin.settings.nodePath = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Python path")
-      .setDesc(
-        "Optional. Full path to python.exe used by the Token Dashboard button. Leave empty to auto-detect (PATH / py launcher)."
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("C:\\Users\\you\\AppData\\Local\\Programs\\Python\\Python312\\python.exe")
-          .setValue(this.plugin.settings.pythonPath)
-          .onChange(async (value) => {
-            this.plugin.settings.pythonPath = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl("p", {
-      text: "Open a new tab with the + button in the panel header to run several Claude sessions in parallel. Each tab is its own claude process over the vault; closing a tab kills that instance.",
-      cls: "setting-item-description",
-    });
   }
 }

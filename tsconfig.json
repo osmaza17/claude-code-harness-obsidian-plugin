@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
     "module": "ESNext",
     "target": "ES2020",
     "moduleResolution": "bundler",
@@ -9,7 +8,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "lib": ["DOM", "ES2020"],
+    "types": ["node"],
     "strict": false
   },
-  "include": ["main.ts", "accounts.ts", "types.ts", "constants.ts", "utils.ts"]
+  "include": ["main.ts", "accounts.ts", "settings-tab.ts", "history.ts", "header.ts", "types.ts", "constants.ts", "utils.ts"]
 }

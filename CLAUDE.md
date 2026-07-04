@@ -58,7 +58,7 @@ usar el **Keychain**; si es así, la multi-cuenta no funcionará en ese equipo (
 ```bash
 npm install --ignore-scripts   # node-pty trae prebuilds N-API; no se compila
                                # (en Linux: omitir --ignore-scripts; compila node-pty)
-npm run build                  # empaqueta los .ts (main/accounts/types/constants/utils) -> main.js (producción)
+npm run build                  # empaqueta todos los .ts -> main.js (producción)
 npm run dev                    # build con watch
 ```
 
@@ -91,8 +91,11 @@ Reparto de responsabilidades:
   cuentas, usage/keep-alive, auto-switch (decisión), franjas horarias, navegador
   por cuenta y popup 👤— vive en **`AccountManager`** (`accounts.ts`), una única
   instancia en `plugin.accounts` (extraído de la clase Plugin en el refactor de
-  2026-07; misma lógica, solo cambió el "dónde"). Los watchers globales se
-  alimentan de la salida de cada sesión:
+  2026-07; misma lógica, solo cambió el "dónde"). Del mismo refactor salieron
+  **`SessionHistory`** (`history.ts`, `plugin.history`: persistencia/reopen/
+  sidebar de historial), **`HeaderView`** (`header.ts`, `plugin.header`:
+  cabecera, pestañas y toolbar) y **`HarnessSettingTab`** (`settings-tab.ts`).
+  Los watchers globales se alimentan de la salida de cada sesión:
   `plugin.accounts.maybeAutoSwitch(session, chunk)` (usa el buffer **por-sesión**
   `session.autoSwitchBuf` pero la decisión —cooldown, baseline, verify— es
   **global**), `maybeAutoSaveAccount`, `maybeProbeOnActivity`.
@@ -1040,16 +1043,28 @@ manifest.json        metadatos del plugin (id: claude-code-harness)
 package.json         deps + scripts
 esbuild.config.mjs   bundling (node-pty/obsidian/electron = external)
 tsconfig.json
-main.ts              el grueso del plugin: Session (instancia) + Plugin (gestor)
-                     + ClaudeCodeView + SettingTab (+ SESSION_SEQ, que se queda
-                     aquí por ser un `let` mutable — un import ESM sería read-only)
+main.ts              núcleo: Session (instancia) + Plugin (gestor: ciclo de vida
+                     de sesiones, view, pty/paths, skills, links de notas, tema,
+                     zoom, Token Dashboard) + ClaudeCodeView (+ SESSION_SEQ, que
+                     se queda aquí por ser un `let` mutable — un import ESM
+                     sería read-only)
 accounts.ts          AccountManager (una instancia en `plugin.accounts`): TODO el
                      subsistema global de cuentas — snapshots/hot-swap, probe de
                      uso 5h/7d, keep-alive OAuth, decisión de auto-switch,
                      enforcement de franjas, popup 👤 y lanzado de navegadores.
                      Accede al plugin vía `this.plugin` (settings/saveSettings/
-                     sessions/accountBtn/updateAutoSwitchBtn); main.ts lo llama
-                     como `this.accounts.X` / `this.plugin.accounts.X`.
+                     sessions/header.accountBtn/header.updateAutoSwitchBtn)
+history.ts           SessionHistory (`plugin.history`): pila de reopen persistida
+                     (closedSessions, Ctrl+Shift+Y), snapshot de tabs abiertos
+                     (persistOpenSessions/flushOpenSessions), auto-restauración
+                     (restorePendingOpenSessions, campo `pendingOpen`) y el
+                     sidebar de historial
+header.ts            HeaderView (`plugin.header`): buildHeader/rebuildHeader,
+                     pestañas (drag, rename, pin, heartbeat: tabState/
+                     refreshTabStatus/refreshTabTitles), botones de toolbar
+                     (update*Btn) y menús de cabecera (nueva sesión, auto-switch)
+settings-tab.ts      HarnessSettingTab: la página de ajustes entera
+                     (globales + tarjetas por cuenta)
 types.ts             tipos compartidos: ClosedSessionInfo, HarnessSettings,
                      AccountUsage (solo tipos, sin runtime)
 constants.ts         VIEW_TYPE, DEFAULT_SETTINGS, regexes best-effort (LIMIT_STOP,

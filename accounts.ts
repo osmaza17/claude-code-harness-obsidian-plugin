@@ -436,7 +436,7 @@ export class AccountManager {
       this.verifyDeadline = Date.now() + 45000;
       this.sawStatusSinceSwitch = false;
       this.authWatchUntil = Date.now() + 60000;
-      if (this.plugin.accountBtn) this.plugin.accountBtn.title = "Account: " + target; // optimistic
+      if (this.plugin.header.accountBtn) this.plugin.header.accountBtn.title = "Account: " + target; // optimistic
       new Notice("Switched to " + email + " — used on the next message.");
     } catch (e) {
       new Notice("Could not switch account.");
@@ -1020,7 +1020,7 @@ export class AccountManager {
         this.accountUsage.set(email, usage);
         await new Promise((r) => setTimeout(r, 300)); // gentle spacing
       }
-      this.plugin.updateAutoSwitchBtn();
+      this.plugin.header.updateAutoSwitchBtn();
     } finally {
       this.usageProbing = false;
     }
@@ -1159,7 +1159,7 @@ export class AccountManager {
     if (barEmail && barEmail !== this.barAccountEmail) {
       this.barAccountEmail = barEmail;
       this.sawStatusSinceSwitch = true;
-      if (this.plugin.accountBtn) this.plugin.accountBtn.title = "Account: " + barEmail;
+      if (this.plugin.header.accountBtn) this.plugin.header.accountBtn.title = "Account: " + barEmail;
     } else if (barEmail) {
       this.sawStatusSinceSwitch = true;
     }
