@@ -19,481 +19,47 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import * as path from "path";
+import type { ClosedSessionInfo, HarnessSettings, AccountUsage } from "./types";
+import {
+  VIEW_TYPE,
+  DEFAULT_SETTINGS,
+  MIN_FONT,
+  MAX_FONT,
+  MAX_CLOSED_SESSIONS,
+  DEFAULT_USAGE_RE,
+  SWITCH_CEILING_PCT,
+  WEEKLY_CEILING_PCT,
+  AUTH_FAIL_RE,
+  LIMIT_STOP_RE,
+  looksLikePrompt,
+  EMAIL_RE,
+  USAGE_API_URL,
+  USAGE_PROBE_MODEL,
+  OAUTH_BETA,
+  ANTHROPIC_VERSION,
+  OAUTH_TOKEN_URL,
+  OAUTH_CLIENT_ID,
+  CLAUDE_LOGIN_URL,
+  REFRESH_SKEW_MS,
+  H_5H_UTIL,
+  H_5H_RESET,
+  H_7D_UTIL,
+  H_7D_RESET,
+  H_5H_STATUS,
+  USAGE_FRESH_MS,
+  ACCOUNT_CACHE_MS,
+  MODELS,
+  BROWSERS,
+  ANSI_DARK,
+  ANSI_LIGHT,
+} from "./constants";
+import { nodeRequire, stripDiacritics, newConversationId } from "./utils";
+import { AccountManager } from "./accounts";
 
-// Electron exposes Node's require on the window in the renderer. We use it to
-// reach child_process without esbuild trying to bundle it.
-const nodeRequire: NodeRequire = (window as any).require;
-
-/** Remove diacritics (á→a, ñ→n) so the [[ note picker matches accent-insensitively
- *  (Obsidian's prepareFuzzySearch is accent-sensitive by default). */
-function stripDiacritics(s: string): string {
-  return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").normalize("NFC");
-}
-
-export const VIEW_TYPE = "claude-code-harness-view";
-
-// Snapshot of a tab needed to reopen it later (Ctrl+Shift+Y) and recover its
-// conversation via `claude --resume <sessionId>`. Persisted in settings so the
-// reopen stack survives an Obsidian restart.
-type ClosedSessionInfo = {
-  sessionId: string;
-  skill: string;
-  model: string;
-  args: string;
-  title: string;
-  cols: number;
-  rows: number;
-  // When this tab was closed / last snapshotted (epoch ms). Optional so old
-  // persisted entries (before this field existed) still load. Used by the
-  // history menu to show a relative "closed 3h ago" subtitle.
-  closedAt?: number;
-  // Chrome-style pinned tab: rendered compact (dot only) and ALWAYS persisted /
-  // restored across Obsidian restarts until the user closes it manually.
-  pinned?: boolean;
-  // The tab had no conversation yet when snapshotted (only possible for pinned
-  // tabs — unpinned blank tabs aren't persisted). Restored with --session-id
-  // instead of --resume, since there is no .jsonl to resume.
-  blank?: boolean;
-};
-
-interface HarnessSettings {
-  // Command run inside the PTY when the session starts.
-  command: string;
-  // Path to a real node.exe. node-pty needs a true Node runtime (Obsidian's
-  // binary ignores ELECTRON_RUN_AS_NODE), so we fork the system Node. Empty =
-  // auto-detect.
-  nodePath: string;
-  // Path to a python.exe used to launch the bundled Token Dashboard. Empty =
-  // auto-detect (settings -> known locations -> `where python` / `where py`).
-  pythonPath: string;
-  // Last fitted grid size. We spawn claude at this size so the first fit when
-  // the panel opens doesn't change it (a resize makes claude repaint and stack
-  // its banner). Persisted across sessions. Shared by all instances.
-  cols: number;
-  rows: number;
-  // Terminal font size (px), adjustable with Ctrl +/-/0. Shared by all instances.
-  fontSize: number;
-  // Extra arguments appended to the claude command (e.g.
-  // --append-system-prompt "Be concise" --model opus). Default for new sessions.
-  args: string;
-  // Active skill: the folder name (e.g. "second-brain-assistant") inside Claude
-  // Code's skills folder (~/.claude/skills). It is invoked as /<name> when the
-  // session starts. Default for new sessions; selectable per-session. Empty = none.
-  skill: string;
-  // Slash commands (one per line) run at session start, BEFORE the skill.
-  // E.g. /remote-control.
-  startupCommands: string;
-  // Last model picked from the header menu (default for new sessions; the actual
-  // model is owned by Claude per-session via /model).
-  model: string;
-  // Fire an Obsidian notice when the terminal rings the bell (\x07) — Claude
-  // tends to ring it when a long task finishes / needs attention.
-  notifyOnBell: boolean;
-  // Turn coloured note references in Claude's output (and [[wikilinks]]) into
-  // clickable links that open the matching .md note in the vault.
-  linkifyNotes: boolean;
-  // Typing [[ in the terminal opens Obsidian's native note suggester anchored at
-  // the cursor (same candidates + fuzzy ranking as [[ in a note); picking one
-  // replaces [[query with an @<path> reference (Claude Code's file-ref syntax).
-  wikilinkPicker: boolean;
-  // Remote control: which browser opens the session URL per Claude account. The
-  // URL only works in the browser where that same account is logged in, so the
-  // active account (read from ~/.claude.json) picks the browser. browser is one
-  // of "chrome" | "firefox" | "edge" | "custom"; path is the .exe for "custom".
-  browserMap: { email: string; browser: string; path: string }[];
-  // Browser used when the active account isn't mapped (or can't be read).
-  defaultBrowser: string;
-  // Auto-switch to another saved account based on the 5h usage % (scraped from
-  // the status line). Off by default. Two modes:
-  //  - "threshold": switch when usage >= autoSwitchThreshold.
-  //  - "rotate":   switch every time usage rises autoSwitchDelta points since the
-  //                account became active, rotating to spread spend across accounts.
-  autoSwitch: boolean;
-  autoSwitchMode: string; // "threshold" | "rotate"
-  autoSwitchThreshold: number;
-  autoSwitchDelta: number;
-  // Advanced: regex (source) used to scrape the 5h usage % from the status line.
-  // Must have a capture group with the number. Empty = built-in default.
-  autoSwitchUsageRegex: string;
-  // Saved-account emails (lowercased) BLOCKED as auto-switch destinations — e.g.
-  // accounts that belong to friends, so the plugin never spends their tokens on
-  // its own. Manual switching from the menu is always allowed regardless.
-  autoSwitchExcluded: string[];
-  // Forbidden time windows per account. While "now" is inside one of a saved
-  // account's ranges, that account is DISCARDED as an auto-switch destination
-  // (shown red in the 👤 menu, but manual switching is still allowed), and if it
-  // is the ACTIVE account the plugin jumps away from it (or stops Claude when
-  // there is nowhere to go). days = JS weekday numbers (0=Sun … 6=Sat); start/end
-  // = "HH:MM" (24h); start>end means the range crosses midnight. A range with no
-  // days never blocks.
-  accountSchedules: {
-    email: string;
-    ranges: { start: string; end: string; days: number[] }[];
-  }[];
-  // Read the real 5h/7d usage % from the Anthropic API (rate-limit headers)
-  // instead of only scraping the status bar. Makes tiny per-account calls.
-  usageProbe: boolean;
-  usageProbeModel: string; // empty = USAGE_PROBE_MODEL
-  // Header button visibility (Settings and Restart are always shown).
-  btnSendNote: boolean;
-  btnAccount: boolean;
-  btnModel: boolean;
-  btnSkill: boolean;
-  btnSkillsFolder: boolean;
-  btnRemote: boolean;
-  btnAutoSwitch: boolean;
-  btnTokenDashboard: boolean;
-  btnHistory: boolean;
-  btnReload: boolean;
-  btnZoom: boolean;
-  // Chrome-style "reopen closed tab" (Ctrl+Shift+Y), persisted across Obsidian
-  // restarts. closedSessions = LIFO stack of reopenable tabs (closed with × or
-  // folded in from the previous run's open tabs). openSessions = live snapshot of
-  // the CURRENTLY open tabs; on the next launch it is folded into closedSessions
-  // so tabs that were still open when Obsidian quit are reopenable too. Each entry
-  // carries the deterministic sessionId, so reopening recovers the conversation
-  // via `claude --resume <sessionId>` (the .jsonl survives on disk).
-  closedSessions: ClosedSessionInfo[];
-  openSessions: ClosedSessionInfo[];
-}
-
-const DEFAULT_SETTINGS: HarnessSettings = {
-  command: "claude",
-  nodePath: "",
-  pythonPath: "",
-  cols: 100,
-  rows: 30,
-  fontSize: 14,
-  args: "",
-  skill: "second-brain-assistant",
-  startupCommands: "",
-  model: "opus",
-  notifyOnBell: true,
-  linkifyNotes: true,
-  wikilinkPicker: true,
-  browserMap: [],
-  defaultBrowser: "chrome",
-  autoSwitch: false,
-  autoSwitchMode: "threshold",
-  autoSwitchThreshold: 90,
-  autoSwitchDelta: 10,
-  autoSwitchUsageRegex: "",
-  autoSwitchExcluded: [],
-  accountSchedules: [],
-  usageProbe: true,
-  usageProbeModel: "",
-  btnSendNote: true,
-  btnAccount: true,
-  btnModel: true,
-  btnSkill: true,
-  btnSkillsFolder: true,
-  btnRemote: true,
-  btnAutoSwitch: true,
-  btnTokenDashboard: true,
-  btnHistory: true,
-  btnReload: true,
-  btnZoom: true,
-  closedSessions: [],
-  openSessions: [],
-};
-
-const MIN_FONT = 8;
-const MAX_FONT = 40;
-// Cap on the persisted reopen stack. Higher than the old in-memory 10 because the
-// stack now also absorbs every tab that was open when Obsidian quit.
-const MAX_CLOSED_SESSIONS = 25;
-
-// Default pattern to scrape the 5h usage % from Claude's status line
-// ("5h:[▓▓░] 23% (3 31m)"). Overridable via settings.autoSwitchUsageRegex.
-const DEFAULT_USAGE_RE = "5h:[^\\n]{0,40}?(\\d{1,3})\\s*%";
-// Hard ceiling: the active account must never go past this 5h usage % while there
-// is somewhere with room to go. At ≥90% the plugin always tries to switch to the
-// least-used eligible account that is still BELOW 90% (keeping a 10% margin),
-// OVERRIDING the configured mode/threshold. The single exception is when every
-// other account is already ≥90% (or none is eligible): then it stays on the
-// current account and runs it to the limit, since switching would buy no margin.
-const SWITCH_CEILING_PCT = 90;
-// Weekly (7d) ceiling for the DESTINATION of an auto-switch: never jump TO an
-// account whose 7d usage is already ≥ this %, so we don't land on a cuenta that
-// is about to hit its weekly limit mid-response. Applies to candidate selection
-// only (it filters destinations); it does not force the active account to move.
-const WEEKLY_CEILING_PCT = 95;
-// Best-effort patterns (the exact text Claude prints may change — tune if needed).
-// AUTH_FAIL_RE: an auth problem after a swap (e.g. a saved token is dead).
-const AUTH_FAIL_RE =
-  /please (run )?\/login|invalid (oauth )?(token|credentials)|token (has )?expired|authentication (failed|error)|unauthorized|\b401\b/i;
-// LIMIT_STOP_RE: Claude stopped because the usage/token limit was hit → paints
-// the tab RED and is also the auto-switch fallback trigger. Deliberately strict:
-// no bare "resets at", which shows in the status bar normally and would fire
-// falsely (as a switch trigger it caused an account ping-pong every cooldown).
-// Best-effort: Claude's exact wording can change; tune here if the red never
-// lights up or lights up wrongly.
-const LIMIT_STOP_RE =
-  /(usage|5-?hour|weekly|rate)[- ]?limit (reached|exceeded)|limit reached\b|you'?ve (reached|hit) your[^.]{0,30}\blimit|reached your[^.]{0,20}\blimit|out of (credits|usage)|claude usage limit/i;
-// Detecting "Claude is BLOCKED waiting for the user to answer" — a permission prompt
-// ("Do you want to proceed?"), a plan-approval prompt, or an AskUserQuestion form.
-// While waiting Claude emits no tokens, so the heartbeat would mark the tab idle
-// (green, "done") and you couldn't tell "finished" from "needs your answer";
-// matching this paints the tab RED instead. Best-effort, like LIMIT_STOP_RE.
-//
-// FALSE-POSITIVE GUARD: the individual footer words ("Esc to cancel", etc.) can also
-// appear in Claude's PROSE (e.g. it explains a keybinding), so a single fragment is
-// NOT enough. looksLikePrompt() requires either (a) a specific permission/plan
-// SENTENCE — full phrases unlikely in passing — or (b) BOTH a navigation hint AND an
-// action hint together, which is the multi-part footer real menus print
-// ("Enter to select · Tab/Arrow keys to navigate · Esc to cancel") and which prose
-// almost never combines. Language-independent (the footer is English even when the
-// question is in Spanish — verified against a Spanish AskUserQuestion form). The exact
-// wording can change between CLI versions — tune these three regexes if needed.
-const PROMPT_SENTENCE_RE =
-  /No,?\s+and tell Claude what to do|Do you want to (proceed|make|create|run|allow|apply|continue|edit)\b|Would you like to proceed/i;
-// The footer stays ENGLISH on the CLIs seen so far even when the question is in
-// Spanish/French (the TUI chrome isn't localised — only the question text Claude
-// writes is), so the nav+act path is language-independent. Also matches arrow
-// GLYPHS ("↑/↓ to navigate") — some CLI versions print ↑↓←→ instead of the words
-// "arrow"/"keys", which slipped past before. As cheap insurance we ALSO accept the
-// FRENCH footer verbs ("naviguer", "Entrée/Échap pour …") in case a future or
-// localised CLI ever translates the footer. Best-effort — tune with real text.
-const PROMPT_NAV_HINT_RE =
-  /\bkeys? to navigate\b|\b(arrow|tab)\b[^\n]{0,24}\bnavigate\b|[↑↓←→][^\n]{0,24}\b(navigate|naviguer)\b|\b(fl[èe]ches?|tab)\b[^\n]{0,24}\bnaviguer\b|\bpour naviguer\b/i;
-const PROMPT_ACT_HINT_RE =
-  /\benter to (select|submit|confirm)\b|\besc to cancel\b|\bentr[ée]e pour (s[ée]lectionner|valider|confirmer|soumettre)\b|\b[ée]chap\w* pour annuler\b/i;
-function looksLikePrompt(text: string): boolean {
-  if (PROMPT_SENTENCE_RE.test(text)) return true;
-  return PROMPT_NAV_HINT_RE.test(text) && PROMPT_ACT_HINT_RE.test(text);
-}
-// Generic email matcher (filtered against known accounts before use).
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-
-// --- Live usage probe (authoritative %, read from Anthropic's rate-limit
-// response headers). Verified working with the OAuth token Claude Code stores.
-// A minimal /v1/messages call (max_tokens:1) returns the 5h/7d utilisation in
-// response headers; we read each account's token to probe it WITHOUT switching.
-// Best-effort: the beta header value and model id may change over time.
-const USAGE_API_URL = "https://api.anthropic.com/v1/messages";
-const USAGE_PROBE_MODEL = "claude-haiku-4-5-20251001"; // cheapest; full id required
-const OAUTH_BETA = "oauth-2025-04-20";
-const ANTHROPIC_VERSION = "2023-06-01";
-// OAuth refresh-token grant (the same flow Claude Code uses internally to keep
-// accounts alive). Endpoint + client_id were verified by extracting the strings
-// from the Claude Code binary; both may change with future CLI versions.
-const OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
-const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-// Opened in an account's mapped browser from the 👤 menu so the user can quickly
-// re-login that account where its SSO/cookie lives. claude.ai redirects to the
-// login screen when the session is expired.
-const CLAUDE_LOGIN_URL = "https://claude.ai/";
-// Only refresh a token when it's expired or within this window of expiring. The
-// token endpoint rate-limits hard (observed 429), and refreshing a still-valid
-// token would rotate the refresh token needlessly, so we keep each account's
-// refresh rate near claude's own (~once per token lifetime) while still checking
-// every account on each keep-alive tick.
-const REFRESH_SKEW_MS = 30 * 60 * 1000;
-// Response header names carrying the unified rate-limit utilisation (0..1).
-const H_5H_UTIL = "anthropic-ratelimit-unified-5h-utilization";
-const H_5H_RESET = "anthropic-ratelimit-unified-5h-reset";
-const H_7D_UTIL = "anthropic-ratelimit-unified-7d-utilization";
-// The 7d reset epoch. Expected name by symmetry with the 5h header, but not
-// verified live (unlike H_5H_RESET); probeUsage also scans for any "7d…reset"
-// header as a fallback so a renamed/variant header still works.
-const H_7D_RESET = "anthropic-ratelimit-unified-7d-reset";
-const H_5H_STATUS = "anthropic-ratelimit-unified-5h-status";
-const USAGE_FRESH_MS = 6 * 60 * 1000; // a reading older than this is "stale"
-// TTL for the cached currentAccountEmail()/listSavedAccounts() reads. Both are
-// called (several times) from maybeAutoSwitch on EVERY pty data chunk; without a
-// cache that meant re-reading ~/.claude.json (often huge) plus every account
-// snapshot dozens of times per second during streaming — real renderer jank.
-// Writes through the plugin invalidate the cache; external changes (/login in
-// the terminal) are picked up within this TTL.
-const ACCOUNT_CACHE_MS = 5000;
-
-// Per-account usage snapshot from a probe (or an error state). pct values are
-// 0..100 (the headers give a 0..1 fraction; we ×100). reset5h is epoch seconds.
-interface AccountUsage {
-  pct5h: number | null;
-  reset5h: number | null;
-  pct7d: number | null;
-  reset7d: number | null;
-  status: string | null;
-  error: "auth" | "rate" | "net" | null;
-  checkedAt: number;
-}
-
-// Models offered in the header menu. `id` is the /model argument.
-const MODELS: { id: string; label: string }[] = [
-  { id: "haiku", label: "Haiku 4.5" },
-  { id: "sonnet", label: "Sonnet 4.6" },
-  { id: "opus", label: "Opus 4.8" },
-  { id: "fable", label: "Fable 5" },
-];
-
-// Known browsers for the remote-control "browser per account" mapping. `exes`
-// are the usual install paths (PROGRAMFILES placeholders filled at runtime);
-// `alias` is what Windows `start` resolves via its App Paths registry entry;
-// `proc` is the process name (no .exe) used to focus + fullscreen the window.
-const BROWSERS: Record<
-  string,
-  { label: string; exes: string[]; alias: string; proc: string }
-> = {
-  chrome: {
-    label: "Chrome",
-    exes: [
-      "%PROGRAMFILES%\\Google\\Chrome\\Application\\chrome.exe",
-      "%PROGRAMFILES(X86)%\\Google\\Chrome\\Application\\chrome.exe",
-      "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe",
-    ],
-    alias: "chrome",
-    proc: "chrome",
-  },
-  firefox: {
-    label: "Firefox",
-    exes: [
-      "%PROGRAMFILES%\\Mozilla Firefox\\firefox.exe",
-      "%PROGRAMFILES(X86)%\\Mozilla Firefox\\firefox.exe",
-    ],
-    alias: "firefox",
-    proc: "firefox",
-  },
-  edge: {
-    label: "Edge",
-    exes: [
-      "%PROGRAMFILES(X86)%\\Microsoft\\Edge\\Application\\msedge.exe",
-      "%PROGRAMFILES%\\Microsoft\\Edge\\Application\\msedge.exe",
-    ],
-    alias: "msedge",
-    proc: "msedge",
-  },
-  brave: {
-    label: "Brave",
-    exes: [
-      "%PROGRAMFILES%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-      "%PROGRAMFILES(X86)%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-      "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-    ],
-    alias: "brave",
-    proc: "brave",
-  },
-  // Opera and Opera GX both ship an opera.exe; the folder is what distinguishes
-  // them, so the per-user install path is the authoritative selector.
-  opera: {
-    label: "Opera",
-    exes: [
-      "%LOCALAPPDATA%\\Programs\\Opera\\opera.exe",
-      "%PROGRAMFILES%\\Opera\\opera.exe",
-    ],
-    alias: "opera",
-    proc: "opera",
-  },
-  operagx: {
-    label: "Opera GX",
-    exes: [
-      "%LOCALAPPDATA%\\Programs\\Opera GX\\opera.exe",
-      "%PROGRAMFILES%\\Opera GX\\opera.exe",
-    ],
-    alias: "opera",
-    proc: "opera",
-  },
-  zen: {
-    label: "Zen",
-    exes: [
-      "%PROGRAMFILES%\\Zen Browser\\zen.exe",
-      "%LOCALAPPDATA%\\Programs\\Zen Browser\\zen.exe",
-      "%LOCALAPPDATA%\\zen\\zen.exe",
-    ],
-    alias: "zen",
-    proc: "zen",
-  },
-  // Helium (by imput) is Chromium-based: its launcher keeps the chrome.exe name,
-  // living in Application\ (the versioned subfolder only holds helper exes). The
-  // running process is therefore chrome.exe, so proc collides with Chrome's.
-  helium: {
-    label: "Helium",
-    exes: [
-      "%LOCALAPPDATA%\\imput\\Helium\\Application\\chrome.exe",
-      "%PROGRAMFILES%\\imput\\Helium\\Application\\chrome.exe",
-    ],
-    alias: "helium",
-    proc: "chrome",
-  },
-  vivaldi: {
-    label: "Vivaldi",
-    exes: [
-      "%LOCALAPPDATA%\\Vivaldi\\Application\\vivaldi.exe",
-      "%PROGRAMFILES%\\Vivaldi\\Application\\vivaldi.exe",
-    ],
-    alias: "vivaldi",
-    proc: "vivaldi",
-  },
-  waterfox: {
-    label: "Waterfox",
-    exes: [
-      "%PROGRAMFILES%\\Waterfox\\waterfox.exe",
-      "%PROGRAMFILES(X86)%\\Waterfox\\waterfox.exe",
-    ],
-    alias: "waterfox",
-    proc: "waterfox",
-  },
-  floorp: {
-    label: "Floorp",
-    exes: [
-      "%PROGRAMFILES%\\Ablaze Floorp\\floorp.exe",
-      "%PROGRAMFILES%\\Floorp\\floorp.exe",
-    ],
-    alias: "floorp",
-    proc: "floorp",
-  },
-  // Mullvad Browser is Tor-Browser-based (Firefox/Gecko). Per-user install puts the
-  // launcher in %LOCALAPPDATA%\Mullvad\MullvadBrowser\Release\mullvadbrowser.exe.
-  mullvad: {
-    label: "Mullvad Browser",
-    exes: [
-      "%LOCALAPPDATA%\\Mullvad\\MullvadBrowser\\Release\\mullvadbrowser.exe",
-      "%PROGRAMFILES%\\Mullvad Browser\\mullvadbrowser.exe",
-    ],
-    alias: "mullvadbrowser",
-    proc: "mullvadbrowser",
-  },
-};
-
-// 16 ANSI colours for dark vs light surfaces (from the reference harness).
-const ANSI_DARK = {
-  black: "#241B2C", red: "#FF6B6B", green: "#6BCF7F", yellow: "#FFD93D",
-  blue: "#4ECDC4", magenta: "#B197FC", cyan: "#4ECDC4", white: "#F3ECF7",
-  brightBlack: "#857693", brightRed: "#FFB4B4", brightGreen: "#B4E5BD",
-  brightYellow: "#FFEC99", brightBlue: "#A8E6E0", brightMagenta: "#D6C5FF",
-  brightCyan: "#A8E6E0", brightWhite: "#FFFDF5",
-};
-const ANSI_LIGHT = {
-  black: "#1A1320", red: "#D1453B", green: "#20904B", yellow: "#9C6B00",
-  blue: "#2B6CB0", magenta: "#8A5CF0", cyan: "#1F9C94", white: "#3A2F44",
-  brightBlack: "#6B5878", brightRed: "#E0584E", brightGreen: "#2E9E54",
-  brightYellow: "#B8860B", brightBlue: "#3B7DC4", brightMagenta: "#9B72F2",
-  brightCyan: "#2BA89F", brightWhite: "#1A1320",
-};
+export { VIEW_TYPE };
 
 // Monotonic id source for sessions (used for tab titles + identity).
 let SESSION_SEQ = 0;
-
-// Fresh UUID for a Claude Code conversation (--session-id / --resume). Prefers the
-// Web Crypto global (present in Electron's renderer); falls back to Node's crypto.
-function newConversationId(): string {
-  try {
-    if (typeof crypto !== "undefined" && (crypto as any).randomUUID)
-      return (crypto as any).randomUUID();
-  } catch {
-    /* fall through */
-  }
-  try {
-    return nodeRequire("crypto").randomUUID();
-  } catch {
-    /* last-resort RFC4122-ish */
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-      const r = (Math.random() * 16) | 0;
-      const v = c === "x" ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
-  }
-}
 
 /**
  * One Claude Code instance: its own xterm Terminal, DOM host and forked pty-host
@@ -505,7 +71,7 @@ function newConversationId(): string {
  * workflow. Account, usage and auto-switch are GLOBAL (shared credentials), so
  * they live on the plugin — the session just feeds its output to them.
  */
-class Session {
+export class Session {
   plugin: ClaudeCodeHarnessPlugin;
   id: number;
   title: string;
@@ -762,9 +328,9 @@ class Session {
     // Schedule hard stop: the active account is forbidden right now and there is
     // nowhere to jump → cut any generation the moment it starts ("like usage ran
     // out"). The plugin throttles the accompanying Notice.
-    if (this.plugin.isScheduleHardStop()) {
+    if (this.plugin.accounts.isScheduleHardStop()) {
       this.interrupt();
-      this.plugin.notifyScheduleStop();
+      this.plugin.accounts.notifyScheduleStop();
       return;
     }
     this.setBusy(true);
@@ -1902,9 +1468,9 @@ class Session {
           this.maybeConfirmModel(msg.d);
           // Global watchers (shared account / usage / auto-switch), fed this
           // session's output.
-          this.plugin.maybeAutoSwitch(this, msg.d);
-          this.plugin.maybeAutoSaveAccount();
-          this.plugin.maybeProbeOnActivity();
+          this.plugin.accounts.maybeAutoSwitch(this, msg.d);
+          this.plugin.accounts.maybeAutoSaveAccount();
+          this.plugin.accounts.maybeProbeOnActivity();
           break;
         case "exit":
           this.exited = true; // stop sending resizes to the dead pty
@@ -1950,7 +1516,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // Several parallel Claude Code instances. Only the active one is mounted in
   // the panel; the rest keep running and buffering output in xterm. They live on
   // the plugin (not the view) so they survive the panel being closed/reopened.
-  private sessions: Session[] = [];
+  sessions: Session[] = []; // (read by AccountManager)
   private activeIndex = 0;
   // Chrome-style "reopen closed tab" (Ctrl+Shift+Y): the LIFO stack of reopenable
   // tabs now lives in settings.closedSessions (persisted), so it survives an
@@ -1969,7 +1535,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   private zoomLabel: HTMLElement | null = null;
   private modelBtn: HTMLElement | null = null;
   private skillBtn: HTMLElement | null = null;
-  private accountBtn: HTMLElement | null = null;
+  accountBtn: HTMLElement | null = null; // (relabelled live by AccountManager)
   private autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
   private remoteBtn: HTMLElement | null = null;
   private historyBtn: HTMLElement | null = null;
@@ -1977,59 +1543,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // Bundled Token Dashboard server process (null when not running).
   tokenDashboardChild: any = null;
 
-  // --- Global account / auto-switch / usage state (shared by all sessions,
-  // because every claude process reads the same ~/.claude/.credentials.json). ---
-  private autoSwitchCooldownUntil = 0;
-  // Rotate mode: usage % captured when the current account became active.
-  private rotateBaselinePct: number | null = null;
-  // Account email currently shown in the status bar.
-  private barAccountEmail: string | null = null;
-  // Swap verification.
-  private pendingVerifyEmail: string | null = null;
-  private verifyDeadline = 0;
-  private sawStatusSinceSwitch = false;
-  // Auth-failure recovery after a switch.
-  private authWatchUntil = 0;
-  private recoverAttempts = 0;
-  private warnedNoAccounts = false; // one-shot "need ≥2 accounts" notice
-  // Schedule enforcement: throttle the "Claude stopped" notice while the active
-  // account is in a forbidden window with nowhere to jump. `scheduleHardStopActive`
-  // is the CACHED hard-stop state (recomputed by the 20s enforceSchedule tick) so
-  // the per-output-chunk check in markActivity stays cheap (no disk I/O).
-  private scheduleStopNotified = false;
-  private scheduleHardStopActive = false;
-  // Auto-save the active account whenever it changes (throttled).
-  private lastAutoSavedEmail = "";
-  private lastAutoSaveCheck = 0;
-  // Disk-read caches (see ACCOUNT_CACHE_MS): maybeAutoSwitch runs on every pty
-  // chunk, so these two reads must not hit the filesystem each time.
-  private cachedEmail: { v: string | null; at: number } = { v: null, at: 0 };
-  private cachedAccounts: { v: { email: string; file: string }[]; at: number } = {
-    v: [],
-    at: 0,
-  };
-  // Live usage probe cache + guards.
-  private accountUsage = new Map<string, AccountUsage>();
-  private usageProbing = false;
-  private lastActiveProbe = 0;
-  private lastAutoSwitchDiag = 0; // throttle for the rotate/threshold console log
-  // Last auto-switch evaluation, surfaced by the "Diagnose auto-switch" command.
-  private lastDiagInfo:
-    | {
-        at: number;
-        mode: string;
-        enabled: boolean;
-        pct: number | null;
-        src: string;
-        cur: string | null;
-        bar: string | null;
-        baseline: number | null;
-        delta: number;
-        threshold: number;
-        savedAccounts: number;
-        reason: string;
-      }
-    | null = null;
+  // Accounts / usage / auto-switch / browser subsystem (see accounts.ts).
+  accounts = new AccountManager(this);
 
   async onload() {
     await this.loadSettings();
@@ -2123,13 +1638,13 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.addCommand({
       id: "save-claude-account",
       name: "Save current Claude account",
-      callback: () => this.saveCurrentAccount(),
+      callback: () => this.accounts.saveCurrentAccount(),
     });
 
     this.addCommand({
       id: "diagnose-auto-switch",
       name: "Diagnose auto-switch (why no account change)",
-      callback: () => this.diagnoseAutoSwitch(),
+      callback: () => this.accounts.diagnoseAutoSwitch(),
     });
 
     this.addCommand({
@@ -2179,21 +1694,21 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // Token keep-alive + live usage (see refreshAccount()). Every 3 min we CHECK
     // every account and refresh its OAuth token if it's expired/about to expire,
     // then re-probe usage; also once shortly after start.
-    window.setTimeout(() => void this.refreshUsage({ refreshTokens: true }), 5000);
+    window.setTimeout(() => void this.accounts.refreshUsage({ refreshTokens: true }), 5000);
     this.registerInterval(
       window.setInterval(
-        () => void this.refreshUsage({ refreshTokens: true }),
+        () => void this.accounts.refreshUsage({ refreshTokens: true }),
         3 * 60 * 1000
       )
     );
 
     // Enforce per-account forbidden time windows (jump away / stop Claude).
-    window.setTimeout(() => this.enforceSchedule(), 8000);
-    this.registerInterval(window.setInterval(() => this.enforceSchedule(), 20000));
+    window.setTimeout(() => this.accounts.enforceSchedule(), 8000);
+    this.registerInterval(window.setInterval(() => this.accounts.enforceSchedule(), 20000));
   }
 
   onunload() {
-    this.closeAccountMenu();
+    this.accounts.closeAccountMenu();
     this.closeHistorySidebar();
     // Best-effort final snapshot of the open tabs so Ctrl+Shift+Y can recover them
     // next launch (the debounced snapshot already covers a hard shutdown).
@@ -2725,183 +2240,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       : "Auto-switch OFF — click to enable";
   }
 
-  /** Header 👤 menu: save / refresh / switch accounts, plus a section to allow or
-   *  block each saved account as an AUTO-switch destination. Blocking an account
-   *  (e.g. a friend's) stops the percentage-based auto-switch from ever spending
-   *  its tokens; you can still switch to it manually from the list above. */
-  /** Currently-open account popup, so re-opening / closing is idempotent. */
-  private accountPopup: HTMLElement | null = null;
-  private accountPopupCleanup: (() => void) | null = null;
-
-  closeAccountMenu() {
-    this.accountPopupCleanup?.();
-    this.accountPopup?.remove();
-    this.accountPopup = null;
-    this.accountPopupCleanup = null;
-  }
-
-  /**
-   * Account popup: a SINGLE list of saved accounts. Each row has a toggle on the
-   * left (allow/block as an auto-switch destination) plus the account label;
-   * clicking the label switches to that account. No more two separate lists.
-   */
-  openAccountMenu(anchor: HTMLElement) {
-    this.closeAccountMenu();
-    if (this.settings.usageProbe) void this.refreshUsage({});
-    const cur = this.currentAccountEmail();
-
-    const pop = document.createElement("div");
-    pop.className = "menu cch-account-menu";
-    document.body.appendChild(pop);
-    this.accountPopup = pop;
-
-    const headerItem = (
-      title: string,
-      icon: string,
-      onClick: () => void
-    ) => {
-      const row = pop.createDiv({ cls: "menu-item cch-acct-action" });
-      const ic = row.createDiv({ cls: "menu-item-icon" });
-      setIcon(ic, icon);
-      row.createDiv({ cls: "menu-item-title", text: title });
-      row.onclick = () => {
-        this.closeAccountMenu();
-        onClick();
-      };
-    };
-
-    headerItem("Save current account", "save", () => this.saveCurrentAccount());
-    if (this.settings.usageProbe) {
-      headerItem("Refresh usage", "refresh-cw", () => void this.refreshUsage({}));
-    }
-    pop.createDiv({ cls: "menu-separator" });
-
-    const saved = this.listSavedAccounts();
-    if (!saved.length) {
-      pop.createDiv({
-        cls: "menu-item cch-acct-empty",
-        text: "No saved accounts",
-      });
-    } else {
-      pop.createDiv({
-        cls: "cch-acct-hint",
-        text: "Toggle = allow auto-switch · click name to use",
-      });
-      const emailWidth = Math.max(...saved.map((a) => a.email.length));
-      for (const a of saved) {
-        const row = pop.createDiv({ cls: "cch-acct-row" });
-        const eligible = this.isAccountEligible(a.email);
-        if (!eligible) row.addClass("cch-acct-blocked");
-
-        // Cuenta "capada" como destino de auto-switch (tope 5h/7d o token muerto):
-        // rojo de aviso, PERO el cambio MANUAL sigue permitido (ignora topes), así
-        // que la etiqueta sigue clicable — a diferencia de cch-acct-blocked, inerte.
-        // La cuenta activa se excluye (nunca es un destino).
-        const timeBlocked = this.isTimeBlocked(a.email);
-        const capped =
-          cur !== a.email.trim().toLowerCase() &&
-          (this.isSwitchTargetCapped(a.email) || timeBlocked);
-        if (capped) {
-          row.addClass("cch-acct-capped");
-          row.setAttr(
-            "title",
-            timeBlocked
-              ? `Prohibida ahora por horario (${this.scheduleBlockLabel(a.email)}) — el auto-switch no salta aquí`
-              : "El auto-switch no salta aquí (5h ≥90%, 7d ≥95% o token caducado)"
-          );
-        }
-
-        // Left toggle: allow (on) / block (off) this account. A blocked account
-        // is fully unusable — dimmed AND not switchable by clicking its name.
-        const toggle = row.createDiv({
-          cls: "cch-acct-toggle" + (eligible ? " is-on" : ""),
-        });
-        toggle.createDiv({ cls: "cch-acct-knob" });
-        toggle.setAttr(
-          "aria-label",
-          eligible ? "Enabled" : "Disabled"
-        );
-        toggle.onclick = async (e) => {
-          e.stopPropagation();
-          await this.toggleAccountEligible(a.email);
-          const nowOn = this.isAccountEligible(a.email);
-          toggle.toggleClass("is-on", nowOn);
-          row.toggleClass("cch-acct-blocked", !nowOn);
-          toggle.setAttr("aria-label", nowOn ? "Enabled" : "Disabled");
-        };
-
-        // Label: click to switch the live session to this account (unless
-        // blocked, in which case it's inert — re-enable it with the toggle).
-        const label = row.createDiv({ cls: "cch-acct-label" });
-        if (cur === a.email.trim().toLowerCase())
-          label.addClass("cch-acct-current");
-        if (this.settings.usageProbe) {
-          label.appendChild(this.accountMenuTitle(a.email, emailWidth));
-        } else {
-          label.setText(a.email);
-        }
-        label.onclick = () => {
-          if (!this.isAccountEligible(a.email)) {
-            new Notice(
-              "This account is disabled. Turn its toggle on to use it."
-            );
-            return;
-          }
-          this.closeAccountMenu();
-          this.switchToAccount(a.email);
-        };
-
-        // Right shortcut: open claude.ai in the browser mapped to THIS account
-        // (where its SSO/cookie lives) so you can re-login it if it expired —
-        // no need to remember which browser each account uses.
-        const open = row.createDiv({ cls: "cch-acct-open" });
-        setIcon(open, "log-in");
-        open.setAttr(
-          "aria-label",
-          `Open ${this.browserLabelForAccount(a.email)} to log in to this account`
-        );
-        open.onclick = (e) => {
-          e.stopPropagation();
-          this.closeAccountMenu();
-          const browserLabel = this.openLoginForAccount(a.email);
-          new Notice(`Opening ${browserLabel} to log in to ${a.email}…`);
-        };
-      }
-    }
-
-    // Position under the anchor, clamped to the viewport, and dismiss on
-    // outside click / Escape.
-    const r = anchor.getBoundingClientRect();
-    const margin = 8;
-    const rect = pop.getBoundingClientRect();
-    // Sit a bit to the left of the anchor (the button is near the right edge),
-    // then clamp so it never leaves the viewport.
-    let left = r.left - 180;
-    let top = r.bottom + 2;
-    if (left + rect.width > window.innerWidth - margin)
-      left = window.innerWidth - rect.width - margin;
-    left = Math.max(margin, left);
-    if (top + rect.height > window.innerHeight - margin)
-      top = Math.max(margin, window.innerHeight - rect.height - margin);
-    pop.style.left = left + "px";
-    pop.style.top = top + "px";
-    const onDown = (e: MouseEvent) => {
-      if (!pop.contains(e.target as Node) && e.target !== anchor)
-        this.closeAccountMenu();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") this.closeAccountMenu();
-    };
-    setTimeout(() => {
-      document.addEventListener("mousedown", onDown, true);
-      document.addEventListener("keydown", onKey, true);
-    }, 0);
-    this.accountPopupCleanup = () => {
-      document.removeEventListener("mousedown", onDown, true);
-      document.removeEventListener("keydown", onKey, true);
-    };
-  }
-
   // --- History sidebar (reopen any past session, ChatGPT-style drawer) ------
   // A drawer that slides in from the LEFT, OVERLAYING the conversation (it does
   // not compress it) so the full session titles are readable. Mounted inside the
@@ -3031,14 +2369,14 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
         .setChecked(s.autoSwitch)
         .onClick(async () => {
           s.autoSwitch = !s.autoSwitch;
-          this.resetRotationBaseline();
+          this.accounts.resetRotationBaseline();
           await this.saveSettings();
           this.updateAutoSwitchBtn();
           if (s.autoSwitch) {
             // Refresh + probe every account now so the first destination pick uses
             // fresh, alive tokens instead of waiting for the next 3-min tick.
-            void this.refreshUsage({ refreshTokens: true });
-            if (this.listSavedAccounts().length < 2) {
+            void this.accounts.refreshUsage({ refreshTokens: true });
+            if (this.accounts.listSavedAccounts().length < 2) {
               new Notice(
                 "Auto-switch needs at least 2 saved accounts — log in with /login to save more."
               );
@@ -3060,7 +2398,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           .setChecked((s.autoSwitchMode || "threshold") === m.id)
           .onClick(async () => {
             s.autoSwitchMode = m.id;
-            this.resetRotationBaseline();
+            this.accounts.resetRotationBaseline();
             await this.saveSettings();
             this.updateAutoSwitchBtn();
           })
@@ -3082,7 +2420,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
           .onClick(async () => {
             if (rotate) s.autoSwitchDelta = p;
             else s.autoSwitchThreshold = p;
-            this.resetRotationBaseline();
+            this.accounts.resetRotationBaseline();
             await this.saveSettings();
             this.updateAutoSwitchBtn();
           })
@@ -3271,1271 +2609,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.fontLink = link;
   }
 
-  // --- Account email ------------------------------------------------------
-
-  /** The Claude account currently logged in, from ~/.claude.json. Cached for
-   *  ACCOUNT_CACHE_MS (this runs on every pty chunk via maybeAutoSwitch, and
-   *  ~/.claude.json can be megabytes); plugin-side writes invalidate the cache. */
-  private currentAccountEmail(): string | null {
-    const now = Date.now();
-    if (now - this.cachedEmail.at < ACCOUNT_CACHE_MS) return this.cachedEmail.v;
-    let email: string | null = null;
-    try {
-      const fs = nodeRequire("fs");
-      const os = nodeRequire("os");
-      const raw = fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8");
-      const e = JSON.parse(raw)?.oauthAccount?.emailAddress;
-      email = e ? String(e).trim().toLowerCase() : null;
-    } catch {
-      email = null;
-    }
-    this.cachedEmail = { v: email, at: now };
-    return email;
-  }
-
-  /** Drop the cached account email + saved-account list so the next read is
-   *  fresh. Called after every plugin-side write that changes them. */
-  private invalidateAccountCaches() {
-    this.cachedEmail.at = 0;
-    this.cachedAccounts.at = 0;
-  }
-
-  // --- Account switching --------------------------------------------------
-  // Claude Code stores its CLI auth in the plain file ~/.claude/.credentials.json
-  // (claudeAiOauth), and the account metadata in ~/.claude.json (oauthAccount).
-  // We snapshot both per account under ~/.claude/cch-accounts/<email>.json and
-  // switch by writing them back — WITHOUT restarting: a live claude re-reads the
-  // credentials and uses the new account on its next request (see README_TECNICO).
-
-  private accountsDir(): string {
-    return path.join(nodeRequire("os").homedir(), ".claude", "cch-accounts");
-  }
-  private credsPath(): string {
-    return path.join(nodeRequire("os").homedir(), ".claude", ".credentials.json");
-  }
-  private claudeJsonPath(): string {
-    return path.join(nodeRequire("os").homedir(), ".claude.json");
-  }
-  private accountFileName(email: string): string {
-    return email.replace(/[^a-zA-Z0-9._@-]/g, "_") + ".json";
-  }
-
-  /** Write JSON atomically (temp file + rename) so a concurrent reader (the live
-   *  claude re-reading credentials per request) never sees a half-written file. */
-  private writeJsonAtomic(file: string, obj: any) {
-    const fs = nodeRequire("fs");
-    const tmp = file + ".cch-tmp-" + Date.now();
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), "utf8");
-    fs.renameSync(tmp, file);
-  }
-
-  /** Snapshot the active account's credentials + oauthAccount under its email. */
-  saveCurrentAccount(notify = true): string | null {
-    try {
-      const fs = nodeRequire("fs");
-      const creds = JSON.parse(fs.readFileSync(this.credsPath(), "utf8"));
-      const cj = JSON.parse(fs.readFileSync(this.claudeJsonPath(), "utf8"));
-      const oauthAccount = cj?.oauthAccount;
-      const email = oauthAccount?.emailAddress;
-      if (!email) {
-        if (notify) new Notice("No active account email found.");
-        return null;
-      }
-      const dir = this.accountsDir();
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      this.writeJsonAtomic(path.join(dir, this.accountFileName(email)), {
-        email,
-        savedAt: Date.now(),
-        credentials: creds,
-        oauthAccount,
-      });
-      this.invalidateAccountCaches();
-      if (notify) new Notice("Saved Claude account: " + email);
-      return email;
-    } catch (e) {
-      if (notify) new Notice("Could not save the current account.");
-      console.warn("[claude-code-harness] saveCurrentAccount:", e);
-      return null;
-    }
-  }
-
-  /** Saved accounts (from cch-accounts/*.json), sorted by email. Cached for
-   *  ACCOUNT_CACHE_MS (called from the per-chunk auto-switch path); plugin-side
-   *  saves/deletes invalidate the cache. */
-  listSavedAccounts(): { email: string; file: string }[] {
-    const now = Date.now();
-    if (now - this.cachedAccounts.at < ACCOUNT_CACHE_MS) return this.cachedAccounts.v;
-    const list = this.readSavedAccounts();
-    this.cachedAccounts = { v: list, at: now };
-    return list;
-  }
-
-  private readSavedAccounts(): { email: string; file: string }[] {
-    try {
-      const fs = nodeRequire("fs");
-      const dir = this.accountsDir();
-      return fs
-        .readdirSync(dir)
-        .filter((f: string) => f.toLowerCase().endsWith(".json"))
-        .map((f: string) => {
-          try {
-            const j = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
-            return { email: j.email || f.replace(/\.json$/i, ""), file: f };
-          } catch {
-            return { email: f.replace(/\.json$/i, ""), file: f };
-          }
-        })
-        .sort((a: { email: string }, b: { email: string }) =>
-          a.email.localeCompare(b.email)
-        );
-    } catch {
-      return [];
-    }
-  }
-
-  /** Switch to a saved account by hot-swapping the credentials file — NO restart.
-   *  Affects ALL running sessions (they re-read ~/.claude/.credentials.json and
-   *  use the new account on their next request). Snapshots the outgoing account
-   *  first (to keep its freshly-refreshed token). */
-  switchToAccount(email: string) {
-    try {
-      const fs = nodeRequire("fs");
-      const file = path.join(this.accountsDir(), this.accountFileName(email));
-      if (!fs.existsSync(file)) {
-        new Notice("No saved credentials for " + email);
-        return;
-      }
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
-      if (!saved?.credentials?.claudeAiOauth?.accessToken) {
-        new Notice("Saved file for " + email + " has no valid credentials.");
-        return;
-      }
-      // Read ~/.claude.json BEFORE writing anything: if this read throws we
-      // abort with every file intact. (Writing the credentials first left a
-      // half-switched state — new tokens + old oauthAccount — and a later
-      // auto-save could then snapshot the NEW account's tokens under the OLD
-      // account's email, destroying its saved refresh token.)
-      let cj: any = null;
-      if (saved.oauthAccount) {
-        cj = JSON.parse(fs.readFileSync(this.claudeJsonPath(), "utf8"));
-      }
-      const current = this.currentAccountEmail();
-      if (current && current !== email.trim().toLowerCase()) {
-        this.saveCurrentAccount(false); // preserve the outgoing account's latest token
-      }
-      // Atomic writes so the live claude never reads a half-written file.
-      this.writeJsonAtomic(this.credsPath(), saved.credentials);
-      if (cj) {
-        cj.oauthAccount = saved.oauthAccount;
-        this.writeJsonAtomic(this.claudeJsonPath(), cj);
-      }
-      this.invalidateAccountCaches();
-      const target = email.trim().toLowerCase();
-      this.lastAutoSavedEmail = target;
-      this.rotateBaselinePct = null; // new account re-establishes its own baseline
-      this.pendingVerifyEmail = target;
-      this.verifyDeadline = Date.now() + 45000;
-      this.sawStatusSinceSwitch = false;
-      this.authWatchUntil = Date.now() + 60000;
-      if (this.accountBtn) this.accountBtn.title = "Account: " + target; // optimistic
-      new Notice("Switched to " + email + " — used on the next message.");
-    } catch (e) {
-      new Notice("Could not switch account.");
-      console.warn("[claude-code-harness] switchToAccount:", e);
-    }
-  }
-
-  /** Delete a saved account snapshot. */
-  deleteSavedAccount(email: string) {
-    try {
-      const fs = nodeRequire("fs");
-      fs.unlinkSync(path.join(this.accountsDir(), this.accountFileName(email)));
-      this.invalidateAccountCaches();
-    } catch (e) {
-      console.warn("[claude-code-harness] deleteSavedAccount:", e);
-    }
-  }
-
-  /** Is this saved account allowed as an AUTO-switch destination? Friends'
-   *  accounts can be blocked so the plugin never spends their tokens on its own;
-   *  manual switching from the menu is always allowed regardless. */
-  isAccountEligible(email: string): boolean {
-    return !this.settings.autoSwitchExcluded.includes(email.trim().toLowerCase());
-  }
-
-  /** Allow/block an account as an auto-switch destination (persisted). */
-  async toggleAccountEligible(email: string) {
-    const lower = email.trim().toLowerCase();
-    const list = this.settings.autoSwitchExcluded;
-    const i = list.indexOf(lower);
-    if (i >= 0) list.splice(i, 1);
-    else list.push(lower);
-    await this.saveSettings();
-  }
-
-  /** Parse "HH:MM" → minutes since midnight, or null if malformed. */
-  private parseHM(s: string): number | null {
-    const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
-    if (!m) return null;
-    const h = +m[1], mn = +m[2];
-    if (h > 23 || mn > 59) return null;
-    return h * 60 + mn;
-  }
-
-  /** Locate (or, if create, append) the schedule entry for an account email. */
-  scheduleFor(email: string, create = false) {
-    const lower = email.trim().toLowerCase();
-    let e = this.settings.accountSchedules.find(
-      (s) => s.email.trim().toLowerCase() === lower
-    );
-    if (!e && create) {
-      e = { email: lower, ranges: [] };
-      this.settings.accountSchedules.push(e);
-    }
-    return e;
-  }
-
-  /** Locate (or, if create, append) the browser-map entry for an account email. */
-  browserFor(email: string, create = false) {
-    const lower = email.trim().toLowerCase();
-    let m = this.settings.browserMap.find(
-      (b) => b.email.trim().toLowerCase() === lower
-    );
-    if (!m && create) {
-      m = { email: lower, browser: "chrome", path: "" };
-      this.settings.browserMap.push(m);
-    }
-    return m;
-  }
-
-  /** True when `now` falls inside any forbidden window of the account. Handles
-   *  same-day ranges (S<E) and overnight ranges (S>E: the post-midnight portion
-   *  belongs to the START day, so the t<E slice checks YESTERDAY's day membership).
-   *  Fail-safe: no schedule / no days / malformed times → false. */
-  isTimeBlocked(email: string, now = new Date()): boolean {
-    const e = this.scheduleFor(email);
-    if (!e || !e.ranges.length) return false;
-    const t = now.getHours() * 60 + now.getMinutes();
-    const day = now.getDay(); // 0=Sun … 6=Sat
-    const prevDay = (day + 6) % 7;
-    for (const r of e.ranges) {
-      const s = this.parseHM(r.start);
-      const en = this.parseHM(r.end);
-      if (s == null || en == null || s === en) continue;
-      const days = r.days || [];
-      if (s < en) {
-        if (t >= s && t < en && days.includes(day)) return true;
-      } else {
-        // overnight: [s..24h) on the start day, [0..en) on the next day
-        if (t >= s && days.includes(day)) return true;
-        if (t < en && days.includes(prevDay)) return true;
-      }
-    }
-    return false;
-  }
-
-  /** Human label of an account's forbidden ranges, for tooltips/desc. */
-  scheduleBlockLabel(email: string): string {
-    const e = this.scheduleFor(email);
-    if (!e || !e.ranges.length) return "";
-    const dn = ["D", "L", "M", "X", "J", "V", "S"]; // Sun..Sat (ES single-letter)
-    return e.ranges
-      .map((r) => {
-        const days = (r.days || []).slice().sort((a, b) => a - b).map((d) => dn[d]).join("");
-        return `${r.start}–${r.end}${days ? " " + days : ""}`;
-      })
-      .join(", ");
-  }
-
-  /** Cached hard-stop state (active account forbidden now AND nowhere to jump).
-   *  Recomputed by enforceSchedule() every 20s; markActivity() reads this cheaply
-   *  on every output chunk (computing it live would hit the disk per chunk). */
-  isScheduleHardStop(): boolean {
-    return this.scheduleHardStopActive;
-  }
-
-  /** Auto-snapshot the active account whenever it changes (throttled to ~10s). */
-  maybeAutoSaveAccount() {
-    const now = Date.now();
-    if (now - this.lastAutoSaveCheck < 10000) return;
-    this.lastAutoSaveCheck = now;
-    const email = this.currentAccountEmail();
-    if (!email || email === this.lastAutoSavedEmail) return;
-    let existed = false;
-    try {
-      const fs = nodeRequire("fs");
-      existed = fs.existsSync(path.join(this.accountsDir(), this.accountFileName(email)));
-    } catch {
-      /* ignore */
-    }
-    const saved = this.saveCurrentAccount(false);
-    if (saved) {
-      this.lastAutoSavedEmail = email;
-      if (!existed) new Notice("Auto-saved Claude account: " + email);
-    }
-  }
-
-  /** Forget the rotate-mode baseline (re-captured on the next reading). */
-  resetRotationBaseline() {
-    this.rotateBaselinePct = null;
-  }
-
-  /** True when `email` has a FRESH 7d reading at/over the weekly ceiling, i.e. it
-   *  is about to hit its weekly limit and must NOT be used as a switch target.
-   *  Fail-open: unknown/stale/error 7d → false (don't exclude on missing data). */
-  private weeklyMaxedOut(email: string): boolean {
-    const u = this.accountUsage.get(email.trim().toLowerCase());
-    if (!u || u.error || u.pct7d == null) return false;
-    if (Date.now() - u.checkedAt >= USAGE_FRESH_MS) return false;
-    return u.pct7d >= WEEKLY_CEILING_PCT;
-  }
-
-  /** True cuando `email` está INELEGIBLE como DESTINO de auto-switch por un tope de
-   *  uso o un token muerto — espejo de los guards de pickNextAccount/leastUsedBelow:
-   *  token caducado, 5h FRESCO ≥ techo (90), o 7d FRESCO ≥ techo semanal (95). Para
-   *  marcar esas filas en rojo en el menú 👤. NO mira la lista de bloqueo manual
-   *  (eso ya lo cubre cch-acct-blocked). Fail-open con datos ausentes/viejos (igual
-   *  que la decisión real: sin lectura fresca → no se excluye → no rojo). */
-  private isSwitchTargetCapped(email: string): boolean {
-    const u = this.accountUsage.get(email.trim().toLowerCase());
-    if (!u) return false;
-    if (u.error === "auth") return true;
-    const fresh = Date.now() - u.checkedAt < USAGE_FRESH_MS;
-    if (fresh && u.pct5h != null && u.pct5h >= SWITCH_CEILING_PCT) return true;
-    if (this.weeklyMaxedOut(email)) return true; // ya gestiona frescura + ≥95
-    return false;
-  }
-
-  /** Account to switch to: the **least-used** one (lowest probed 5h %), skipping
-   *  dead-token accounts and any whose 7d usage is ≥ the weekly ceiling. Falls
-   *  back to round-robin. Null if nowhere to go. */
-  private pickNextAccount(): string | null {
-    const saved = this.listSavedAccounts().map((a) => a.email);
-    if (saved.length < 2) return null;
-    const cur = this.currentAccountEmail();
-    const others = saved.filter(
-      (e) => e.trim().toLowerCase() !== cur && this.isAccountEligible(e)
-    );
-    if (!others.length) return null;
-
-    let best: string | null = null;
-    let bestPct = Infinity;
-    for (const e of others) {
-      if (this.isTimeBlocked(e)) continue; // forbidden time window
-      const u = this.accountUsage.get(e.trim().toLowerCase());
-      if (u?.error === "auth") continue; // dead token — can't use it
-      if (this.weeklyMaxedOut(e)) continue; // 7d ≥ ceiling — about to hit weekly limit
-      const pct =
-        u && u.pct5h != null && Date.now() - u.checkedAt < USAGE_FRESH_MS
-          ? u.pct5h
-          : Infinity;
-      if (pct < bestPct) {
-        bestPct = pct;
-        best = e;
-      }
-    }
-    if (best && bestPct < Infinity) return best;
-
-    const idx = saved.findIndex((e) => e.trim().toLowerCase() === cur);
-    const start = idx >= 0 ? idx + 1 : 0;
-    for (let i = 0; i < saved.length; i++) {
-      const cand = saved[(start + i) % saved.length];
-      if (cand.trim().toLowerCase() === cur) continue;
-      if (!this.isAccountEligible(cand)) continue;
-      if (this.isTimeBlocked(cand)) continue; // forbidden time window
-      if (this.accountUsage.get(cand.trim().toLowerCase())?.error === "auth") continue;
-      if (this.weeklyMaxedOut(cand)) continue; // 7d ≥ ceiling — about to hit weekly limit
-      return cand;
-    }
-    return best; // may be null
-  }
-
-  /** Least-used eligible account (not the current one) whose FRESH 5h usage is
-   *  strictly below `maxPct`. Returns null when none qualifies — no fresh
-   *  reading, all blocked, or every candidate is already at/over `maxPct` (so
-   *  switching there would not buy any margin). This is what enforces the
-   *  "always jump to a less-spent account, keep a 10% margin" rule. */
-  private leastUsedBelow(maxPct: number): { email: string; pct: number } | null {
-    const cur = this.currentAccountEmail();
-    let best: string | null = null;
-    let bestPct = Infinity;
-    for (const a of this.listSavedAccounts()) {
-      const lower = a.email.trim().toLowerCase();
-      if (lower === cur) continue;
-      if (!this.isAccountEligible(a.email)) continue;
-      if (this.isTimeBlocked(a.email)) continue; // forbidden time window
-      const u = this.accountUsage.get(lower);
-      if (!u || u.error === "auth" || u.pct5h == null) continue;
-      if (Date.now() - u.checkedAt >= USAGE_FRESH_MS) continue;
-      if (u.pct5h >= maxPct) continue; // no room → keep the 10% margin elsewhere
-      if (this.weeklyMaxedOut(a.email)) continue; // 7d ≥ ceiling — about to hit weekly limit
-      if (u.pct5h < bestPct) {
-        bestPct = u.pct5h;
-        best = a.email;
-      }
-    }
-    return best ? { email: best, pct: bestPct } : null;
-  }
-
-  /** True if at least one eligible non-current account has a FRESH 5h reading
-   *  (whatever its value). Lets us tell "every other account is maxed out" apart
-   *  from "we simply have no usage data yet" when deciding whether to stay. */
-  private haveFreshUsageData(): boolean {
-    const cur = this.currentAccountEmail();
-    for (const a of this.listSavedAccounts()) {
-      const lower = a.email.trim().toLowerCase();
-      if (lower === cur) continue;
-      if (!this.isAccountEligible(a.email)) continue;
-      const u = this.accountUsage.get(lower);
-      if (u && !u.error && u.pct5h != null && Date.now() - u.checkedAt < USAGE_FRESH_MS) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** One-shot notice when an auto-switch is wanted but there is genuinely no
-   *  destination (only one account saved, or every other one is blocked). NOT
-   *  shown when the reason is "everyone is maxed" — that is a normal stay. */
-  private maybeWarnNoAccounts() {
-    if (this.warnedNoAccounts) return;
-    this.warnedNoAccounts = true;
-    const eligible = this.listSavedAccounts().filter(
-      (a) =>
-        a.email.trim().toLowerCase() !== this.currentAccountEmail() &&
-        this.isAccountEligible(a.email)
-    ).length;
-    new Notice(
-      eligible === 0 && this.listSavedAccounts().length >= 2
-        ? "Auto-switch: every other account is blocked — allow one in the 👤 menu."
-        : "Auto-switch: save at least 2 accounts (log in with /login)."
-    );
-  }
-
-  // --- Live usage probe (API rate-limit headers) --------------------------
-
-  /** OAuth access token for an account: live creds for the active account,
-   *  otherwise the saved snapshot. Null if unreadable. */
-  private accessTokenFor(email: string): string | null {
-    try {
-      const fs = nodeRequire("fs");
-      const lower = email.trim().toLowerCase();
-      const file =
-        lower === this.currentAccountEmail()
-          ? this.credsPath()
-          : path.join(this.accountsDir(), this.accountFileName(email));
-      const j = JSON.parse(fs.readFileSync(file, "utf8"));
-      return (
-        j?.claudeAiOauth?.accessToken ||
-        j?.credentials?.claudeAiOauth?.accessToken ||
-        null
-      );
-    } catch {
-      return null;
-    }
-  }
-
-  /** Refresh one account's OAuth token (the same grant Claude Code uses) and
-   *  persist the rotated pair atomically. Returns true on success. Only touches
-   *  the file on HTTP 200, so a failure never destroys the refresh token. */
-  private async refreshAccount(email: string): Promise<boolean> {
-    const fs = nodeRequire("fs");
-    const lower = email.trim().toLowerCase();
-    const isActive = lower === this.currentAccountEmail();
-    // The ACTIVE account is refreshed by `claude` itself (it re-reads
-    // .credentials.json and rotates the refresh token lazily on each request).
-    // Refreshing it from here too would race against that rotation: if we rotate
-    // RT1→RT2 while claude still holds RT1, claude's next refresh uses a dead
-    // token → 401 → forced /login. So we leave the active account to claude and
-    // only keep INACTIVE accounts (which claude never touches) alive from here.
-    if (isActive) {
-      console.log("[cch keepalive] skip active", lower, "(claude owns refresh)");
-      return true; // let refreshUsage probe with the live token as-is
-    }
-    const file = isActive
-      ? this.credsPath()
-      : path.join(this.accountsDir(), this.accountFileName(email));
-
-    let store: any;
-    try {
-      store = JSON.parse(fs.readFileSync(file, "utf8"));
-    } catch {
-      return false;
-    }
-    const oauth = isActive ? store?.claudeAiOauth : store?.credentials?.claudeAiOauth;
-    const refreshToken = oauth?.refreshToken;
-    if (!refreshToken) return false;
-
-    const prev = Number(oauth.expiresAt) || 0;
-    const prevMs = prev > 0 && prev < 1e12 ? prev * 1000 : prev;
-    if (prevMs && prevMs - Date.now() > REFRESH_SKEW_MS) return true; // still alive
-
-    console.log("[cch keepalive] refreshing", lower);
-    const resp = await this.oauthRefresh(refreshToken);
-    if (!resp) {
-      console.warn("[cch keepalive] refresh FAILED", lower, "(see cause above)");
-      return false; // network/HTTP error → keep old creds intact
-    }
-
-    // Best-effort fallback when the response omits expires_in: assume hours,
-    // not 0 — a zero TTL writes an already-expired expiresAt, which re-refreshed
-    // (and rotated) the token on every 3-min tick against an endpoint that
-    // rate-limits hard (429 observed).
-    const ttl = resp.expires_in || 8 * 3600;
-    const expiresAt =
-      prev > 0 && prev < 1e12
-        ? Math.floor(Date.now() / 1000) + ttl // seconds
-        : Date.now() + ttl * 1000; // milliseconds
-    const merged = {
-      ...oauth,
-      accessToken: resp.access_token,
-      refreshToken: resp.refresh_token || refreshToken,
-      expiresAt,
-    };
-    if (isActive) {
-      store.claudeAiOauth = merged;
-    } else {
-      store.credentials = store.credentials || {};
-      store.credentials.claudeAiOauth = merged;
-    }
-    try {
-      this.writeJsonAtomic(file, store);
-    } catch {
-      return false;
-    }
-    console.log("[cch keepalive] refreshed", lower, "ok");
-    return true;
-  }
-
-  /** POST the OAuth refresh-token grant. Resolves to the parsed token response on
-   *  HTTP 200, or null on any error (never rejects). */
-  private oauthRefresh(
-    refreshToken: string
-  ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | null> {
-    return new Promise((resolve) => {
-      let https: any;
-      try {
-        https = nodeRequire("https");
-      } catch {
-        resolve(null);
-        return;
-      }
-      const body = JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: OAUTH_CLIENT_ID,
-      });
-      const u = new URL(OAUTH_TOKEN_URL);
-      let done = false;
-      const finish = (r: any) => {
-        if (done) return;
-        done = true;
-        resolve(r);
-      };
-      const req = https.request(
-        {
-          method: "POST",
-          hostname: u.hostname,
-          path: u.pathname,
-          headers: {
-            "content-type": "application/json",
-            "content-length": Buffer.byteLength(body),
-          },
-          timeout: 15000,
-        },
-        (res: any) => {
-          const status = res.statusCode;
-          let data = "";
-          res.on("data", (c: any) => (data += c));
-          res.on("end", () => {
-            if (status !== 200) {
-              // 401 = refresh token dead/rotated out from under us; 429 = the
-              // token endpoint rate-limited us (it limits hard). Either way the
-              // old creds are kept intact by the caller.
-              console.warn(
-                "[cch keepalive] token endpoint HTTP",
-                status,
-                String(data).slice(0, 200)
-              );
-              return finish(null);
-            }
-            try {
-              const j = JSON.parse(data);
-              finish(j?.access_token ? j : null);
-            } catch {
-              finish(null);
-            }
-          });
-        }
-      );
-      req.on("error", (e: any) => {
-        console.warn("[cch keepalive] token endpoint network error", e?.message || e);
-        finish(null);
-      });
-      req.on("timeout", () => {
-        console.warn("[cch keepalive] token endpoint timeout");
-        req.destroy();
-        finish(null);
-      });
-      req.write(body);
-      req.end();
-    });
-  }
-
-  /** Probe one account's usage via a minimal API call, reading the rate-limit
-   *  response headers. Resolves to an AccountUsage (never rejects). */
-  private probeUsage(token: string): Promise<AccountUsage> {
-    const now = Date.now();
-    const empty = (error: AccountUsage["error"]): AccountUsage => ({
-      pct5h: null,
-      reset5h: null,
-      pct7d: null,
-      reset7d: null,
-      status: null,
-      error,
-      checkedAt: now,
-    });
-    return new Promise((resolve) => {
-      let https: any;
-      try {
-        https = nodeRequire("https");
-      } catch {
-        resolve(empty("net"));
-        return;
-      }
-      const model = this.settings.usageProbeModel?.trim() || USAGE_PROBE_MODEL;
-      const body = JSON.stringify({
-        model,
-        max_tokens: 1,
-        messages: [{ role: "user", content: "hi" }],
-      });
-      const u = new URL(USAGE_API_URL);
-      const toPct = (v: string | undefined): number | null => {
-        if (v == null) return null;
-        const f = parseFloat(v);
-        if (isNaN(f)) return null;
-        // The unified-utilization headers are ALWAYS a 0..1 fraction, so always
-        // ×100. (The old `f <= 1 ? …` guard mis-read a maxed-out account: at the
-        // limit the fraction is ~1.0 and can tip just above 1.0, e.g. 1.02, which
-        // the guard treated as "already a %" → reported 100% as 1%.) Cap at 100.
-        return Math.min(100, Math.round(f * 100));
-      };
-      let done = false;
-      const finish = (r: AccountUsage) => {
-        if (done) return;
-        done = true;
-        resolve(r);
-      };
-      const req = https.request(
-        {
-          method: "POST",
-          hostname: u.hostname,
-          path: u.pathname,
-          headers: {
-            authorization: "Bearer " + token,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "anthropic-beta": OAUTH_BETA,
-            "content-type": "application/json",
-            "content-length": Buffer.byteLength(body),
-          },
-          timeout: 15000,
-        },
-        (res: any) => {
-          const h = res.headers || {}; // Node lowercases header names
-          const status = res.statusCode;
-          res.on("data", () => {});
-          res.on("end", () => {
-            if (status === 401) return finish(empty("auth"));
-            const pct5h = toPct(h[H_5H_UTIL]);
-            if (pct5h == null) {
-              return finish(empty(status === 429 ? "rate" : "net"));
-            }
-            const reset = parseInt(h[H_5H_RESET], 10);
-            // 7d reset: prefer the expected header, else scan for any header
-            // whose name mentions both "7d" and "reset" (robust to a rename).
-            let raw7d = h[H_7D_RESET];
-            if (raw7d == null) {
-              for (const k of Object.keys(h)) {
-                if (k.includes("7d") && k.includes("reset")) {
-                  raw7d = h[k];
-                  break;
-                }
-              }
-            }
-            const reset7 = parseInt(raw7d, 10);
-            finish({
-              pct5h,
-              reset5h: isNaN(reset) ? null : reset,
-              pct7d: toPct(h[H_7D_UTIL]),
-              reset7d: isNaN(reset7) ? null : reset7,
-              status: h[H_5H_STATUS] || null,
-              error: null,
-              checkedAt: now,
-            });
-          });
-        }
-      );
-      req.on("error", () => finish(empty("net")));
-      req.on("timeout", () => {
-        req.destroy();
-        finish(empty("net"));
-      });
-      req.write(body);
-      req.end();
-    });
-  }
-
-  /** Refresh cached usage for the active account (activeOnly) or every saved
-   *  account. With `refreshTokens`, each account's OAuth token is refreshed first. */
-  async refreshUsage(opts: { activeOnly?: boolean; refreshTokens?: boolean } = {}) {
-    if (!this.settings.usageProbe || this.usageProbing) return;
-    this.usageProbing = true;
-    try {
-      const cur = this.currentAccountEmail();
-      let emails: string[];
-      if (opts.activeOnly) {
-        emails = cur ? [cur] : [];
-      } else {
-        const set = new Set(
-          this.listSavedAccounts().map((a) => a.email.trim().toLowerCase())
-        );
-        if (cur) set.add(cur);
-        emails = [...set];
-      }
-      for (const email of emails) {
-        if (opts.refreshTokens) await this.refreshAccount(email);
-        const token = this.accessTokenFor(email);
-        if (!token) {
-          this.accountUsage.set(email, {
-            pct5h: null,
-            reset5h: null,
-            pct7d: null,
-            reset7d: null,
-            status: null,
-            error: "auth",
-            checkedAt: Date.now(),
-          });
-          continue;
-        }
-        const usage = await this.probeUsage(token);
-        this.accountUsage.set(email, usage);
-        await new Promise((r) => setTimeout(r, 300)); // gentle spacing
-      }
-      this.updateAutoSwitchBtn();
-    } finally {
-      this.usageProbing = false;
-    }
-  }
-
-  /** Fresh probed 5h % for an account, or null if missing/stale/errored. */
-  private usagePct(email: string | null): number | null {
-    if (!email) return null;
-    const u = this.accountUsage.get(email.trim().toLowerCase());
-    if (!u || u.error || u.pct5h == null) return null;
-    if (Date.now() - u.checkedAt > USAGE_FRESH_MS) return null;
-    return u.pct5h;
-  }
-
-  /** "Time left until `epoch`" as a short countdown, or "" if missing/past.
-   *  Scales the units: days+hours for the 7d window, hours+minutes (or just
-   *  minutes) for the 5h window. */
-  private resetCountdown(epoch: number | null): string {
-    if (!epoch) return "";
-    const diff = epoch - Math.floor(Date.now() / 1000);
-    if (diff <= 0) return "";
-    const d = Math.floor(diff / 86400);
-    const h = Math.floor((diff % 86400) / 3600);
-    const m = Math.floor((diff % 3600) / 60);
-    if (d > 0) return `${d}d ${h}h`;
-    if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
-    return `${m}m`;
-  }
-
-  /** Short label for an account's cached usage (plain text, for settings). */
-  usageLabel(email: string): string {
-    const u = this.accountUsage.get(email.trim().toLowerCase());
-    if (!u) return "…";
-    if (u.error === "auth") return "expired";
-    if (u.error === "rate") return "rate-limited";
-    if (u.error) return "unavailable";
-    if (u.pct5h == null) return "…";
-    let s = "5h " + u.pct5h + "%";
-    const cd5 = this.resetCountdown(u.reset5h);
-    if (cd5) s += ` (${cd5})`;
-    if (u.pct7d != null) {
-      s += " · 7d " + u.pct7d + "%";
-      const cd7 = this.resetCountdown(u.reset7d);
-      if (cd7) s += ` (${cd7})`;
-    }
-    return s;
-  }
-
-  /** Colour for a usage %: green (low/least used) → red (near the limit). */
-  private usageColor(pct: number): string {
-    if (pct >= 90) return "var(--color-red)";
-    if (pct >= 75) return "var(--color-orange)";
-    if (pct >= 50) return "var(--color-yellow)";
-    return "var(--color-green)";
-  }
-
-  /** Aligned, colour-coded title for an account in the 👤 menu. */
-  private accountMenuTitle(email: string, emailWidth: number): DocumentFragment {
-    const frag = document.createDocumentFragment();
-    const seg = (text: string, color?: string) => {
-      const s = document.createElement("span");
-      s.textContent = text;
-      s.style.fontFamily = "var(--font-monospace)";
-      s.style.whiteSpace = "pre";
-      if (color) s.style.color = color;
-      frag.appendChild(s);
-    };
-    seg(email.padEnd(emailWidth + 2, " "));
-
-    const u = this.accountUsage.get(email.trim().toLowerCase());
-    if (!u || (u.pct5h == null && !u.error)) {
-      seg("…", "var(--text-muted)");
-      return frag;
-    }
-    if (u.error === "auth") return (seg("expired", "var(--color-orange)"), frag);
-    if (u.error === "rate") return (seg("rate-limited", "var(--color-orange)"), frag);
-    if (u.error || u.pct5h == null) return (seg("unavailable", "var(--text-muted)"), frag);
-
-    seg("5h ", "var(--text-muted)");
-    seg(String(u.pct5h).padStart(3, " ") + "%", this.usageColor(u.pct5h));
-
-    const cd5 = this.resetCountdown(u.reset5h);
-    seg("  " + (cd5 ? `(${cd5})` : "").padEnd(9, " "), "var(--text-muted)");
-
-    if (u.pct7d != null) {
-      seg("· 7d ", "var(--text-muted)");
-      seg(String(u.pct7d).padStart(3, " ") + "%", this.usageColor(u.pct7d));
-      const cd7 = this.resetCountdown(u.reset7d);
-      seg("  " + (cd7 ? `(${cd7})` : ""), "var(--text-muted)");
-    }
-    return frag;
-  }
-
-  /** Debounced probe of the active account on terminal activity (≥60s apart). */
-  maybeProbeOnActivity() {
-    if (!this.settings.usageProbe) return;
-    const now = Date.now();
-    if (now - this.lastActiveProbe < 60000) return;
-    this.lastActiveProbe = now;
-    void this.refreshUsage({ activeOnly: true });
-  }
-
-  /** Emails of accounts we know about (saved snapshots ∪ the active one). */
-  private knownAccountEmails(): Set<string> {
-    const set = new Set(this.listSavedAccounts().map((a) => a.email.trim().toLowerCase()));
-    const cur = this.currentAccountEmail();
-    if (cur) set.add(cur);
-    return set;
-  }
-
-  /** Compiled usage-% regex (settings override, safe fallback to the default). */
-  private usageRegex(): RegExp {
-    const src = this.settings.autoSwitchUsageRegex?.trim() || DEFAULT_USAGE_RE;
-    try {
-      return new RegExp(src);
-    } catch {
-      return new RegExp(DEFAULT_USAGE_RE);
-    }
-  }
-
-  /** Process a session's output: track the active account from the status bar
-   *  (label + swap verification + auth-fail recovery) and, if enabled, auto-switch
-   *  accounts by usage. Fed every `data` chunk from every session; uses that
-   *  session's rolling buffer, but the decision state (cooldown, baseline, verify)
-   *  is global because the credentials are shared across all instances. */
-  maybeAutoSwitch(session: Session, chunk: string) {
-    session.autoSwitchBuf = (session.autoSwitchBuf + chunk).slice(-3000);
-    const clean = session.autoSwitchBuf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-
-    // --- Track the account shown in the status bar -------------------------
-    const known = this.knownAccountEmails();
-    let barEmail: string | null = null;
-    for (const e of clean.match(EMAIL_RE) || []) {
-      if (known.has(e.trim().toLowerCase())) barEmail = e.trim().toLowerCase();
-    }
-    if (barEmail && barEmail !== this.barAccountEmail) {
-      this.barAccountEmail = barEmail;
-      this.sawStatusSinceSwitch = true;
-      if (this.accountBtn) this.accountBtn.title = "Account: " + barEmail;
-    } else if (barEmail) {
-      this.sawStatusSinceSwitch = true;
-    }
-
-    // --- Verify a pending swap actually took effect -----------------------
-    if (this.pendingVerifyEmail) {
-      if (this.barAccountEmail === this.pendingVerifyEmail) {
-        new Notice("✓ Active account: " + this.pendingVerifyEmail);
-        this.pendingVerifyEmail = null;
-        this.recoverAttempts = 0;
-      } else if (Date.now() > this.verifyDeadline) {
-        if (this.sawStatusSinceSwitch && this.barAccountEmail) {
-          new Notice(
-            "Could not confirm switch (still on " + this.barAccountEmail +
-              ") — send a message to apply it."
-          );
-        }
-        this.pendingVerifyEmail = null;
-      }
-    }
-
-    // --- Auth failure after a swap (a saved token may be dead) ------------
-    if (Date.now() < this.authWatchUntil && AUTH_FAIL_RE.test(clean)) {
-      this.authWatchUntil = 0;
-      const bad = this.barAccountEmail || "the account";
-      new Notice("Auth failed for " + bad + " — its saved token may be stale. Run /login.");
-      if (this.settings.autoSwitch && this.recoverAttempts < this.listSavedAccounts().length) {
-        this.recoverAttempts++;
-        const next = this.pickNextAccount();
-        if (next) this.triggerSwitch(next, "auth failed");
-      }
-      return;
-    }
-
-    // --- Auto-switch decision --------------------------------------------
-    const cur = this.currentAccountEmail();
-    let pct: number | null = null;
-    let src = "none";
-    // Keep the LAST match in the rolling buffer: old status-bar repaints linger
-    // in it, so the first match is the OLDEST % (a stale reading that delayed
-    // threshold crossings). Same policy as the email scan above.
-    const re = this.usageRegex();
-    const gre = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-    let m: RegExpMatchArray | null = null;
-    for (const mm of clean.matchAll(gre)) m = mm;
-    const scraped = m && m[1] !== undefined ? parseInt(m[1], 10) : NaN;
-    if (!isNaN(scraped)) {
-      if (this.barAccountEmail && this.barAccountEmail !== cur) {
-        src = "scrape(anchored-out)";
-      } else {
-        pct = scraped;
-        src = "scrape";
-      }
-    }
-    if (pct == null) {
-      pct = this.usagePct(cur);
-      if (pct != null) src = "api";
-    }
-
-    const decide = (): string => {
-      if (!this.settings.autoSwitch) return "auto-switch is OFF";
-      const cd = this.autoSwitchCooldownUntil - Date.now();
-      if (cd > 0) return `in cooldown (${Math.ceil(cd / 1000)}s left after last switch)`;
-      if (LIMIT_STOP_RE.test(clean)) {
-        this.requestSwitch("limit reached");
-        return "switching now — “limit reached” message detected";
-      }
-      if (pct == null) {
-        return src === "scrape(anchored-out)"
-          ? "no usable % — status bar shows another account and no fresh API reading"
-          : "no usage % available yet (status bar not scraped and no fresh API reading)";
-      }
-      // Destination that keeps the 10% margin: least-used eligible account still
-      // BELOW the ceiling. Falls back to plain round-robin ONLY when we have no
-      // fresh usage data at all (can't compare) — if we DO have data but every
-      // other account is ≥90%, there is deliberately no target (we stay put).
-      const pickMargined = (): string | null => {
-        const t = this.leastUsedBelow(SWITCH_CEILING_PCT);
-        if (t) return t.email;
-        if (!this.haveFreshUsageData()) return this.pickNextAccount();
-        return null;
-      };
-      // Switch to the margined destination, or explain why we stay. `wantReason`
-      // is the human reason for the switch; `stayReason` describes staying.
-      const switchOrStay = (wantReason: string, stayReason: string): string => {
-        const next = pickMargined();
-        if (next) {
-          this.triggerSwitch(next, wantReason);
-          return `switching now — ${wantReason} → ${next}`;
-        }
-        // No destination: warn only if it's a real config problem (no/blocked
-        // accounts), stay quietly if it's just "everyone is maxed".
-        if (this.pickNextAccount() == null) this.maybeWarnNoAccounts();
-        return stayReason;
-      };
-
-      // --- Hard 90% ceiling — overrides the mode/threshold settings. ----------
-      // At ≥90% we must move to preserve the 10% margin, but ONLY toward an
-      // account that still has room (<90%). If every other account is ≥90% (or
-      // none is eligible) we stay and run THIS account to the limit.
-      if (pct >= SWITCH_CEILING_PCT) {
-        return switchOrStay(
-          `at ${pct}% (≥${SWITCH_CEILING_PCT}% cap)`,
-          `at ${pct}% (${src}) — every other account is ≥${SWITCH_CEILING_PCT}% (or none eligible); staying to max it out`
-        );
-      }
-
-      // --- Below 90% — the configured mode/threshold drives the timing. -------
-      if (this.settings.autoSwitchMode === "rotate") {
-        const delta = this.settings.autoSwitchDelta || 10;
-        if (this.rotateBaselinePct === null) {
-          this.rotateBaselinePct = pct;
-          return `baseline set at ${pct}% — will rotate at ${pct + delta}% (+${delta})`;
-        }
-        if (pct < this.rotateBaselinePct) {
-          this.rotateBaselinePct = pct;
-          return `usage dropped → baseline re-based to ${pct}%`;
-        }
-        const target = this.rotateBaselinePct + delta;
-        if (pct < target) {
-          return `at ${pct}% (${src}); need ${target}% to rotate (baseline ${this.rotateBaselinePct} +${delta})`;
-        }
-        return switchOrStay(
-          `at ${pct}%`,
-          `at ${pct}% — would rotate but no account has margin (<${SWITCH_CEILING_PCT}%); staying`
-        );
-      }
-      const th = this.settings.autoSwitchThreshold;
-      if (pct < th) return `at ${pct}% (${src}); threshold is ${th}%`;
-      return switchOrStay(
-        `at ${pct}%`,
-        `at ${pct}% ≥ threshold ${th}% — but no account has margin (<${SWITCH_CEILING_PCT}%); staying`
-      );
-    };
-
-    const reason = decide();
-    this.lastDiagInfo = {
-      at: Date.now(),
-      mode: this.settings.autoSwitchMode,
-      enabled: this.settings.autoSwitch,
-      pct,
-      src,
-      cur,
-      bar: this.barAccountEmail,
-      baseline: this.rotateBaselinePct,
-      delta: this.settings.autoSwitchDelta,
-      threshold: this.settings.autoSwitchThreshold,
-      savedAccounts: this.listSavedAccounts().length,
-      reason,
-    };
-    if (Date.now() - this.lastAutoSwitchDiag > 4000) {
-      this.lastAutoSwitchDiag = Date.now();
-      console.log("[cch auto-switch]", this.lastDiagInfo);
-    }
-  }
-
-  /** Show the last auto-switch evaluation (why no account change fired). */
-  private diagnoseAutoSwitch() {
-    const d = this.lastDiagInfo;
-    if (!d) {
-      new Notice(
-        "Auto-switch: no reading yet. Use Claude so it prints output (the status line), then run this again."
-      );
-      return;
-    }
-    const age = Math.round((Date.now() - d.at) / 1000);
-    const lines = [
-      "Auto-switch — " + d.reason,
-      `• mode: ${d.mode}${d.enabled ? "" : " (disabled)"}`,
-      `• usage: ${d.pct == null ? "—" : d.pct + "%"} (source: ${d.src})`,
-      d.mode === "rotate"
-        ? `• baseline: ${d.baseline == null ? "—" : d.baseline + "%"} · delta: +${d.delta}`
-        : `• threshold: ${d.threshold}%`,
-      `• active: ${d.cur || "?"} · status bar: ${d.bar || "?"}`,
-      `• saved accounts: ${d.savedAccounts}`,
-      `(evaluated ${age}s ago)`,
-    ];
-    new Notice(lines.join("\n"), 12000);
-    console.log("[cch auto-switch] diagnose", d);
-  }
-
-  /** Pick the next account and switch, or warn once if there aren't ≥2 saved.
-   *  Used by the emergency paths (limit-reached / auth-failure) that must move to
-   *  any working account regardless of the 10% margin. */
-  private requestSwitch(reason: string) {
-    const next = this.pickNextAccount();
-    if (!next) {
-      this.maybeWarnNoAccounts();
-      return;
-    }
-    this.triggerSwitch(next, reason);
-  }
-
-  /** Enforce per-account forbidden time windows. Runs on a timer regardless of the
-   *  `autoSwitch` setting (it's a separate hard rule). If the ACTIVE account is in a
-   *  forbidden window: jump to another eligible account if one exists; otherwise
-   *  stop Claude (interrupt any in-flight generation) and notify once. The 20s
-   *  tick is a backstop — markActivity() also cuts generations promptly. */
-  enforceSchedule() {
-    const cur = this.currentAccountEmail();
-    if (!cur || !this.isTimeBlocked(cur)) {
-      this.scheduleHardStopActive = false;
-      this.scheduleStopNotified = false;
-      return;
-    }
-    const next = this.pickNextAccount(); // skips time-blocked/capped/ineligible/dead
-    if (next) {
-      this.scheduleHardStopActive = false;
-      this.scheduleStopNotified = false;
-      if (Date.now() < this.autoSwitchCooldownUntil) return;
-      this.triggerSwitch(next, "blocked by schedule");
-    } else {
-      this.scheduleHardStopActive = true;
-      for (const s of this.sessions) if (s.busy) s.interrupt();
-      this.notifyScheduleStop();
-    }
-  }
-
-  /** One-shot "Claude stopped by schedule" notice (re-armed when the window ends). */
-  notifyScheduleStop() {
-    if (this.scheduleStopNotified) return;
-    this.scheduleStopNotified = true;
-    new Notice(
-      "La cuenta activa está prohibida ahora por horario y no hay otra a la que saltar — Claude detenido."
-    );
-  }
-
-  /** Common path for an automatic switch: set cooldown, reset state, notify, swap. */
-  private triggerSwitch(next: string, reason: string) {
-    this.autoSwitchCooldownUntil = Date.now() + 10000;
-    this.rotateBaselinePct = null; // recapture baseline for the new account
-    // Drop the trigger text from every session's rolling buffer: a "limit
-    // reached" message (or an old %) lingering there would re-fire another
-    // switch after each cooldown until 3000 chars of new output pushed it out.
-    for (const s of this.sessions) s.autoSwitchBuf = "";
-    new Notice(`Claude account ${reason} — switching to ${next}…`);
-    this.switchToAccount(next);
-  }
-
-  /** Open the remote session URL in the browser mapped to the active Claude
-   *  account. Returns a human label for the notice. */
-  openInBrowser(url: string): string {
-    const email = this.currentAccountEmail();
-    const map = this.settings.browserMap.find(
-      (m) => m.email.trim().toLowerCase() === email && !!email
-    );
-    const browser = map?.browser || this.settings.defaultBrowser || "chrome";
-    return this.launchBrowser(browser, map?.path || "", url);
-  }
-
-  /** Open claude.ai in the browser MAPPED TO A SPECIFIC account (not the active
-   *  one) so the user can re-login that account in the right browser — the one
-   *  where its SSO/cookie lives — without remembering the pairing. Falls back to
-   *  the default browser if the account has no mapping. Brings the window to the
-   *  foreground but does NOT toggle fullscreen (you're logging in, not viewing). */
-  openLoginForAccount(email: string): string {
-    const e = email.trim().toLowerCase();
-    const map = this.settings.browserMap.find(
-      (m) => m.email.trim().toLowerCase() === e && !!e
-    );
-    const browser = map?.browser || this.settings.defaultBrowser || "chrome";
-    return this.launchBrowser(browser, map?.path || "", CLAUDE_LOGIN_URL, false);
-  }
-
-  /** The browser this account is (or would be) opened in — for labels/tooltips. */
-  browserLabelForAccount(email: string): string {
-    const e = email.trim().toLowerCase();
-    const map = this.settings.browserMap.find(
-      (m) => m.email.trim().toLowerCase() === e && !!e
-    );
-    const browser = map?.browser || this.settings.defaultBrowser || "chrome";
-    if (browser === "default") return "default browser";
-    if (browser === "custom")
-      return map?.path ? path.basename(map.path) : "default browser";
-    return BROWSERS[browser]?.label || browser;
-  }
-
-  /** Launch a specific browser with the URL (new tab in the running instance). */
-  private launchBrowser(
-    browser: string,
-    customPath: string,
-    url: string,
-    fullscreen = true
-  ): string {
-    const openDefault = () => {
-      try {
-        nodeRequire("electron")?.shell?.openExternal(url);
-      } catch {
-        /* nothing else to try; the URL is still on the clipboard */
-      }
-    };
-    try {
-      const cp = nodeRequire("child_process");
-      const fs = nodeRequire("fs");
-      const expand = (p: string) =>
-        p.replace(/%([^%]+)%/g, (_, v) => (process.env as any)[v] || "");
-
-      if (browser === "default") {
-        openDefault();
-        return "default browser";
-      }
-      if (browser === "custom") {
-        if (customPath) {
-          cp.spawn(customPath, [url], { detached: true, stdio: "ignore" }).unref();
-          this.focusFullscreen(
-            path.basename(customPath).replace(/\.exe$/i, ""),
-            fullscreen
-          );
-          return path.basename(customPath);
-        }
-        openDefault();
-        return "default browser";
-      }
-      const def = BROWSERS[browser];
-      if (!def) {
-        openDefault();
-        return "default browser";
-      }
-      const exe = def.exes
-        .map(expand)
-        .find((p: string) => {
-          try {
-            return p && fs.existsSync(p);
-          } catch {
-            return false;
-          }
-        });
-      if (exe) {
-        cp.spawn(exe, [url], { detached: true, stdio: "ignore" }).unref();
-      } else {
-        cp.spawn("cmd", ["/c", "start", def.alias, url], {
-          detached: true,
-          stdio: "ignore",
-          windowsHide: true,
-        }).unref();
-      }
-      this.focusFullscreen(def.proc, fullscreen);
-      return def.label;
-    } catch {
-      openDefault();
-      return "default browser";
-    }
-  }
-
-  /** Bring the just-launched browser window to the foreground and (optionally)
-   *  toggle fullscreen (F11). Best-effort, fire-and-forget. Pass fullscreen=false
-   *  to only raise the window (e.g. a re-login flow). */
-  private focusFullscreen(proc: string, fullscreen = true) {
-    if (!proc) return;
-    try {
-      const cp = nodeRequire("child_process");
-      const ps = [
-        "$ErrorActionPreference='SilentlyContinue'",
-        "Start-Sleep -Milliseconds 1800",
-        `$p = Get-Process '${proc}' -ErrorAction SilentlyContinue | ` +
-          "Where-Object { $_.MainWindowHandle -ne 0 } | " +
-          "Sort-Object StartTime -Descending | Select-Object -First 1",
-        "if ($p) {",
-        "  $w = New-Object -ComObject WScript.Shell",
-        "  $w.AppActivate($p.Id) | Out-Null",
-        ...(fullscreen
-          ? ["  Start-Sleep -Milliseconds 350", "  $w.SendKeys('{F11}')"]
-          : []),
-        "}",
-      ].join("; ");
-      cp.spawn(
-        "powershell",
-        ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
-        { detached: true, stdio: "ignore", windowsHide: true }
-      ).unref();
-    } catch {
-      /* best-effort */
-    }
-  }
-
   // --- Header (tabs + toolbar) -------------------------------------------
 
   /** Build the panel header: a row of session tabs (each with a close ×, plus a
@@ -4674,12 +2747,12 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const accountBtn = bar.createEl("button", { cls: "cch-btn" });
       setIcon(accountBtn, "user-round");
       this.accountBtn = accountBtn;
-      const curEmail = this.barAccountEmail || this.currentAccountEmail();
+      const curEmail = this.accounts.barAccountEmail || this.accounts.currentAccountEmail();
       accountBtn.setAttr("aria-label", "Claude account");
       accountBtn.title = "Account: " + (curEmail || "unknown");
       accountBtn.onclick = (e) => {
         e.preventDefault();
-        this.openAccountMenu(accountBtn);
+        this.accounts.openAccountMenu(accountBtn);
       };
     }
 
@@ -5569,7 +3642,7 @@ class HarnessSettingTab extends PluginSettingTab {
       .setDesc("Snapshot the account currently logged in (read from ~/.claude.json).")
       .addButton((b) =>
         b.setButtonText("Save current account").onClick(() => {
-          this.plugin.saveCurrentAccount();
+          this.plugin.accounts.saveCurrentAccount();
           this.display();
         })
       );
@@ -5582,12 +3655,12 @@ class HarnessSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.autoSwitch).onChange(async (v) => {
           this.plugin.settings.autoSwitch = v;
-          this.plugin.resetRotationBaseline();
+          this.plugin.accounts.resetRotationBaseline();
           await this.plugin.saveSettings();
           this.plugin.updateAutoSwitchBtn();
           if (v) {
-            void this.plugin.refreshUsage({ refreshTokens: true });
-            if (this.plugin.listSavedAccounts().length < 2) {
+            void this.plugin.accounts.refreshUsage({ refreshTokens: true });
+            if (this.plugin.accounts.listSavedAccounts().length < 2) {
               new Notice(
                 "Auto-switch needs at least 2 saved accounts — log in with /login to save more."
               );
@@ -5607,7 +3680,7 @@ class HarnessSettingTab extends PluginSettingTab {
         d.setValue(this.plugin.settings.autoSwitchMode || "threshold");
         d.onChange(async (v) => {
           this.plugin.settings.autoSwitchMode = v;
-          this.plugin.resetRotationBaseline();
+          this.plugin.accounts.resetRotationBaseline();
           await this.plugin.saveSettings();
           this.plugin.updateAutoSwitchBtn();
           this.display(); // swap which slider is shown
@@ -5661,7 +3734,7 @@ class HarnessSettingTab extends PluginSettingTab {
         t.setValue(this.plugin.settings.usageProbe).onChange(async (v) => {
           this.plugin.settings.usageProbe = v;
           await this.plugin.saveSettings();
-          if (v) void this.plugin.refreshUsage({});
+          if (v) void this.plugin.accounts.refreshUsage({});
         })
       );
 
@@ -5734,17 +3807,17 @@ class HarnessSettingTab extends PluginSettingTab {
       )
       .setHeading();
 
-    for (const a of this.plugin.listSavedAccounts()) {
+    for (const a of this.plugin.accounts.listSavedAccounts()) {
       const name = this.plugin.settings.usageProbe
-        ? a.email + " — " + this.plugin.usageLabel(a.email)
+        ? a.email + " — " + this.plugin.accounts.usageLabel(a.email)
         : a.email;
-      const eligible = this.plugin.isAccountEligible(a.email);
-      const blockedNow = this.plugin.isTimeBlocked(a.email);
+      const eligible = this.plugin.accounts.isAccountEligible(a.email);
+      const blockedNow = this.plugin.accounts.isTimeBlocked(a.email);
       let desc = eligible
         ? "Auto-switch: allowed"
         : "Auto-switch: blocked (e.g. a friend's account — its tokens won't be spent automatically)";
       if (blockedNow)
-        desc += ` · ⛔ prohibida ahora por horario (${this.plugin.scheduleBlockLabel(a.email)})`;
+        desc += ` · ⛔ prohibida ahora por horario (${this.plugin.accounts.scheduleBlockLabel(a.email)})`;
       new Setting(containerEl)
         .setName(name)
         .setDesc(desc)
@@ -5757,25 +3830,25 @@ class HarnessSettingTab extends PluginSettingTab {
                 : "Blocked from auto-switch — click to allow"
             )
             .onClick(async () => {
-              await this.plugin.toggleAccountEligible(a.email);
+              await this.plugin.accounts.toggleAccountEligible(a.email);
               this.display();
             })
         )
         .addButton((b) =>
-          b.setButtonText("Switch").onClick(() => this.plugin.switchToAccount(a.email))
+          b.setButtonText("Switch").onClick(() => this.plugin.accounts.switchToAccount(a.email))
         )
         .addExtraButton((b) =>
           b
             .setIcon("trash")
             .setTooltip("Delete saved account")
             .onClick(() => {
-              this.plugin.deleteSavedAccount(a.email);
+              this.plugin.accounts.deleteSavedAccount(a.email);
               this.display();
             })
         );
 
       // Browser this account's remote/login URL opens in (its SSO/cookie lives there).
-      const bmap = this.plugin.browserFor(a.email);
+      const bmap = this.plugin.accounts.browserFor(a.email);
       const browserRow = new Setting(containerEl)
         .setClass("cch-account-sub")
         .setName("Browser")
@@ -5792,7 +3865,7 @@ class HarnessSettingTab extends PluginSettingTab {
             );
             if (i >= 0) this.plugin.settings.browserMap.splice(i, 1);
           } else {
-            this.plugin.browserFor(a.email, true)!.browser = v;
+            this.plugin.accounts.browserFor(a.email, true)!.browser = v;
           }
           await this.plugin.saveSettings();
           this.display(); // show/hide the custom-path field
@@ -5804,7 +3877,7 @@ class HarnessSettingTab extends PluginSettingTab {
             .setPlaceholder("C:\\path\\to\\browser.exe")
             .setValue(bmap.path)
             .onChange(async (v) => {
-              this.plugin.browserFor(a.email, true)!.path = v.trim();
+              this.plugin.accounts.browserFor(a.email, true)!.path = v.trim();
               await this.plugin.saveSettings();
             })
         );
@@ -5812,7 +3885,7 @@ class HarnessSettingTab extends PluginSettingTab {
 
       // Forbidden time windows for this account (auto-switch never lands here while
       // inside one; if it's the active account, the plugin jumps away or stops).
-      const sched = this.plugin.scheduleFor(a.email);
+      const sched = this.plugin.accounts.scheduleFor(a.email);
       const dayLabels = ["L", "M", "X", "J", "V", "S", "D"]; // Mon..Sun (display)
       const dayNums = [1, 2, 3, 4, 5, 6, 0]; // JS getDay for each label
       const ranges = sched?.ranges || [];
@@ -5830,7 +3903,7 @@ class HarnessSettingTab extends PluginSettingTab {
         );
       schedHead.addButton((b) =>
         b.setButtonText("Add range").onClick(async () => {
-          const e = this.plugin.scheduleFor(a.email, true)!;
+          const e = this.plugin.accounts.scheduleFor(a.email, true)!;
           e.ranges.push({ start: "23:00", end: "07:00", days: [1, 2, 3, 4, 5] });
           await this.plugin.saveSettings();
           this.display();
@@ -5896,7 +3969,7 @@ class HarnessSettingTab extends PluginSettingTab {
     // their browser inline in their card above). Lets you pre-map an account you
     // haven't logged into yet; normally empty since accounts auto-save on /login.
     const savedEmails = new Set(
-      this.plugin.listSavedAccounts().map((a) => a.email.trim().toLowerCase())
+      this.plugin.accounts.listSavedAccounts().map((a) => a.email.trim().toLowerCase())
     );
     const orphans = this.plugin.settings.browserMap
       .map((row, i) => ({ row, i }))

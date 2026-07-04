@@ -286,7 +286,7 @@ Para poner en marcha el harness desde cero en un ordenador nuevo necesitas:
 3. Instala dependencias y compila (desde la carpeta del plugin):
    ```bash
    npm install --ignore-scripts   # node-pty trae prebuilds N-API; NO se compila
-   npm run build                  # empaqueta main.ts -> main.js
+   npm run build                  # empaqueta los .ts (main/accounts/types/constants/utils) -> main.js
    ```
    (En Linux, omite `--ignore-scripts` — ver Requisitos.)
 4. En Obsidian: Ajustes → Complementos de la comunidad → activa

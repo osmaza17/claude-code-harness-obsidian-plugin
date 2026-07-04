@@ -11,5 +11,5 @@
     "lib": ["DOM", "ES2020"],
     "strict": false
   },
-  "include": ["main.ts"]
+  "include": ["main.ts", "accounts.ts", "types.ts", "constants.ts", "utils.ts"]
 }

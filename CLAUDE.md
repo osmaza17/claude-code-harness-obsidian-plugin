@@ -58,7 +58,7 @@ usar el **Keychain**; si es así, la multi-cuenta no funcionará en ese equipo (
 ```bash
 npm install --ignore-scripts   # node-pty trae prebuilds N-API; no se compila
                                # (en Linux: omitir --ignore-scripts; compila node-pty)
-npm run build                  # empaqueta main.ts -> main.js (producción)
+npm run build                  # empaqueta los .ts (main/accounts/types/constants/utils) -> main.js (producción)
 npm run dev                    # build con watch
 ```
 
@@ -86,11 +86,14 @@ Reparto de responsabilidades:
   el host (llama `term.open()` una sola vez; luego solo mueve el host dentro/fuera
   del DOM), `detachHost()` lo desmonta sin matar, `dispose()` mata y destruye.
 - **Plugin** (gestor + servicios globales): `newSession`/`closeSession`/
-  `setActive`/`activeSession`, `attachView`/`detachView`, y todo lo **compartido**
-  porque depende de las credenciales comunes: cuentas, usage/keep-alive,
-  auto-switch (decisión), navegador, tema, zoom y tamaño de rejilla. Los watchers
-  globales se alimentan de la salida de cada sesión:
-  `plugin.maybeAutoSwitch(session, chunk)` (usa el buffer **por-sesión**
+  `setActive`/`activeSession`, `attachView`/`detachView`, tema, zoom y tamaño de
+  rejilla. Todo lo **compartido** que depende de las credenciales comunes —
+  cuentas, usage/keep-alive, auto-switch (decisión), franjas horarias, navegador
+  por cuenta y popup 👤— vive en **`AccountManager`** (`accounts.ts`), una única
+  instancia en `plugin.accounts` (extraído de la clase Plugin en el refactor de
+  2026-07; misma lógica, solo cambió el "dónde"). Los watchers globales se
+  alimentan de la salida de cada sesión:
+  `plugin.accounts.maybeAutoSwitch(session, chunk)` (usa el buffer **por-sesión**
   `session.autoSwitchBuf` pero la decisión —cooldown, baseline, verify— es
   **global**), `maybeAutoSaveAccount`, `maybeProbeOnActivity`.
 - `onload()`: **encola** las pestañas que estaban abiertas al cerrar Obsidian en
@@ -1037,9 +1040,24 @@ manifest.json        metadatos del plugin (id: claude-code-harness)
 package.json         deps + scripts
 esbuild.config.mjs   bundling (node-pty/obsidian/electron = external)
 tsconfig.json
-main.ts              todo el plugin: Session (instancia) + Plugin (gestor) +
-                     ClaudeCodeView + SettingTab
-main.js              artefacto compilado (cargado por Obsidian)
+main.ts              el grueso del plugin: Session (instancia) + Plugin (gestor)
+                     + ClaudeCodeView + SettingTab (+ SESSION_SEQ, que se queda
+                     aquí por ser un `let` mutable — un import ESM sería read-only)
+accounts.ts          AccountManager (una instancia en `plugin.accounts`): TODO el
+                     subsistema global de cuentas — snapshots/hot-swap, probe de
+                     uso 5h/7d, keep-alive OAuth, decisión de auto-switch,
+                     enforcement de franjas, popup 👤 y lanzado de navegadores.
+                     Accede al plugin vía `this.plugin` (settings/saveSettings/
+                     sessions/accountBtn/updateAutoSwitchBtn); main.ts lo llama
+                     como `this.accounts.X` / `this.plugin.accounts.X`.
+types.ts             tipos compartidos: ClosedSessionInfo, HarnessSettings,
+                     AccountUsage (solo tipos, sin runtime)
+constants.ts         VIEW_TYPE, DEFAULT_SETTINGS, regexes best-effort (LIMIT_STOP,
+                     PROMPT_*, + looksLikePrompt), endpoints/headers del probe de
+                     uso y OAuth, MODELS, BROWSERS, paletas ANSI
+utils.ts             helpers puros sin estado: nodeRequire, stripDiacritics,
+                     newConversationId
+main.js              artefacto compilado (bundle de los .ts; cargado por Obsidian)
 pty-host.js          proceso ayudante: corre node-pty fuera del renderer (NO se
                      empaqueta; se forkea con ELECTRON_RUN_AS_NODE)
 styles.css           xterm.css + layout del panel
