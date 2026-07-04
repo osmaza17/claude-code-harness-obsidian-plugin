@@ -235,25 +235,63 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   AltGr+2 = `@` (teclado español); `Ctrl+Z` /
   `Ctrl+Shift+Z` mapeados al borrar-línea / restaurar de Claude.
 
-## Requisitos
+## Requisitos y prerrequisitos (para un PC nuevo)
 
-- Obsidian de escritorio (Windows / macOS / Linux).
-- **Node.js** instalado en el sistema (configurable en ajustes: "Node.js path").
-- El binario **`claude`** (Claude Code CLI) accesible en el `PATH`.
-- **Python** instalado en el sistema (opcional; solo para el botón **Token
-  Dashboard**; configurable en ajustes: "Python path").
+Para poner en marcha el harness desde cero en un ordenador nuevo necesitas:
 
-## Instalación (manual)
+- **Obsidian de escritorio.** El plugin es `isDesktopOnly` (usa Node y el `PATH`
+  del sistema): no funciona en Obsidian móvil.
+- **Sistema operativo con prebuild de `node-pty`.** El plugin trae los binarios
+  nativos precompilados (N-API) de `node-pty` para **Windows (x64, arm64)** y
+  **macOS (x64, arm64)**. **No incluye prebuild de Linux**, así que en Linux
+  `npm install --ignore-scripts` deja `node-pty` sin binario y el panel fallará;
+  ahí tendrías que instalar **sin** `--ignore-scripts` (compila desde fuente y
+  requiere toolchain de C++: `build-essential`/`python3`) para generar el binario.
+  Desarrollado y probado en **Windows 11**.
+- **Node.js** instalado en el sistema. Obsidian corre sobre Electron pero tiene
+  deshabilitado `runAsNode`, así que el plugin **forkea el `node` real del
+  sistema** para ejecutar `pty-host.js`; sin un Node instalado el panel muestra un
+  error pidiendo la ruta. Se autodetecta (`where node` / rutas conocidas) y es
+  configurable en ajustes ("Node.js path"). No probé qué versión mínima hace falta;
+  cualquier Node LTS reciente debería servir (node-pty 1.x es N-API).
+- **El CLI `claude` (Claude Code) accesible en el `PATH`** y **con sesión
+  iniciada al menos una vez.** El comando es configurable en ajustes ("Command",
+  por defecto `claude`; en Windows se lanza vía `cmd /c claude` para que resuelva
+  el `.cmd` del PATH). **En un PC nuevo tendrás que hacer `claude` → `/login` una
+  vez** (desde una terminal normal o desde el propio panel) para crear
+  `~/.claude/.credentials.json`; hasta entonces Claude pedirá login dentro del
+  panel. La skill por defecto (`second-brain-assistant`) y el selector de skills
+  esperan que existan skills en `~/.claude/skills`; si no hay ninguna, la selección
+  de skill simplemente no encontrará nada (no es imprescindible para arrancar).
+- **`npm` / Node para compilar** el plugin (paso de instalación, ver abajo).
+- **Python** instalado en el sistema — **opcional**, solo para el botón **Token
+  Dashboard**. Se autodetecta (`where python` / `py` / rutas conocidas) y es
+  configurable en ajustes ("Python path"). Sin Python, el resto del plugin funciona;
+  solo el dashboard no abrirá.
+- **`git`** — solo si vas a clonar el repo o versionarlo; no es necesario para
+  ejecutar el plugin.
 
-1. Copia esta carpeta en `<tu-vault>/.obsidian/plugins/claude-code-harness/`.
-2. Instala dependencias y compila:
+> **Nota sobre multi-cuenta (macOS):** las funciones de guardar/cambiar de cuenta
+> y auto-switch dependen de que Claude Code guarde sus credenciales en el **fichero
+> plano** `~/.claude/.credentials.json`. En macOS, Claude Code puede guardarlas en
+> el **Keychain** en su lugar; si ese es el caso, el hot-swap de cuentas no
+> funcionará en ese equipo (el resto del plugin sí). Ver
+> [`README_TECNICO.md`](README_TECNICO.md).
+
+## Instalación (manual, en un PC nuevo)
+
+1. Instala los prerrequisitos de arriba (Obsidian, Node.js y el CLI `claude`; haz
+   `claude` → `/login` una vez). Python es opcional.
+2. Copia esta carpeta en `<tu-vault>/.obsidian/plugins/claude-code-harness/`.
+3. Instala dependencias y compila (desde la carpeta del plugin):
    ```bash
-   npm install --ignore-scripts
-   npm run build
+   npm install --ignore-scripts   # node-pty trae prebuilds N-API; NO se compila
+   npm run build                  # empaqueta main.ts -> main.js
    ```
-3. En Obsidian: Ajustes → Complementos de la comunidad → activa
+   (En Linux, omite `--ignore-scripts` — ver Requisitos.)
+4. En Obsidian: Ajustes → Complementos de la comunidad → activa
    **Claude Code Harness**.
-4. Abre el panel con el icono de terminal de la barra lateral o el comando
+5. Abre el panel con el icono de terminal de la barra lateral o el comando
    "Open Claude Code panel". Para más instancias en paralelo, usa el botón **+**
    de la barra de pestañas o el comando **"New Claude Code session"**.
 

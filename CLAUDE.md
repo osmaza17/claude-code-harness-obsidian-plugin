@@ -20,10 +20,44 @@ esa solo sirvió de referencia de comportamiento.
   proceso Node aparte (`pty-host.js`), no en el renderer (ver Gotchas).
 - **esbuild** para empaquetar (igual que el plugin `obsidian-document-chat`).
 
+## Prerrequisitos (para levantar el harness en un PC nuevo)
+
+Lo que hace falta que exista en la máquina **antes** de que el plugin funcione
+(los detalles del porqué están en Gotchas; esto es la lista consolidada):
+
+- **Obsidian de escritorio** (`isDesktopOnly`): usa Node, `PATH` y `process`; no
+  hay soporte móvil.
+- **SO con prebuild de `node-pty`.** El repo trae los binarios N-API precompilados
+  en `node_modules/node-pty/prebuilds/` para **win32-x64, win32-arm64, darwin-x64,
+  darwin-arm64**. **No hay prebuild de Linux**: en Linux `npm install
+  --ignore-scripts` deja node-pty sin `.node` y el fork del pty-host falla; ahí hay
+  que instalar SIN `--ignore-scripts` (compila node-pty desde fuente → requiere
+  toolchain C++). Desarrollado/probado en **Windows 11**.
+- **Node.js del sistema** (no el de Obsidian): se forkea el `node.exe` real para
+  `pty-host.js` porque Electron ignora `ELECTRON_RUN_AS_NODE` (ver Gotchas).
+  `resolveNodePath()` lo autodetecta; ajuste "Node.js path" lo fija. Versión mínima
+  no verificada; cualquier LTS reciente vale (node-pty 1.x es N-API, no ata a ABI).
+- **CLI `claude` en el `PATH` y logueado al menos una vez.** En Windows se lanza
+  `cmd /c claude` (resuelve el `.cmd`). En un PC nuevo hay que hacer `claude` →
+  `/login` una vez para crear `~/.claude/.credentials.json`; si no, Claude pide
+  login dentro del panel. Comando configurable ("Command").
+- **`~/.claude/skills/`** (opcional): el selector de skills lista subcarpetas con
+  `SKILL.md`; la skill por defecto es `second-brain-assistant`. Sin skills, el
+  selector no encuentra nada, pero el panel arranca igual.
+- **Python** (opcional, solo Token Dashboard): `resolvePythonPath()` lo autodetecta;
+  ajuste "Python path". Sin Python, el dashboard no abre; el resto funciona.
+- **`git`**: solo para clonar/versionar; no se necesita en runtime.
+
+CAVEAT multi-cuenta (§ cambio de cuenta): el hot-swap depende de credenciales en
+**fichero plano** `~/.claude/.credentials.json`. En **macOS** Claude Code puede
+usar el **Keychain**; si es así, la multi-cuenta no funcionará en ese equipo (ver
+`README_TECNICO.md`).
+
 ## Comandos
 
 ```bash
 npm install --ignore-scripts   # node-pty trae prebuilds N-API; no se compila
+                               # (en Linux: omitir --ignore-scripts; compila node-pty)
 npm run build                  # empaqueta main.ts -> main.js (producción)
 npm run dev                    # build con watch
 ```

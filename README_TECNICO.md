@@ -13,6 +13,34 @@ cero. Todo el código vive en `main.ts`.
 
 ---
 
+## 0. Prerrequisitos (para replicar esto en un PC nuevo)
+
+Antes de nada, además de los requisitos generales del plugin (ver `README.md`:
+Obsidian de escritorio, Node.js del sistema, CLI `claude` en el `PATH`, prebuild
+de `node-pty` para tu SO), el sistema **multi-cuenta descrito aquí** necesita:
+
+1. **Credenciales en fichero plano.** El hot-swap consiste literalmente en
+   sobrescribir `~/.claude/.credentials.json`. Esto **solo funciona si Claude Code
+   guarda ahí el token** (caso verificado en Windows). Si en tu máquina las
+   credenciales viven en un **keychain / Credential Manager** del SO (posible en
+   **macOS**, no verificado por mí), este sistema **no aplicará** y habría que
+   adaptarlo al almacén nativo. Compruébalo mirando si `~/.claude/.credentials.json`
+   contiene `claudeAiOauth.accessToken` en texto.
+2. **Al menos una cuenta logueada** (`claude` → `/login`) para que existan esos
+   ficheros; las demás cuentas se **auto-guardan** en `~/.claude/cch-accounts/` a
+   medida que haces `/login` con cada una (auto-guardado con throttle).
+3. **`~/.claude/cch-accounts/` NO se versiona** (contiene tokens); en un PC nuevo
+   nace vacía y se repuebla logueándote con cada cuenta una vez.
+4. **Salida a internet** hacia `api.anthropic.com` (sondeo de uso por API) y
+   `platform.claude.com` (refresco de tokens / keep-alive). Sin ellas, el uso en
+   vivo y el keep-alive no funcionan; el hot-swap básico (solo escribir el fichero)
+   sí, pero sin datos de uso el auto-switch cae a round-robin.
+
+Todo el código vive en `main.ts`; los endpoints/`client_id`/nombres de header son
+best-effort y pueden cambiar entre versiones del CLI (ver Caveats).
+
+---
+
 ## 1. Cómo almacena la autenticación Claude Code
 
 Dos ficheros en el HOME del usuario:
