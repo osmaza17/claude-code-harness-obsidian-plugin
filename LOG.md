@@ -3,6 +3,37 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-06
+
+- **Fix: cuentas que "expiraban" en horas (corrupción de snapshots).** El usuario
+  reportó que las cuentas guardadas caducaban extremadamente rápido y había que
+  re-loguearlas todo el rato. Diagnóstico sobre `~/.claude/cch-accounts/`: dos
+  modos de fallo reales, con dos fixes en `accounts.ts`:
+  1. **Snapshots machacados con tokens vacíos** (2 cuentas vistas con
+     `accessToken:""`/`refreshToken:""`/`expiresAt:0`): `claude` deja
+     `.credentials.json` vacío al hacer logout (o tras un 401), y el
+     auto-save (`maybeAutoSaveAccount` → `saveCurrentAccount`) snapshoteaba ese
+     estado encima de un snapshot bueno → cuenta irrecuperable sin `/login`.
+     Fix: `saveCurrentAccount` valida `claudeAiOauth.accessToken` +
+     `refreshToken` no vacíos antes de escribir; si faltan, no toca el snapshot
+     (warn en consola, Notice solo en guardado manual).
+  2. **Refresh tokens rotados y huérfanos** (2 cuentas con snapshots sin poder
+     refrescarse desde días atrás, keep-alive → 401): los RT **rotan** (el viejo
+     se invalida al usarse) y `claude` rota el de la cuenta ACTIVA mientras se
+     usa; si luego se salía de esa cuenta con **`/login` en la TUI** (no con el
+     selector del plugin, que sí re-snapshotea la saliente), el snapshot quedaba
+     con un RT muerto. Fix: `maybeResnapshotActive(lower)` — en cada tick de
+     keep-alive (3 min), la rama `isActive` de `refreshAccount` compara los
+     tokens vivos de `.credentials.json` con el snapshot y re-snapshotea si
+     `claude` los rotó.
+  - CAVEAT (honesto): son cuentas prestadas que también se usan en los
+    dispositivos de sus dueños; las revocaciones/rotaciones externas del grant
+    seguirán matando snapshots de vez en cuando — eso no es arreglable desde el
+    plugin, solo re-`/login`. Los fixes eliminan las muertes causadas por el
+    propio plugin.
+  - Pendiente de observar: que las cuentas hoy marcadas `expired` se re-logueen
+    una vez y ya no vuelvan a caer solas.
+
 ## 2026-07-01
 
 - **Historial de conversaciones estilo ChatGPT/Claude web (sidebar superpuesto).**

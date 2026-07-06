@@ -164,7 +164,10 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   cuentas cuyo token esté por caducar (el mismo flujo que usa Claude Code por
   dentro), para que las cuentas que no estás usando no se queden `expired` ni se
   excluyan del auto-switch. Solo refresca cuando hace falta (no machaca el servidor)
-  y guarda el token rotado de forma atómica.
+  y guarda el token rotado de forma atómica. Además protege los snapshots
+  guardados: nunca los sobrescribe con credenciales vacías (p. ej. tras un
+  logout) y re-snapshotea la cuenta activa cuando Claude rota sus tokens, para
+  que cambiar de cuenta con `/login` no deje snapshots con tokens muertos.
 - **Auto-switch** (opcional, desactivado por defecto): cambia de cuenta solo según
   el % de uso de 5 h (leído de la barra de estado, con la API como respaldo si la
   barra no es legible), en dos modos:

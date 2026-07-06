@@ -785,7 +785,7 @@ llama dos veces por sesión (xterm no lo soporta).
   fusionando los tokens nuevos sin perder los demás campos (`scopes`,
   `subscriptionType`…) y conservando la unidad de `expiresAt` (ms aquí).
   **La cuenta ACTIVA NO se refresca desde el plugin**: `refreshAccount` la salta
-  (`if (isActive) return true`) y deja que de ella se ocupe el propio `claude`,
+  (rama `isActive`) y deja que de ella se ocupe el propio `claude`,
   que re-lee `.credentials.json` y rota su refresh token de forma perezosa en cada
   petición. Antes el plugin también la refrescaba, lo que **competía** por el mismo
   refresh token (si el plugin rotaba RT1→RT2 mientras `claude` aún tenía RT1, el
@@ -798,6 +798,26 @@ llama dos veces por sesión (xterm no lo soporta).
   `refresh FAILED`, y la causa HTTP/red: `token endpoint HTTP <status>` —401 token
   muerto, 429 rate-limit—, `network error`, `timeout`), para saber con certeza por
   qué cae una cuenta sin tener que adivinar.
+  **Anti-corrupción de snapshots (fixes 2026-07-06, tras cuentas "expired" en horas)**:
+  dos modos de fallo vistos en vivo y sus guards:
+  1. `saveCurrentAccount` **rechaza credenciales vacías**: `claude` escribe
+     `.credentials.json` con `accessToken:""`/`refreshToken:""` al hacer logout (o
+     tras un 401 que limpia credenciales), y el auto-save snapshoteaba ese estado
+     **machacando un snapshot bueno** → cuenta muerta para siempre (visto en vivo:
+     dos snapshots con tokens vacíos). Ahora, si `claudeAiOauth` no trae ambos
+     tokens, NO se escribe (warn en consola; Notice solo en guardado manual).
+  2. **`maybeResnapshotActive(lower)`** (llamado desde la rama `isActive` de
+     `refreshAccount`, cada tick de 3 min): si `claude` rotó los tokens de la
+     cuenta ACTIVA (compara access+refresh de `.credentials.json` contra el
+     snapshot), re-snapshotea con `saveCurrentAccount(false)`. Sin esto, salir de
+     una cuenta con **`/login` dentro de la TUI** (en vez del selector del plugin,
+     que sí re-snapshotea la saliente) dejaba su snapshot con un refresh token
+     **ya rotado** (los RT rotan y el viejo se invalida) → 401 permanente en el
+     keep-alive (visto en vivo: snapshots sin poder refrescarse durante días).
+  CAVEAT (honesto): cuentas prestadas que también se usan en **otros
+  dispositivos** pueden seguir caducando por causas externas (el dueño rota/revoca
+  su grant, o el proveedor invalida grants antiguos); eso no es arreglable desde
+  el plugin — toca re-`/login`.
 - **Escrituras atómicas** (`writeJsonAtomic`): `switchToAccount`/`saveCurrentAccount`
   escriben a temp + `rename` para que la `claude` viva nunca lea un
   `.credentials.json`/`.claude.json` a medio escribir. `switchToAccount` valida que

@@ -340,6 +340,20 @@ export class AccountManager {
         if (notify) new Notice("No active account email found.");
         return null;
       }
+      // claude escribe .credentials.json con tokens VACÍOS al hacer logout (o
+      // tras un 401 que limpia credenciales); snapshotear ese estado machacaría
+      // un snapshot bueno con tokens muertos (visto en vivo: cuentas que quedan
+      // "expired" para siempre). Nunca sobrescribir con credenciales vacías.
+      const liveOauth = creds?.claudeAiOauth;
+      if (!liveOauth?.accessToken || !liveOauth?.refreshToken) {
+        console.warn(
+          "[claude-code-harness] saveCurrentAccount: empty tokens for",
+          email,
+          "— snapshot NOT overwritten (logged out?)"
+        );
+        if (notify) new Notice("Not saving " + email + ": credentials are empty (logged out?).");
+        return null;
+      }
       const dir = this.accountsDir();
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       this.writeJsonAtomic(path.join(dir, this.accountFileName(email)), {
@@ -748,7 +762,11 @@ export class AccountManager {
     // token → 401 → forced /login. So we leave the active account to claude and
     // only keep INACTIVE accounts (which claude never touches) alive from here.
     if (isActive) {
-      console.log("[cch keepalive] skip active", lower, "(claude owns refresh)");
+      // Las rotaciones de claude solo viven en .credentials.json: si luego se
+      // sale de esta cuenta con /login (no con el selector del plugin), el
+      // snapshot se quedaría con un refresh token ya rotado (muerto) → 401
+      // permanente en el keep-alive. Capturar aquí cada rotación lo evita.
+      this.maybeResnapshotActive(lower);
       return true; // let refreshUsage probe with the live token as-is
     }
     const file = isActive
@@ -804,6 +822,31 @@ export class AccountManager {
     }
     console.log("[cch keepalive] refreshed", lower, "ok");
     return true;
+  }
+
+  /** If claude rotated the ACTIVE account's tokens since the last snapshot,
+   *  re-save the snapshot so it always holds a live refresh token. Called from
+   *  refreshAccount on each 3-min tick (cheap: two small file reads + compare). */
+  maybeResnapshotActive(lower: string) {
+    try {
+      const fs = nodeRequire("fs");
+      const live = JSON.parse(fs.readFileSync(this.credsPath(), "utf8"))?.claudeAiOauth;
+      if (!live?.accessToken || !live?.refreshToken) return; // logged out — nothing to capture
+      let snap: any = null;
+      try {
+        snap = JSON.parse(
+          fs.readFileSync(path.join(this.accountsDir(), this.accountFileName(lower)), "utf8")
+        );
+      } catch {
+        /* no snapshot yet — save below */
+      }
+      const so = snap?.credentials?.claudeAiOauth;
+      if (so?.refreshToken === live.refreshToken && so?.accessToken === live.accessToken) return;
+      console.log("[cch keepalive] active account rotated — re-snapshot", lower);
+      this.saveCurrentAccount(false);
+    } catch (e) {
+      console.warn("[cch keepalive] resnapshot active failed:", e);
+    }
   }
 
   /** POST the OAuth refresh-token grant. Resolves to the parsed token response on

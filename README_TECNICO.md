@@ -126,6 +126,11 @@ fichero original) y **nunca se versiona en git** (contiene tokens).
 ### `saveCurrentAccount(notify)`
 Lee `.credentials.json` y el `oauthAccount` de `.claude.json`, y escribe el
 snapshot (atómico). Devuelve el email o `null`.
+**Guard anti-corrupción (2026-07-06)**: si `claudeAiOauth` viene con
+`accessToken`/`refreshToken` **vacíos** (Claude deja el fichero así al hacer
+logout o tras un 401 que limpia credenciales), NO escribe nada — visto en vivo
+que el auto-save machacaba snapshots buenos con tokens vacíos y la cuenta
+quedaba `expired` para siempre.
 
 ### Auto-guardado — `maybeAutoSaveAccount()`
 Enganchado al flujo de salida del PTY (caso `data`), con **throttle ~10 s**.
@@ -375,13 +380,19 @@ token y cuenta (como `claude`).
    intactas (el refresh token viejo sigue válido).
 2. Escritura **atómica** (`writeJsonAtomic`, temp+rename) → la `claude` viva nunca
    lee un fichero a medias.
-3. **Riesgo residual** en la cuenta **activa**: el plugin y `claude` podrían
-   refrescar a la vez por el mismo refresh token (uno se queda con el viejo
-   invalidado). Ventana pequeña y rara (el throttle hace que solo coincidan cerca de
-   la caducidad); `claude` re-lee `.credentials.json` por petición, así que en el
-   caso normal adopta el token que escribió el plugin. Para riesgo cero se podría
-   excluir la activa del refresco (la mantiene `claude`), a coste de que si no usas
-   `claude` un buen rato su token caduque.
+3. **La cuenta ACTIVA no se refresca desde el plugin** (`refreshAccount` la
+   salta): `claude` la rota de forma perezosa por petición, y refrescarla también
+   desde el plugin competía por el mismo refresh token (quien rotara segundo se
+   quedaba con un token muerto → 401 → `/login`). Ese era el antiguo "riesgo
+   residual", ya eliminado.
+4. **Re-snapshot de la activa** (`maybeResnapshotActive`, 2026-07-06): en cada
+   tick de 3 min, si los tokens vivos de `.credentials.json` difieren del
+   snapshot de la cuenta activa (= `claude` los rotó), se re-snapshotea
+   (`saveCurrentAccount(false)`). Sin esto, salir de una cuenta con `/login`
+   dentro de la TUI (en vez del selector del plugin, que sí re-snapshotea la
+   saliente) dejaba su snapshot con un refresh token ya rotado → el keep-alive
+   recibía 401 para siempre y la cuenta aparecía `expired` hasta re-loguearla
+   (visto en vivo en dos cuentas).
 
 ---
 
