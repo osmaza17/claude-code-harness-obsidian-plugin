@@ -3,6 +3,32 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-08
+
+- **Botones flotantes de exportación a nota (esquina inferior derecha).** Dos
+  botones nuevos superpuestos sobre el terminal (`.cch-export-fab`, anclados a
+  `.claude-code-harness` que ya era `position:relative`): uno guarda el **último
+  mensaje de Claude** y otro la **conversación entera** de la pestaña activa en
+  una **nota nueva en la raíz del vault**, de forma automática (crea la nota,
+  la abre en pestaña y avisa con `Notice`). También comandos "Export last Claude
+  message to a new note" / "Export Claude conversation to a new note".
+  - Módulo nuevo `exporter.ts`: lee el `.jsonl` de la conversación
+    (`~/.claude/projects/<slug>/<sessionId>.jsonl`; slug = cada `:`\\`/`espacio
+    → un `-`, mismo encoding que `token-dashboard/db.py:_encode_slug`), parsea
+    línea a línea (best-effort, try/catch por línea), extrae solo bloques `text`
+    (ignora tool_use/tool_result), filtra ruido (`isMeta`, `<command-…>`) y
+    **deduplica los snapshots parciales del assistant por `message.id`**
+    (Claude escribe 2–3 líneas por respuesta; gana la última, conservando la
+    posición). Mensajes consecutivos del mismo rol se fusionan en una sección.
+  - Nombres de nota: `Claude - <título de pestaña> - último mensaje|conversación
+    - YYYY-MM-DD HH.mm.md`, con sufijo ` (2)` si colisiona.
+  - Toggle "Export-to-note buttons (bottom-right)" (`btnExportNotes`, def. on);
+    el fab se (re)construye en `attachView`/`refreshExportFab` y se limpia en
+    `detachView`/`onunload`.
+  - Verificado el parser contra dos `.jsonl` reales del vault (22 y 5 mensajes,
+    dedupe y fusión correctos) + `npm run build` limpio.
+  - Docs: CLAUDE.md y README.md actualizados.
+
 ## 2026-07-06
 
 - **Fix: cuentas que "expiraban" en horas (corrupción de snapshots).** El usuario

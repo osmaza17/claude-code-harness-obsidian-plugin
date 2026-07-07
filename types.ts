@@ -114,6 +114,9 @@ export interface HarnessSettings {
   btnHistory: boolean;
   btnReload: boolean;
   btnZoom: boolean;
+  // Floating bottom-right buttons over the terminal: export Claude's last
+  // message / the whole conversation to a new note in the vault root.
+  btnExportNotes: boolean;
   // Chrome-style "reopen closed tab" (Ctrl+Shift+Y), persisted across Obsidian
   // restarts. closedSessions = LIFO stack of reopenable tabs (closed with × or
   // folded in from the previous run's open tabs). openSessions = live snapshot of

@@ -555,6 +555,18 @@ export class HarnessSettingTab extends PluginSettingTab {
     buttonToggle("Session history", "btnHistory");
     buttonToggle("Reload session (same conversation)", "btnReload");
     buttonToggle("Zoom controls", "btnZoom");
+    // Not a header button — the floating export pair lives over the terminal, so
+    // its refresh goes through refreshExportFab, not refreshHeader.
+    new Setting(containerEl)
+      .setName("Export-to-note buttons (bottom-right)")
+      .setDesc("Floating buttons that save Claude's last message / the whole conversation to a new note in the vault root.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.btnExportNotes).onChange(async (v) => {
+          this.plugin.settings.btnExportNotes = v;
+          await this.plugin.saveSettings();
+          this.plugin.refreshExportFab();
+        })
+      );
 
     new Setting(containerEl)
       .setName("Node.js path")

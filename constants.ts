@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: HarnessSettings = {
   btnHistory: true,
   btnReload: true,
   btnZoom: true,
+  btnExportNotes: true,
   closedSessions: [],
   openSessions: [],
 };

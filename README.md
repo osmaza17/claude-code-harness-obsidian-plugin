@@ -119,6 +119,16 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   en el menú contextual del explorador (una o varias notas/carpetas), y
   **arrastrar y soltar** notas o imágenes sobre el terminal — todo inserta su
   `@<ruta>`.
+- **Exportar a nota (botones flotantes, esquina inferior derecha)**: dos botones
+  semitransparentes sobre el terminal. El primero guarda el **último mensaje de
+  Claude** de la pestaña activa en una **nota nueva en la raíz del vault**; el
+  segundo guarda la **conversación entera** (secciones `## Usuario` / `## Claude`).
+  Todo automático: crea la nota (`Claude - <pestaña> - último mensaje|conversación
+  - fecha.md`), la abre en una pestaña y avisa con un Notice. El contenido sale del
+  `.jsonl` de la conversación en disco (no de la pantalla), así que llega completo
+  y sin trocear. También hay dos comandos de paleta ("Export last Claude message /
+  Claude conversation to a new note") y un toggle en ajustes para ocultar los
+  botones ("Export-to-note buttons").
 - **Autocompletado `[[` → referencia `@`**: al escribir `[[` en el input de Claude
   aparece un **desplegable** anclado al cursor (estilo Obsidian) con las notas más
   parecidas, usando el **suggester nativo de Obsidian** (mismas sugerencias y orden

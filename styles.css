@@ -502,6 +502,29 @@
   border: 1px solid var(--background-modifier-border);
 }
 
+/* Floating export buttons (bottom-right corner, over the terminal): save the
+   last Claude message / the whole conversation to a new note in the vault root.
+   Anchored to .claude-code-harness (position:relative). Semi-transparent so
+   they don't obstruct the TUI; below the history overlay (z-index 20). */
+.claude-code-harness .cch-export-fab {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 15;
+  display: flex;
+  gap: 6px;
+}
+.claude-code-harness .cch-export-fab .cch-btn {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  opacity: 0.55;
+}
+.claude-code-harness .cch-export-fab .cch-btn:hover {
+  opacity: 1;
+  background: var(--background-modifier-hover);
+}
+
 /* Account popup (built in main.ts, appended to document.body — NOT scoped under
    .claude-code-harness). Single list: left toggle = allow/block for auto-switch,
    clickable label = switch to that account. */

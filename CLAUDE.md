@@ -531,7 +531,8 @@ llama dos veces por sesión (xterm no lo soporta).
   (`updateModelBtn`/`updateSkillBtn`/`updateRemoteBtn` leen `activeSession()`); cuenta,
   auto-switch e historial son globales. Cada botón (salvo ajustes/reiniciar) se oculta
   desde ajustes (`btnSendNote/btnAccount/btnModel/btnSkill/btnRemote/btnAutoSwitch/
-  btnTokenDashboard/btnHistory/btnReload/btnZoom`).
+  btnTokenDashboard/btnHistory/btnReload/btnZoom`; el par flotante de export tiene
+  su propio flag `btnExportNotes`, ver "Exportar a nota").
   `rebuildHeader()` (alias `refreshHeader()` para la página de ajustes) borra
   `.cch-header` y la reconstruye **conservando el host montado** (es un hijo aparte
   del contenedor); `buildHeader` resetea las refs a null y hace `container.prepend(header)`
@@ -833,6 +834,37 @@ llama dos veces por sesión (xterm no lo soporta).
   con fallback a `File.path` en Electron <32, que fue donde se eliminó esa API—,
   y un fallback de `text/plain` que resuelve `[[wikilinks]]` vía
   `metadataCache.getFirstLinkpathDest`).
+- **Exportar a nota (botones flotantes bottom-right)** (`exporter.ts` +
+  `plugin.refreshExportFab()`): dos botones `.cch-btn` en un `div.cch-export-fab`
+  (`position:absolute; right/bottom`, anclado a `.claude-code-harness` que ya es
+  `position:relative`; z-index 15, por debajo del overlay de historial) que actúan
+  sobre la **sesión activa**: `exportLastMessage` guarda el último mensaje de
+  Claude y `exportConversation` la conversación entera en una **nota nueva en la
+  raíz del vault** (`vault.create` + `openLinkText(..., "tab")` + Notice; nombre
+  `Claude - <título saneado> - último mensaje|conversación - YYYY-MM-DD HH.mm.md`,
+  sufijo ` (2)` si colisiona). También comandos "Export last Claude message /
+  Claude conversation to a new note". Toggle `settings.btnExportNotes` (def. on);
+  el fab se construye en `attachView` → `refreshExportFab()` y se limpia en
+  `detachView`/`onunload` (vive en `viewRoot`, así que sobrevive a
+  `rebuildHeader`/`setActive`, que solo tocan `.cch-header` y el host).
+  - **Fuente = el `.jsonl` de la conversación en disco** (NO el buffer de xterm):
+    `conversationJsonlPath(cwd, sessionId)` construye
+    `~/.claude/projects/<slug>/<sessionId>.jsonl` con el encoding de slug de
+    Claude Code (cada `:`, `\`, `/`, espacio → **un** `-`, sin colapsar; espejo de
+    `token-dashboard/token_dashboard/db.py:_encode_slug` — verificado contra las
+    carpetas reales de `~/.claude/projects`).
+  - **Parser best-effort** (`readConversation`): JSON.parse por línea con
+    try/catch, solo registros `type` user/assistant con texto extraíble (bloques
+    `type:"text"`; ignora `tool_use`/`tool_result`), filtra `isMeta` y mensajes de
+    usuario `<command-…>`/`<local-command…>` (slash commands). GOTCHA de snapshots:
+    Claude escribe 2–3 líneas por respuesta del assistant (parcial→final) con el
+    mismo `message.id` y distinto `uuid`; se deduplica por `message.id` sustituyendo
+    in place (gana el snapshot final, conserva la posición). `conversationMarkdown`
+    fusiona mensajes consecutivos del mismo rol en una sección `## Usuario`/`## Claude`
+    (un turno de Claude con tool calls son varios registros assistant).
+  - CAVEAT: el formato del `.jsonl` es del CLI y puede cambiar; si el export sale
+    vacío con conversación viva, revisar el parser (probado contra jsonl reales el
+    2026-07-08). Pestaña en blanco (sin `.jsonl`) → Notice y no se crea nota.
 - **Autocompletado `[[` → referencia `@`** (suggester estilo Obsidian dentro del
   terminal; ajuste `wikilinkPicker`, on por defecto): al escribir **`[[`** en el
   input se abre un **desplegable flotante** (`.cch-wikilink-menu`, mismo patrón DOM
@@ -992,7 +1024,9 @@ llama dos veces por sesión (xterm no lo soporta).
   `Notice` el último resultado de la evaluación del auto-switch —motivo en
   lenguaje claro, `%`/fuente, baseline o threshold, cuenta activa vs. barra,
   nº de cuentas— a partir de `lastDiagInfo`, que `maybeAutoSwitch` rellena en
-  cada chunk; útil para saber por qué no cambia).
+  cada chunk; útil para saber por qué no cambia), y **"Export last Claude message
+  to a new note"** / **"Export Claude conversation to a new note"** (mismas
+  acciones que los botones flotantes; ver "Exportar a nota").
 - **Instrucciones predefinidas**: ajuste "Extra arguments" (se anexa al comando,
   p. ej. `--append-system-prompt "..."`) y "Skill". `maybeSendInitial`
   **NO** envía `/model` (decisión del usuario: una pestaña nueva se queda en el
@@ -1118,6 +1152,9 @@ types.ts             tipos compartidos: ClosedSessionInfo, HarnessSettings,
 constants.ts         VIEW_TYPE, DEFAULT_SETTINGS, regexes best-effort (LIMIT_STOP,
                      PROMPT_*, + looksLikePrompt), endpoints/headers del probe de
                      uso y OAuth, MODELS, BROWSERS, paletas ANSI
+exporter.ts          export a nota (botones flotantes bottom-right + comandos):
+                     lee el .jsonl de la conversación y crea la nota en la raíz
+                     del vault (ver "Exportar a nota")
 utils.ts             helpers puros sin estado: nodeRequire, stripDiacritics,
                      newConversationId
 main.js              artefacto compilado (bundle de los .ts; cargado por Obsidian)

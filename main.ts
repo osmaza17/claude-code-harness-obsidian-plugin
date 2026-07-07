@@ -4,6 +4,7 @@ import {
   Notice,
   Plugin,
   prepareFuzzySearch,
+  setIcon,
   sortSearchResults,
   TAbstractFile,
   TFile,
@@ -27,6 +28,7 @@ import {
 } from "./constants";
 import { nodeRequire, stripDiacritics, newConversationId } from "./utils";
 import { AccountManager } from "./accounts";
+import { exportConversation, exportLastMessage } from "./exporter";
 import { HarnessSettingTab } from "./settings-tab";
 import { SessionHistory } from "./history";
 import { HeaderView } from "./header";
@@ -1499,6 +1501,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // Tab persistence + reopen stack + history sidebar (see history.ts).
   history = new SessionHistory(this);
   viewRoot: HTMLElement | null = null; // (read by SessionHistory) // the panel contentEl while open
+  // Floating bottom-right export buttons (last message / whole conversation →
+  // new note in the vault root). Lives inside viewRoot, rebuilt on attachView.
+  private exportFab: HTMLElement | null = null;
 
   private fontLink: HTMLLinkElement | null = null;
   // Header UI (tabs strip + toolbar) — see header.ts.
@@ -1617,6 +1622,18 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       callback: () => void this.launchTokenDashboard(),
     });
 
+    this.addCommand({
+      id: "export-last-message",
+      name: "Export last Claude message to a new note",
+      callback: () => void exportLastMessage(this),
+    });
+
+    this.addCommand({
+      id: "export-conversation",
+      name: "Export Claude conversation to a new note",
+      callback: () => void exportConversation(this),
+    });
+
     // Right-click a file/folder in the explorer -> "Send to Claude" (@-mention).
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file: TAbstractFile) => {
@@ -1683,6 +1700,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.history.flushOpenSessions();
     for (const s of this.sessions) s.dispose();
     this.sessions = [];
+    this.exportFab?.remove();
+    this.exportFab = null;
     this.viewRoot = null;
     this.fontLink?.remove();
     this.fontLink = null;
@@ -1846,13 +1865,43 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     const a = this.activeSession();
     if (a && !a.host?.isConnected) a.attachInto(root);
     else a?.scheduleFit();
+    this.refreshExportFab();
   }
 
   /** Unmount the panel WITHOUT killing any session. Called from the view's onClose. */
   detachView() {
     this.history.closeHistorySidebar(); // it lives inside viewRoot
+    this.exportFab?.remove(); // it lives inside viewRoot
+    this.exportFab = null;
     this.activeSession()?.detachHost();
     this.viewRoot = null;
+  }
+
+  /** (Re)build the floating bottom-right export buttons over the terminal. The
+   *  panel root is the anchor (position:relative); the fab floats above xterm and
+   *  acts on the ACTIVE session. Also called from settings when toggled. */
+  refreshExportFab() {
+    this.exportFab?.remove();
+    this.exportFab = null;
+    if (!this.viewRoot || !this.settings.btnExportNotes) return;
+    const fab = this.viewRoot.createDiv({ cls: "cch-export-fab" });
+    const btn = (icon: string, title: string, onClick: () => void) => {
+      const b = fab.createEl("button", { cls: "cch-btn" });
+      setIcon(b, icon);
+      b.setAttr("aria-label", title);
+      b.title = title;
+      b.onclick = (e) => {
+        e.preventDefault();
+        onClick();
+      };
+    };
+    btn("file-plus", "Copy Claude's last message into a new note (vault root)", () =>
+      void exportLastMessage(this)
+    );
+    btn("files", "Copy the whole conversation into a new note (vault root)", () =>
+      void exportConversation(this)
+    );
+    this.exportFab = fab;
   }
 
   /** ResizeObserver entry point — delegate to the active session. */
