@@ -3,6 +3,72 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-16
+
+- **Ficheros no-nota clicables en la salida de Claude (PDF, xlsx, docx…).**
+  `resolveNote` ya no filtra por `extension==="md"`: cualquier `TFile` que resuelva
+  `getFirstLinkpathDest` es clicable. `openNoteLink` decide por tipo: extensiones
+  que Obsidian renderiza (`OBSIDIAN_VIEWABLE_RE` en constants.ts:
+  md/canvas/pdf/imágenes/audio/vídeo) → `openLinkText` (pestaña dentro de
+  Obsidian); el resto (xlsx, docx…) → `app.openWithDefaultApp(path)` (app por
+  defecto del SO). Los nombres **partidos por salto de línea** siguen funcionando
+  sin cambios: la reconstrucción multi-línea de `computeNoteLinks` es agnóstica
+  del destino (opera antes de resolver), y `resolveSpan` prueba las variantes
+  con/sin espacio de unión contra el `resolveNote` ampliado.
+
+- **Ronda de simplificación (auditoría ponytail, ~115 líneas fuera).** Sin cambio
+  de comportamiento salvo lo anotado:
+  - Borrado código muerto: `openInBrowser` (wrapper sin callers, resto del
+    auto-open del remote control), campo `AccountUsage.status` + header
+    `H_5H_STATUS` (se escribía, nadie lo leía), campo `Session.webgl` (write-only),
+    campo `HeaderView.historyBtn` (nunca leído), ajuste `btnSkillsFolder` (sin
+    toggle ni lector), `export { VIEW_TYPE }` de main.ts, exports internos de
+    exporter.ts.
+  - Borrado el plumbing async del picker `[[` (era de OmniSearch): `searchWikilink`
+    ahora es síncrono, sin `wlSearchSeq` ni wrapper `queryNotes` (la fuente
+    `nativeNotes` es síncrona; no hay respuestas obsoletas que descartar).
+  - `relativeTime` y `stamp` ahora usan el `moment` que Obsidian exporta
+    (`fromNow()`/`format()`); CAMBIO VISIBLE menor: el subtítulo del historial dice
+    "3 hours ago" en vez de "3h ago". OJO: `moment` viene tipado como namespace en
+    obsidian.d.ts pero es callable en runtime — se castea `(moment as any)`.
+  - `newConversationId` = `crypto.randomUUID()` a secas (fuera el triple fallback;
+    disponible en el Electron de cualquier Obsidian moderno).
+  - `browserOptions` del settings-tab se deriva de `BROWSERS` (antes 12 etiquetas
+    duplicadas a mano que podían divergir).
+  - `pluginDir()` usa `manifest.dir` (fuera el id "claude-code-harness" hardcodeado).
+  - Deduplicado el tipo de opts de `Session`/`newSession` en un `SessionOpts`;
+    fusionados los dos handlers `exit` de `launchTokenDashboard`; `selectModel(id)`
+    pierde el param `label` (no se usaba); `refreshHeader` (alias de
+    `rebuildHeader`) e `isScheduleHardStop` (getter de un campo público)
+    eliminados; `readSavedAccounts` ahora es private.
+
+- **Carpetas del vault clicables en la salida de Claude.** Igual que las notas: si
+  Claude menciona una carpeta (por ruta `Notas/Proyectos` o por nombre a secas,
+  coloreada o como `[[wikilink]]`), el clic la **revela y despliega en el explorador
+  de archivos** del sidebar izquierdo. Implementación mínima sobre la maquinaria
+  existente: `resolveNote` ahora devuelve `TFile | TFolder` (si no resuelve a nota
+  `.md`, busca una `TFolder` por ruta o nombre, case-insensitive, tolerando `\`) y
+  `openNoteLink` bifurca: carpeta → `revealLeaf` del file explorer +
+  `revealInFolder(folder)` (API interna sin tipar; si Obsidian la cambia, el clic
+  no hace nada, sin error). Sin ajustes nuevos: lo gobierna el mismo
+  `linkifyNotes`.
+
+- **Fix: la skill no se inyectaba de forma intermitente (pestañas nuevas y
+  reinicios).** Qué fallaba: a veces, sin patrón aparente, una pestaña nueva o un
+  reinicio arrancaba sin la skill (`second-brain-assistant`) cargada. Causa raíz:
+  `maybeSendInitial` pasteaba `/<skill>` con un **temporizador fijo de 1800 ms
+  contado desde el primer `data` del pty**, pero ese primer `data` es el repintado
+  que emite **conpty al spawnear**, no Claude. Si `claude.exe` tardaba más de ~1,8 s
+  en llegar a su prompt (arranque en frío, MCP servers, máquina cargada), el paste
+  caía dentro de su init de raw-mode y se perdía **en silencio**; si arrancaba
+  rápido, funcionaba — de ahí la intermitencia. Fix: esperar la señal real de que
+  la entrada de la TUI está viva, el **modo bracketed-paste** de xterm
+  (`term.modes.bracketedPasteMode`, la misma bandera que ya consultaba
+  `pasteToPty`): poll de 100 ms, 400 ms de asiento y tope de 60 s que inyecta a
+  ciegas dejando log. En el caso normal dispara **antes** que el temporizador viejo.
+  No es el gate de detección por escaneo de pantalla que se revirtió en 2026-07
+  (aquel era lento por su tope de 20 s cuando no casaba).
+
 ## 2026-07-08
 
 - **Botones flotantes de exportación a nota (esquina inferior derecha).** Dos

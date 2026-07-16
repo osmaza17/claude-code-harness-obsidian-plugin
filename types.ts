@@ -107,7 +107,6 @@ export interface HarnessSettings {
   btnAccount: boolean;
   btnModel: boolean;
   btnSkill: boolean;
-  btnSkillsFolder: boolean;
   btnRemote: boolean;
   btnAutoSwitch: boolean;
   btnTokenDashboard: boolean;
@@ -135,7 +134,6 @@ export interface AccountUsage {
   reset5h: number | null;
   pct7d: number | null;
   reset7d: number | null;
-  status: string | null;
   error: "auth" | "rate" | "net" | null;
   checkedAt: number;
 }

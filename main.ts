@@ -8,6 +8,7 @@ import {
   sortSearchResults,
   TAbstractFile,
   TFile,
+  TFolder,
   WorkspaceLeaf,
 } from "obsidian";
 import { Terminal, ILink } from "@xterm/xterm";
@@ -25,6 +26,7 @@ import {
   looksLikePrompt,
   ANSI_DARK,
   ANSI_LIGHT,
+  OBSIDIAN_VIEWABLE_RE,
 } from "./constants";
 import { nodeRequire, stripDiacritics, newConversationId } from "./utils";
 import { AccountManager } from "./accounts";
@@ -33,10 +35,22 @@ import { HarnessSettingTab } from "./settings-tab";
 import { SessionHistory } from "./history";
 import { HeaderView } from "./header";
 
-export { VIEW_TYPE };
 
 // Monotonic id source for sessions (used for tab titles + identity).
 let SESSION_SEQ = 0;
+
+/** Options for creating a Session (also the shape newSession/reopen paths pass). */
+export type SessionOpts = {
+  skill?: string;
+  model?: string;
+  args?: string;
+  title?: string;
+  sessionId?: string;
+  resume?: boolean;
+  cols?: number;
+  rows?: number;
+  pinned?: boolean;
+};
 
 /**
  * One Claude Code instance: its own xterm Terminal, DOM host and forked pty-host
@@ -71,7 +85,6 @@ export class Session {
   fit: FitAddon | null = null;
   host: HTMLElement | null = null; // element xterm renders into
   child: any = null; // forked pty-host process
-  webgl: any = null; // WebglAddon, kept so it can be disposed on context loss
   opened = false; // whether term.open() has been called
   exited = false; // claude (the inner pty process) has exited — stop resizing
   // Last grid size sent to the pty. We only resize when it ACTUALLY changes:
@@ -146,22 +159,8 @@ export class Session {
   private wlCleanup: (() => void) | null = null;
   private wlItems: { path: string; basename: string }[] = [];
   private wlSel = 0;
-  private wlSearchSeq = 0; // discard stale async OmniSearch responses
 
-  constructor(
-    plugin: ClaudeCodeHarnessPlugin,
-    opts?: {
-      skill?: string;
-      model?: string;
-      args?: string;
-      title?: string;
-      sessionId?: string;
-      resume?: boolean;
-      cols?: number;
-      rows?: number;
-      pinned?: boolean;
-    }
-  ) {
+  constructor(plugin: ClaudeCodeHarnessPlugin, opts?: SessionOpts) {
     this.plugin = plugin;
     this.id = ++SESSION_SEQ;
     const s = plugin.settings;
@@ -305,7 +304,7 @@ export class Session {
     // Schedule hard stop: the active account is forbidden right now and there is
     // nowhere to jump → cut any generation the moment it starts ("like usage ran
     // out"). The plugin throttles the accompanying Notice.
-    if (this.plugin.accounts.isScheduleHardStop()) {
+    if (this.plugin.accounts.scheduleHardStopActive) {
       this.interrupt();
       this.plugin.accounts.notifyScheduleStop();
       return;
@@ -436,7 +435,7 @@ export class Session {
   //
   // Mirrors Obsidian's wikilink autocomplete inside the terminal: typing "[[" opens
   // a floating picker anchored at the cursor with the SAME suggestions as [[ in a
-  // note (Obsidian's native getLinkSuggestions + prepareFuzzySearch — see queryNotes);
+  // note (Obsidian's native getLinkSuggestions + prepareFuzzySearch — see nativeNotes);
   // picking a note replaces "[[query" with an "@<path> " reference (Claude's syntax).
   //
   // The typed text (the two "[" and the query) IS forwarded to Claude so it echoes
@@ -473,7 +472,7 @@ export class Session {
       if (this.wlQuery.length > 0) {
         this.wlQuery = this.wlQuery.slice(0, -1);
         if (!alreadySent) this.send({ t: "input", d });
-        void this.searchWikilink();
+        this.searchWikilink();
         return true;
       }
       this.closeWikilinkPicker();
@@ -484,7 +483,7 @@ export class Session {
     if (d.length === 1 && d.charCodeAt(0) >= 0x20) {
       this.wlQuery += d;
       if (!alreadySent) this.send({ t: "input", d });
-      void this.searchWikilink();
+      this.searchWikilink();
       return true;
     }
     // Anything else while open (an escape sequence that slipped through, a paste
@@ -511,14 +510,13 @@ export class Session {
     setTimeout(() => document.addEventListener("mousedown", onDown, true), 0);
     this.wlCleanup = () =>
       document.removeEventListener("mousedown", onDown, true);
-    void this.searchWikilink();
+    this.searchWikilink();
   }
 
   closeWikilinkPicker() {
     this.wlActive = false;
     this.wlQuery = "";
     this.wlBracketRun = 0;
-    this.wlSearchSeq++; // invalidate any in-flight search
     if (this.wlCleanup) {
       this.wlCleanup();
       this.wlCleanup = null;
@@ -530,24 +528,12 @@ export class Session {
     this.wlItems = [];
   }
 
-  /** Run the current query and re-render. Tagged with a sequence number so a slow
-   *  response can't clobber a newer query (or a closed picker). */
-  private async searchWikilink() {
-    const seq = ++this.wlSearchSeq;
-    const items = await this.queryNotes(this.wlQuery);
-    if (seq !== this.wlSearchSeq || !this.wlActive) return; // stale or closed
-    this.wlItems = items.slice(0, 8);
+  /** Run the current query (Obsidian's native [[ suggester) and re-render. */
+  private searchWikilink() {
+    if (!this.wlActive) return;
+    this.wlItems = this.nativeNotes(this.wlQuery).slice(0, 8);
     this.wlSel = 0;
     this.renderWikilinkResults();
-  }
-
-  /** Suggestions = Obsidian's native [[ suggester (`nativeNotes`): same candidate
-   *  source + fuzzy matcher + sort order as the editor's own [[ popup. `path` (for
-   *  the @ reference) is the file's vault-relative path. */
-  private async queryNotes(
-    q: string
-  ): Promise<{ path: string; basename: string }[]> {
-    return this.nativeNotes(q);
   }
 
   /** Mirrors Obsidian's native [[ autocomplete: SAME candidate source
@@ -957,10 +943,8 @@ export class Session {
           } catch {
             /* noop */
           }
-          this.webgl = null;
         });
         this.term.loadAddon(webgl);
-        this.webgl = webgl;
       } catch (e) {
         console.warn("[claude-code-harness] webgl unavailable, using DOM renderer:", e);
       }
@@ -1055,7 +1039,7 @@ export class Session {
   /** Switch this session's model by running `/model <id>`. A leading Ctrl+U
    *  clears any draft first so the command runs on its own line (restorable with
    *  Ctrl+Y). Also updates the global default so new sessions inherit it. */
-  selectModel(id: string, label: string) {
+  selectModel(id: string) {
     this.model = id;
     this.plugin.settings.model = id;
     void this.plugin.saveSettings();
@@ -1174,7 +1158,7 @@ export class Session {
       console.log("[cch initial] tab", this.id, "nothing to inject (no skill / startup commands)");
       return;
     }
-    console.log("[cch initial] tab", this.id, "armed:", steps.join(" · "), "(first step in 1800ms)");
+    console.log("[cch initial] tab", this.id, "armed:", steps.join(" · "), "(waiting for claude's input)");
 
     let i = 0;
     const submit = (text: string, then: () => void) => {
@@ -1196,13 +1180,31 @@ export class Session {
         if (i < steps.length) window.setTimeout(next, 1800);
       });
     };
-    // First step after claude has settled at its prompt. Fixed delay ON PURPOSE:
-    // a prompt-detection gate (screen scan + quiet window) was tried in 2026-07 and
-    // reverted at the user's request — it made the injection feel much slower (its
-    // 20s fallback cap kicked in when the detection missed). The restart-race that
-    // motivated it is fixed by the superseded-host guard in startHost's message
-    // handler, so the fixed timer anchors to the NEW claude's first output again.
-    window.setTimeout(next, 1800);
+    // WAIT FOR CLAUDE'S INPUT TO BE READY, don't guess with a fixed delay.
+    // The old code fired 1800ms after the FIRST pty output — but that first output
+    // is conpty's own repaint at spawn, milliseconds in, NOT claude. On a cold start
+    // (claude.exe boot, MCP servers) the prompt isn't up yet at 1.8s, so the paste
+    // lands in claude's raw-mode init and is swallowed → skill silently never sent.
+    // That's the intermittency: it depends on how fast claude boots that time.
+    // The gate is claude's TUI turning ON bracketed-paste mode (the same flag
+    // pasteToPty checks): its input is live exactly then. Cheap flag poll, NOT the
+    // screen-scan gate reverted in 2026-07 — it fires as soon as claude is up
+    // (usually FASTER than the old 1.8s), never on a slow fallback cap.
+    const deadline = Date.now() + 60_000;
+    const whenReady = () => {
+      if (!this.child) return;
+      if ((this.term as any)?.modes?.bracketedPasteMode) {
+        console.log("[cch initial] tab", this.id, "claude input ready — injecting");
+        window.setTimeout(next, 400); // let the prompt settle before typing
+      } else if (Date.now() < deadline) {
+        window.setTimeout(whenReady, 100);
+      } else {
+        // ponytail: never-ready is a bug elsewhere; send anyway and log it.
+        console.log("[cch initial] tab", this.id, "input never became ready — injecting blind");
+        next();
+      }
+    };
+    whenReady();
   }
 
   /** Debounced fit — collapses a burst of resize events into a single resize. */
@@ -1729,17 +1731,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
   /** Create a new session (its own claude), make it active, and mount it if the
    *  panel is open. Used by the + tab button and the "New session" command. */
-  newSession(opts?: {
-    skill?: string;
-    model?: string;
-    args?: string;
-    title?: string;
-    sessionId?: string;
-    resume?: boolean;
-    cols?: number;
-    rows?: number;
-    pinned?: boolean;
-  }): Session {
+  newSession(opts?: SessionOpts): Session {
     if (this.viewRoot) this.activeSession()?.detachHost();
     const sess = new Session(this, opts);
     this.sessions.push(sess);
@@ -2172,12 +2164,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   }
 
   pluginDir(): string {
-    return path.join(
-      this.vaultPath(),
-      this.app.vault.configDir,
-      "plugins",
-      "claude-code-harness"
-    );
+    // manifest.dir is the vault-relative plugin folder (no hardcoded plugin id).
+    return path.join(this.vaultPath(), this.manifest.dir!);
   }
 
   /**
@@ -2326,10 +2314,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       this.tokenDashboardChild = null;
     });
 
-    child.on("exit", () => {
-      this.tokenDashboardChild = null;
-    });
-
     // Open the browser as soon as the server reports it is listening.
     child.stdout?.setEncoding?.("utf8");
     child.stdout?.on("data", (d: string) => {
@@ -2343,6 +2327,7 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       errBuf = (errBuf + String(d)).slice(-2000);
     });
     child.on("exit", (code: number) => {
+      this.tokenDashboardChild = null;
       if (!opened && code && code !== 0) {
         new Notice(
           "Token Dashboard exited (code " + code + ").\n" + (errBuf.trim() || "")
@@ -2404,8 +2389,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   // --- Clickable note references in the terminal --------------------------
 
   /** Resolve a link text (note name, possibly `Name|alias` / `Name#heading`) to
-   *  an existing .md note in the vault, or null. */
-  private resolveNote(name: string): TFile | null {
+   *  an existing .md note — or a vault FOLDER (by full path or bare name) — or null. */
+  private resolveNote(name: string): TFile | TFolder | null {
     const clean = name
       .trim()
       .replace(/^\[\[+/, "")
@@ -2414,14 +2399,43 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       .split("#")[0]
       .trim();
     if (!clean) return null;
+    // Any vault file (md, pdf, xlsx, images…), not just notes.
     const f = this.app.metadataCache.getFirstLinkpathDest(clean, "");
-    return f && f.extension === "md" ? f : null;
+    if (f) return f;
+    // Folders: exact path or bare name, case-insensitive, `\` tolerated.
+    const want = clean.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    if (!want) return null;
+    for (const af of this.app.vault.getAllLoadedFiles()) {
+      if (
+        af instanceof TFolder &&
+        !af.isRoot() &&
+        (af.path.toLowerCase() === want || af.name.toLowerCase() === want)
+      )
+        return af;
+    }
+    return null;
   }
 
-  /** Open a note referenced from the terminal (Ctrl/Cmd-click = new tab). */
+  /** Open a file referenced from the terminal (Ctrl/Cmd-click = new tab). Files
+   *  Obsidian can render open in the workspace; anything else (xlsx, docx…) opens
+   *  in the system's default app. A folder reference is revealed (highlighted +
+   *  expanded) in the file explorer. */
   openNoteLink(linktext: string, ev: MouseEvent) {
     const f = this.resolveNote(linktext);
     if (!f) return;
+    if (f instanceof TFolder) {
+      const leaf = this.app.workspace.getLeavesOfType("file-explorer")[0];
+      if (!leaf) return;
+      void this.app.workspace.revealLeaf(leaf);
+      // revealInFolder is the file explorer's own (untyped) reveal API.
+      (leaf.view as any).revealInFolder?.(f);
+      return;
+    }
+    if (!OBSIDIAN_VIEWABLE_RE.test(f.extension)) {
+      // openWithDefaultApp is App's own (untyped but long-stable) API.
+      (this.app as any).openWithDefaultApp?.(f.path);
+      return;
+    }
     const newTab = !!ev && (ev.ctrlKey || ev.metaKey);
     void this.app.workspace.openLinkText(f.path, "", newTab ? "tab" : false);
   }

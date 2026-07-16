@@ -3,7 +3,7 @@
 // forbidden time windows), talking to the plugin/AccountManager via this.plugin.
 
 import { App, PluginSettingTab, Setting, Notice, setIcon } from "obsidian";
-import { DEFAULT_USAGE_RE, USAGE_PROBE_MODEL } from "./constants";
+import { BROWSERS, DEFAULT_USAGE_RE, USAGE_PROBE_MODEL } from "./constants";
 import type ClaudeCodeHarnessPlugin from "./main";
 
 export class HarnessSettingTab extends PluginSettingTab {
@@ -257,20 +257,9 @@ export class HarnessSettingTab extends PluginSettingTab {
           })
       );
 
-    const browserOptions: Record<string, string> = {
-      chrome: "Chrome",
-      firefox: "Firefox",
-      edge: "Edge",
-      brave: "Brave",
-      opera: "Opera",
-      operagx: "Opera GX",
-      zen: "Zen",
-      helium: "Helium",
-      vivaldi: "Vivaldi",
-      waterfox: "Waterfox",
-      floorp: "Floorp",
-      mullvad: "Mullvad Browser",
-    };
+    const browserOptions: Record<string, string> = Object.fromEntries(
+      Object.entries(BROWSERS).map(([id, b]) => [id, b.label])
+    );
 
     new Setting(containerEl)
       .setName("Default browser")
@@ -542,7 +531,7 @@ export class HarnessSettingTab extends PluginSettingTab {
         t.setValue(this.plugin.settings[key]).onChange(async (v) => {
           this.plugin.settings[key] = v;
           await this.plugin.saveSettings();
-          this.plugin.header.refreshHeader();
+          this.plugin.header.rebuildHeader();
         })
       );
     buttonToggle("Send active note (@)", "btnSendNote");
@@ -556,7 +545,7 @@ export class HarnessSettingTab extends PluginSettingTab {
     buttonToggle("Reload session (same conversation)", "btnReload");
     buttonToggle("Zoom controls", "btnZoom");
     // Not a header button — the floating export pair lives over the terminal, so
-    // its refresh goes through refreshExportFab, not refreshHeader.
+    // its refresh goes through refreshExportFab, not rebuildHeader.
     new Setting(containerEl)
       .setName("Export-to-note buttons (bottom-right)")
       .setDesc("Floating buttons that save Claude's last message / the whole conversation to a new note in the vault root.")

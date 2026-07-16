@@ -136,10 +136,14 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   para elegir, Escape para cancelar; al elegir, lo tecleado se sustituye por la
   referencia `@<ruta>` de Claude Code. Se puede desactivar en ajustes
   ("[[ note suggester").
-- **Referencias a notas clicables**: las menciones a notas en la salida de Claude
-  (el texto **coloreado** que coincide con el nombre de una nota `.md` del vault, y
+- **Referencias a notas y ficheros clicables**: las menciones en la salida de Claude
+  (el texto **coloreado** que coincide con el nombre de un fichero del vault, y
   los `[[wikilinks]]`) se vuelven **enlaces**: pasa el ratón para subrayarlas y haz
-  **clic** para abrir la nota (Ctrl/Cmd+clic = pestaña nueva). Funciona incluso si
+  **clic** para abrir (Ctrl/Cmd+clic = pestaña nueva). Vale para **cualquier tipo de
+  fichero**: notas, PDFs e imágenes se abren dentro de Obsidian; lo que Obsidian no
+  sabe mostrar (xlsx, docx…) se abre con la **app por defecto del sistema**. También
+  funciona con **carpetas** del vault (por ruta o por nombre): el clic la **revela y
+  despliega en el explorador de archivos** del sidebar izquierdo. Funciona incluso si
   el nombre queda **partido en varias líneas** (Claude lo corta a lo ancho, a veces
   a mitad de palabra). Se puede desactivar en ajustes ("Clickable note links").
 - **Remote control (toggle)**: botón (icono 📱) o **`Ctrl+R`** que activa/desactiva

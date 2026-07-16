@@ -17,7 +17,6 @@ export class HeaderView {
   accountBtn: HTMLElement | null = null; // (relabelled live by AccountManager)
   autoSwitchBtn: HTMLElement | null = null; // green while auto-switch is ON
   remoteBtn: HTMLElement | null = null;
-  historyBtn: HTMLElement | null = null;
 
   /** Interactive Chrome-style tab drag. The dragged tab follows the pointer
    *  (translateX) while the other tabs slide to open a slot for it; on release
@@ -271,7 +270,6 @@ export class HeaderView {
     this.accountBtn = null;
     this.remoteBtn = null;
     this.autoSwitchBtn = null;
-    this.historyBtn = null;
     this.zoomLabel = null;
 
     const header = container.createDiv({ cls: "cch-header" });
@@ -382,7 +380,7 @@ export class HeaderView {
             item
               .setTitle(m.label)
               .setChecked((a?.model ?? s.model) === m.id)
-              .onClick(() => a?.selectModel(m.id, m.label))
+              .onClick(() => a?.selectModel(m.id))
           );
         }
         const r = modelBtn.getBoundingClientRect();
@@ -502,7 +500,6 @@ export class HeaderView {
       setIcon(histBtn, "history");
       histBtn.setAttr("aria-label", "Session history");
       histBtn.title = "Session history (reopen a past conversation)";
-      this.historyBtn = histBtn;
       histBtn.onclick = (e) => {
         e.preventDefault();
         this.plugin.history.openHistoryMenu();
@@ -552,15 +549,11 @@ export class HeaderView {
   }
 
   /** Rebuild the header in the open panel (tabs + toolbar), preserving the
-   *  mounted terminal host. Also called from the settings tab as refreshHeader. */
+   *  mounted terminal host. Also called from the settings tab. */
   rebuildHeader() {
     if (!this.plugin.viewRoot) return;
     this.plugin.viewRoot.querySelector(".cch-header")?.remove();
     this.buildHeader(this.plugin.viewRoot);
-  }
-
-  refreshHeader() {
-    this.rebuildHeader();
   }
 
   /** Update just the tab labels in place (cheap; avoids a full header rebuild on

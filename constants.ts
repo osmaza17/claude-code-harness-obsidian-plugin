@@ -34,7 +34,6 @@ export const DEFAULT_SETTINGS: HarnessSettings = {
   btnAccount: true,
   btnModel: true,
   btnSkill: true,
-  btnSkillsFolder: true,
   btnRemote: true,
   btnAutoSwitch: true,
   btnTokenDashboard: true,
@@ -146,7 +145,12 @@ export const H_7D_UTIL = "anthropic-ratelimit-unified-7d-utilization";
 // verified live (unlike H_5H_RESET); probeUsage also scans for any "7d…reset"
 // header as a fallback so a renamed/variant header still works.
 export const H_7D_RESET = "anthropic-ratelimit-unified-7d-reset";
-export const H_5H_STATUS = "anthropic-ratelimit-unified-5h-status";
+
+// File extensions Obsidian can render in a workspace tab (notes, canvas, pdf,
+// images, audio, video). Anything else clicked in the terminal opens in the
+// system's default app instead.
+export const OBSIDIAN_VIEWABLE_RE =
+  /^(md|canvas|pdf|png|jpe?g|gif|svg|webp|avif|bmp|mp3|wav|ogg|oga|flac|m4a|3gp|mp4|webm|mov|mkv|ogv)$/i;
 export const USAGE_FRESH_MS = 6 * 60 * 1000; // a reading older than this is "stale"
 // TTL for the cached currentAccountEmail()/listSavedAccounts() reads. Both are
 // called (several times) from maybeAutoSwitch on EVERY pty data chunk; without a

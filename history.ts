@@ -4,7 +4,7 @@
 // (settings.openSessions) with its restore-on-first-panel-open pass, and the
 // ChatGPT-style history drawer.
 
-import { Notice, setIcon } from "obsidian";
+import { moment, Notice, setIcon } from "obsidian";
 import type { ClosedSessionInfo } from "./types";
 import { MAX_CLOSED_SESSIONS } from "./constants";
 import type ClaudeCodeHarnessPlugin from "./main";
@@ -200,21 +200,10 @@ export class SessionHistory {
     this.historyOverlayCleanup = null;
   }
 
-  /** Compact "3h ago" / "yesterday" label for a close timestamp. */
+  /** "3 hours ago" / "a day ago" label for a close timestamp (Obsidian's moment;
+   *  typed as a namespace in obsidian.d.ts but callable at runtime). */
   relativeTime(ms: number): string {
-    const diff = Date.now() - ms;
-    if (diff < 0) return "just now";
-    const min = Math.floor(diff / 60000);
-    if (min < 1) return "just now";
-    if (min < 60) return `${min}m ago`;
-    const hr = Math.floor(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    const day = Math.floor(hr / 24);
-    if (day === 1) return "yesterday";
-    if (day < 30) return `${day}d ago`;
-    const mo = Math.floor(day / 30);
-    if (mo < 12) return `${mo}mo ago`;
-    return `${Math.floor(mo / 12)}y ago`;
+    return (moment as any)(ms).fromNow();
   }
 
   /** Toggle the conversation-history drawer: a scrollable list of previously

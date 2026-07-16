@@ -235,7 +235,8 @@ Reparto de responsabilidades:
   hace `activateView()` antes. Reutiliza **la misma pila persistida
   `settings.closedSessions`** que alimenta Ctrl+Shift+Y (no una fuente nueva): la
   renderiza como lista **más-reciente-primero** (`[...closedSessions].reverse()`), cada
-  fila con el título + subtítulo (`relativeTime(closedAt)` "3h ago"/"yesterday" ·
+  fila con el título + subtítulo (`relativeTime(closedAt)` = `moment.fromNow()`,
+  "3 hours ago"/"a day ago" ·
   skill/modelo). Click en la fila -> `reopenSession(info)` reabre **esa** conversación
   (no solo la última) en una **pestaña nueva** vía `--resume` y la **quita** de la pila
   (por `sessionId`, para que no quede en el historial mientras está abierta; al cerrarla
@@ -875,17 +876,18 @@ llama dos veces por sesión (xterm no lo soporta).
   **sustituye por `@<ruta> `** (formato de `mention()`), NO por un `[[wikilink]]`.
   - Estado y métodos viven en `Session` (`wlActive`/`wlQuery`/`wlBracketRun`/
     `wlPopup`/`wlItems`/`wlSel`): `feedWikilink` (máquina de estados del trigger),
-    `openWikilinkPicker`/`closeWikilinkPicker`, `searchWikilink`, `queryNotes`,
+    `openWikilinkPicker`/`closeWikilinkPicker`, `searchWikilink`,
     `renderWikilinkResults`/`highlightWikilink`/`moveWikilinkSel`, `acceptWikilink`,
-    `positionWikilinkPopup`. `searchWikilink` es **async** (la firma se mantiene por
-    compatibilidad) con `wlSearchSeq` para descartar respuestas obsoletas / picker ya
-    cerrado.
+    `positionWikilinkPopup`. `searchWikilink` es **síncrono** (el guard
+    async/`wlSearchSeq`/`queryNotes` de la era OmniSearch se eliminó en la
+    simplificación de 2026-07-16: `nativeNotes` es síncrono y no hay respuestas
+    obsoletas que descartar).
   - **Fuente de sugerencias = suggester NATIVO de Obsidian** (`nativeNotes`):
     `metadataCache.getLinkSuggestions()` (cada fichero linkable + sus alias) matcheado
     sobre el **nombre/alias** con el mismo fuzzy matcher (`prepareFuzzySearch`) +
     `sortSearchResults`, de modo que el orden coincide con el popup `[[` del editor.
-    `queryNotes` solo delega en `nativeNotes` (la indirección se conserva por si en el
-    futuro se quiere otra fuente); mapea a `{path, basename}` (path = ruta de vault para
+    `searchWikilink` llama a `nativeNotes` directamente; mapea a `{path, basename}`
+    (path = ruta de vault para
     el `@`-ref). Para la **consulta vacía** muestra la lista nativa tal cual (reciente/
     ordenada). HISTORIA: primero fue OmniSearch, luego nativo para "igualar el `[[` de
     una nota", luego OmniSearch (full-text) a petición del usuario, y finalmente
@@ -914,8 +916,12 @@ llama dos veces por sesión (xterm no lo soporta).
   cada `Session` registra un link provider de xterm; en hover, `computeNoteLinks`
   (en el plugin) crea `ILink`s para: (1) `[[wikilinks]]` (independiente del color) y
   (2) **runs de celdas coloreadas** (fg no-default, `cell.isFgDefault()`) cuyo texto
-  resuelva a una nota `.md` existente (`resolveNote` →
-  `metadataCache.getFirstLinkpathDest`, filtra `extension==="md"`, quita
+  resuelva a **cualquier fichero del vault** (md, pdf, xlsx, imágenes…) **o a una
+  CARPETA** (`resolveNote` → primero `metadataCache.getFirstLinkpathDest` (SIN
+  filtro de extensión — cualquier `TFile` indexado vale); si no,
+  busca una `TFolder` por **ruta completa o nombre a secas**, case-insensitive,
+  tolerando `\` y `/` final, saltando la raíz — escaneo lineal de
+  `vault.getAllLoadedFiles()`, solo corre en hover; quita
   `[[ ]]`/`|alias`/`#heading`). Un run se prueba entero y partido por `,;|·•`,
   recortando puntuación alrededor (`. , : ; ! ¿ ? ( ) [ ] { } " ' « » \` * < > →`;
   NO `-` ni `_`).
@@ -938,8 +944,20 @@ llama dos veces por sesión (xterm no lo soporta).
   espacio ("se|supone"), así que el espacio de unión sintético puede sobrar o hacer
   falta. `resolveSpan(s,e,raw)` prueba el candidato tal cual y, si no resuelve, con
   cada subconjunto de sus **espacios de unión** (marcados en `isJoin[]`) eliminados,
-  devolviendo la variante que resuelve (tope 4 cortes). Al activar, `openNoteLink` abre con
-  `workspace.openLinkText(path)` (Ctrl/Cmd+clic = pestaña nueva). Ajuste
+  devolviendo la variante que resuelve (tope 4 cortes). CLAVE: toda esta
+  reconstrucción multi-línea es **agnóstica del destino** (opera sobre texto y
+  posiciones antes de resolver), así que notas, PDFs, xlsx y carpetas partidos por
+  salto de línea funcionan igual — no hay que tocarla al ampliar los destinos.
+  Al activar, `openNoteLink` decide por tipo: fichero que Obsidian sabe renderizar
+  (`OBSIDIAN_VIEWABLE_RE` en constants.ts: md/canvas/pdf/imágenes/audio/vídeo) →
+  `workspace.openLinkText(path)` (Ctrl/Cmd+clic = pestaña nueva); **otro fichero**
+  (xlsx, docx…) → `(app as any).openWithDefaultApp(path)` (API interna estable de
+  Obsidian: lo abre la app por defecto del SO); si el destino es
+  una **carpeta**, la **revela en el explorador de archivos** del sidebar
+  (`getLeavesOfType("file-explorer")[0]` + `revealLeaf` +
+  `(leaf.view as any).revealInFolder(folder)` — API interna sin tipar del
+  file explorer; si algún update de Obsidian la rompe, el clic simplemente no hace
+  nada). Ajuste
   `settings.linkifyNotes` (por defecto on). Si el subrayado/clic sale desalineado,
   revisar el off-by-one de `range` (1-based, `y` = índice de fila del buffer).
 - **Ctrl+R**: toggle del remote control. Hay un comando "Toggle remote control"
@@ -963,14 +981,15 @@ llama dos veces por sesión (xterm no lo soporta).
     `maybeCaptureRemoteUrl` + sus campos `awaitRemoteActive`/`awaitRemoteUrl`/
     `remoteMenuLoopActive`/`remoteMenuAttempts`/`remoteUrlCaptured`/`remote*Buf`/
     `remote*Deadline`). Si en el futuro se quiere recuperar, está en el historial de
-    git (commit del botón de recargar es el anterior a este). `openInBrowser`/
-    `launchBrowser` **siguen existiendo** porque los usa el login por cuenta
-    (`openLoginForAccount`), no el remote control.
+    git (commit del botón de recargar es el anterior a este). `launchBrowser`
+    **sigue existiendo** porque lo usa el login por cuenta (`openLoginForAccount`),
+    no el remote control (el wrapper `openInBrowser`, ya sin callers, se borró en la
+    simplificación de 2026-07-16).
   - **Navegador por cuenta** (lo usa ahora `openLoginForAccount`, no el remote): la
     URL solo funciona en el navegador donde está
     logueada la misma cuenta de Claude que la sesión. `currentAccountEmail()` lee
     `~/.claude.json` -> `oauthAccount.emailAddress` (la cuenta activa, se actualiza
-    al hacer `/login`). `openInBrowser` busca ese email en `settings.browserMap`
+    al hacer `/login`). `openLoginForAccount` busca el email en `settings.browserMap`
     (`{email, browser, path}[]`); si no hay match usa `settings.defaultBrowser`
     (por defecto `chrome`). `launchBrowser(browser, customPath, url)` lanza Chrome/
     Firefox/Edge/Brave/Opera/Opera GX/Zen/Helium/Vivaldi/Waterfox/Floorp/Mullvad
@@ -1035,8 +1054,9 @@ llama dos veces por sesión (xterm no lo soporta).
   `session.model` aunque `claude` corra en su propio default, hasta que el usuario
   elija uno (`selectModel` sí envía `/model` y re-sincroniza la etiqueta).
   `maybeSendInitial` primero corre los `startupCommands` (p. ej. `/remote-control`)
-  y por último invoca la skill activa (`/<skill>`) cuando llega la primera salida
-  de claude, **se abra o no el panel**. En tabs con `resume:true` no se envía nada
+  y por último invoca la skill activa (`/<skill>`) **en cuanto la entrada de la TUI
+  está viva** (espera a `term.modes.bracketedPasteMode`; ver el gotcha "Skill no
+  inyectada de forma INTERMITENTE"), **se abra o no el panel**. En tabs con `resume:true` no se envía nada
   (la conversación ya trae su modelo/skill). Cada paso se manda al pty con `pasteToPty()` (entrada IPC directa, con
   marcadores de bracketed-paste si el modo está activo) en vez de `term.paste()`,
   que requería la vista montada — por eso antes fallaba si nunca se abría la
@@ -1117,6 +1137,25 @@ llama dos veces por sesión (xterm no lo soporta).
   fijo perdía la skill; (b) sustituir el temporizador por detección de prompt
   (escaneo de pantalla + silencio + tope 20s) era mucho más lento cuando la
   detección no casaba y el usuario lo hizo revertir.
+- **Skill no inyectada de forma INTERMITENTE, también en pestañas nuevas
+  (fix 2026-07-16: esperar a que la entrada de Claude esté viva)**. Síntoma: a
+  veces —sin patrón claro— una pestaña nueva o un reinicio no cargaba la skill.
+  Causa: `maybeSendInitial` disparaba el primer paste **1800 ms después del PRIMER
+  `data` del pty**, y ese primer `data` es el repintado que **conpty** emite al
+  spawnear, milisegundos después — **no** Claude. Si `claude.exe` tardaba en
+  arrancar (arranque en frío, MCP servers, máquina cargada), a los 1,8 s la TUI aún
+  no estaba en su prompt: el paste caía en su init de raw-mode y se **tragaba en
+  silencio**. De ahí la intermitencia: dependía de lo rápido que arrancase Claude
+  esa vez. Fix: en vez de adivinar con un temporizador, se **espera a que la TUI
+  encienda el modo bracketed-paste** (`term.modes.bracketedPasteMode`, la misma
+  bandera que ya consulta `pasteToPty`), que es exactamente cuando su entrada está
+  viva; poll de 100 ms + 400 ms de asiento, con tope de 60 s que inyecta a ciegas y
+  lo loguea. NO es el gate revertido en 2026-07 (aquel escaneaba la pantalla y caía
+  a un tope de 20 s cuando no casaba, y por eso iba lento): esto es una bandera de
+  modo, dispara en cuanto Claude está listo —normalmente **antes** de los 1,8 s de
+  antes— y de paso garantiza que el paste va bracketed. Diagnóstico en los logs
+  `[cch initial]` de DevTools (`armed` → `claude input ready — injecting` →
+  `sending: /<skill>`).
 
 ## Estructura
 

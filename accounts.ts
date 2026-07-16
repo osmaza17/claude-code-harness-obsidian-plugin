@@ -26,7 +26,6 @@ import {
   H_5H_RESET,
   H_7D_UTIL,
   H_7D_RESET,
-  H_5H_STATUS,
   USAGE_FRESH_MS,
   ACCOUNT_CACHE_MS,
   BROWSERS,
@@ -383,7 +382,7 @@ export class AccountManager {
     return list;
   }
 
-  readSavedAccounts(): { email: string; file: string }[] {
+  private readSavedAccounts(): { email: string; file: string }[] {
     try {
       const fs = nodeRequire("fs");
       const dir = this.accountsDir();
@@ -558,13 +557,6 @@ export class AccountManager {
         return `${r.start}–${r.end}${days ? " " + days : ""}`;
       })
       .join(", ");
-  }
-
-  /** Cached hard-stop state (active account forbidden now AND nowhere to jump).
-   *  Recomputed by enforceSchedule() every 20s; markActivity() reads this cheaply
-   *  on every output chunk (computing it live would hit the disk per chunk). */
-  isScheduleHardStop(): boolean {
-    return this.scheduleHardStopActive;
   }
 
   /** Auto-snapshot the active account whenever it changes (throttled to ~10s). */
@@ -933,7 +925,6 @@ export class AccountManager {
       reset5h: null,
       pct7d: null,
       reset7d: null,
-      status: null,
       error,
       checkedAt: now,
     });
@@ -1010,7 +1001,6 @@ export class AccountManager {
               reset5h: isNaN(reset) ? null : reset,
               pct7d: toPct(h[H_7D_UTIL]),
               reset7d: isNaN(reset7) ? null : reset7,
-              status: h[H_5H_STATUS] || null,
               error: null,
               checkedAt: now,
             });
@@ -1053,7 +1043,6 @@ export class AccountManager {
             reset5h: null,
             pct7d: null,
             reset7d: null,
-            status: null,
             error: "auth",
             checkedAt: Date.now(),
           });
@@ -1440,17 +1429,6 @@ export class AccountManager {
     for (const s of this.plugin.sessions) s.autoSwitchBuf = "";
     new Notice(`Claude account ${reason} — switching to ${next}…`);
     this.switchToAccount(next);
-  }
-
-  /** Open the remote session URL in the browser mapped to the active Claude
-   *  account. Returns a human label for the notice. */
-  openInBrowser(url: string): string {
-    const email = this.currentAccountEmail();
-    const map = this.plugin.settings.browserMap.find(
-      (m) => m.email.trim().toLowerCase() === email && !!email
-    );
-    const browser = map?.browser || this.plugin.settings.defaultBrowser || "chrome";
-    return this.launchBrowser(browser, map?.path || "", url);
   }
 
   /** Open claude.ai in the browser MAPPED TO A SPECIFIC account (not the active

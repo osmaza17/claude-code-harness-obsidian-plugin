@@ -4,18 +4,18 @@
 // unlike scraping the xterm buffer. Used by the floating bottom-right buttons
 // and the two "Export …" commands.
 
-import { Notice, TFile } from "obsidian";
+import { moment, Notice, TFile } from "obsidian";
 import * as path from "path";
 import { nodeRequire } from "./utils";
 import type ClaudeCodeHarnessPlugin from "./main";
 
-export type ConvMessage = { role: "user" | "assistant"; text: string };
+type ConvMessage = { role: "user" | "assistant"; text: string };
 
 /** Path to the conversation .jsonl Claude Code writes for this session.
  *  Slug encoding is Claude Code's own: each of `:`, `\`, `/`, space → one `-`
  *  (NOT collapsed — "SECOND BRAIN\.obsidian" gives a double dash). Mirrors
  *  token-dashboard/token_dashboard/db.py:_encode_slug. */
-export function conversationJsonlPath(cwd: string, sessionId: string): string {
+function conversationJsonlPath(cwd: string, sessionId: string): string {
   const os = nodeRequire("os");
   const slug = cwd.replace(/[:\\/ ]/g, "-");
   return path.join(os.homedir(), ".claude", "projects", slug, sessionId + ".jsonl");
@@ -45,7 +45,7 @@ function contentText(content: any): string {
  *  final) sharing message.id but with different uuids. We dedupe by message.id,
  *  updating the earlier entry in place so the FINAL snapshot wins while the
  *  message keeps its position in the flow. */
-export function readConversation(file: string): ConvMessage[] {
+function readConversation(file: string): ConvMessage[] {
   const fs = nodeRequire("fs");
   let raw: string;
   try {
@@ -81,7 +81,7 @@ export function readConversation(file: string): ConvMessage[] {
 }
 
 /** Text of Claude's last message, or null if there is none yet. */
-export function lastAssistantText(msgs: ConvMessage[]): string | null {
+function lastAssistantText(msgs: ConvMessage[]): string | null {
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role === "assistant") return msgs[i].text;
   }
@@ -91,7 +91,7 @@ export function lastAssistantText(msgs: ConvMessage[]): string | null {
 /** Whole conversation as Markdown: header + alternating Usuario/Claude sections.
  *  Consecutive same-role messages are merged into one section (a single Claude
  *  turn interleaved with tool calls is stored as several assistant records). */
-export function conversationMarkdown(msgs: ConvMessage[], title: string): string {
+function conversationMarkdown(msgs: ConvMessage[], title: string): string {
   const parts = [`# ${title}`, `*Conversación de Claude Code — ${stamp()}*`];
   let prevRole: string | null = null;
   for (const m of msgs) {
@@ -105,9 +105,8 @@ export function conversationMarkdown(msgs: ConvMessage[], title: string): string
 /** Local timestamp for note names/headers: YYYY-MM-DD HH.mm (dots — `:` is not
  *  allowed in filenames). */
 function stamp(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}`;
+  // Obsidian's moment is typed as a namespace but callable at runtime.
+  return (moment as any)().format("YYYY-MM-DD HH.mm");
 }
 
 /** Strip characters Obsidian/Windows reject in note names. */
