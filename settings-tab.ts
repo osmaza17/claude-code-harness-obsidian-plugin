@@ -215,7 +215,7 @@ export class HarnessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Live usage (API)")
       .setDesc(
-        "Read the real 5h/7d usage % from the Anthropic API (rate-limit headers) instead of only scraping the status bar, and probe every saved account so their % shows in the account menu. Makes tiny per-account calls with each account's saved token. Off = scraping only."
+        "Read the real 5h/7d usage % from the Anthropic API (rate-limit headers) — the PRIMARY source for auto-switch decisions — and probe every saved account so their % shows in the account menu. Makes tiny per-account calls with each account's saved token. Off = fall back to scraping the status bar only."
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.usageProbe).onChange(async (v) => {

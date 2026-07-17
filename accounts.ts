@@ -31,7 +31,7 @@ import {
   ACCOUNT_CACHE_MS,
   BROWSERS,
 } from "./constants";
-import { nodeRequire } from "./utils";
+import { nodeRequire, timeBlockedAt } from "./utils";
 import type ClaudeCodeHarnessPlugin from "./main";
 import type { Session } from "./main";
 
@@ -502,15 +502,6 @@ export class AccountManager {
     await this.plugin.saveSettings();
   }
 
-  /** Parse "HH:MM" → minutes since midnight, or null if malformed. */
-  parseHM(s: string): number | null {
-    const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
-    if (!m) return null;
-    const h = +m[1], mn = +m[2];
-    if (h > 23 || mn > 59) return null;
-    return h * 60 + mn;
-  }
-
   /** Locate (or, if create, append) the schedule entry for an account email. */
   scheduleFor(email: string, create = false) {
     const lower = email.trim().toLowerCase();
@@ -537,30 +528,12 @@ export class AccountManager {
     return m;
   }
 
-  /** True when `now` falls inside any forbidden window of the account. Handles
-   *  same-day ranges (S<E) and overnight ranges (S>E: the post-midnight portion
-   *  belongs to the START day, so the t<E slice checks YESTERDAY's day membership).
-   *  Fail-safe: no schedule / no days / malformed times → false. */
+  /** True when `now` falls inside any forbidden window of the account.
+   *  Pure logic lives in utils.timeBlockedAt (unit-tested in test/tests.ts). */
   isTimeBlocked(email: string, now = new Date()): boolean {
     const e = this.scheduleFor(email);
     if (!e || !e.ranges.length) return false;
-    const t = now.getHours() * 60 + now.getMinutes();
-    const day = now.getDay(); // 0=Sun … 6=Sat
-    const prevDay = (day + 6) % 7;
-    for (const r of e.ranges) {
-      const s = this.parseHM(r.start);
-      const en = this.parseHM(r.end);
-      if (s == null || en == null || s === en) continue;
-      const days = r.days || [];
-      if (s < en) {
-        if (t >= s && t < en && days.includes(day)) return true;
-      } else {
-        // overnight: [s..24h) on the start day, [0..en) on the next day
-        if (t >= s && days.includes(day)) return true;
-        if (t < en && days.includes(prevDay)) return true;
-      }
-    }
-    return false;
+    return timeBlockedAt(e.ranges, now);
   }
 
   /** Human label of an account's forbidden ranges, for tooltips/desc. */
@@ -1268,25 +1241,32 @@ export class AccountManager {
     const cur = this.currentAccountEmail();
     let pct: number | null = null;
     let src = "none";
-    // Keep the LAST match in the rolling buffer: old status-bar repaints linger
-    // in it, so the first match is the OLDEST % (a stale reading that delayed
-    // threshold crossings). Same policy as the email scan above.
-    const re = this.usageRegex();
-    const gre = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-    let m: RegExpMatchArray | null = null;
-    for (const mm of clean.matchAll(gre)) m = mm;
-    const scraped = m && m[1] !== undefined ? parseInt(m[1], 10) : NaN;
-    if (!isNaN(scraped)) {
-      if (this.barAccountEmail && this.barAccountEmail !== cur) {
-        src = "scrape(anchored-out)";
-      } else {
-        pct = scraped;
-        src = "scrape";
-      }
-    }
+    // API first: the probe headers carry the authoritative % (the same counter
+    // the status bar renders), refreshed every minute for every account. The
+    // regex scrape of the bar text is fragile across CLI versions, so it is
+    // only the BACKUP for when there is no fresh probe reading (probe off,
+    // network down, token dead). Worst case of API-first: the reading is up to
+    // ~1 min stale, which the 10% ceiling margin absorbs.
+    pct = this.usagePct(cur);
+    if (pct != null) src = "api";
     if (pct == null) {
-      pct = this.usagePct(cur);
-      if (pct != null) src = "api";
+      // Backup scrape. Keep the LAST match in the rolling buffer: old
+      // status-bar repaints linger in it, so the first match is the OLDEST %
+      // (a stale reading that delayed threshold crossings). Same policy as the
+      // email scan above.
+      const re = this.usageRegex();
+      const gre = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+      let m: RegExpMatchArray | null = null;
+      for (const mm of clean.matchAll(gre)) m = mm;
+      const scraped = m && m[1] !== undefined ? parseInt(m[1], 10) : NaN;
+      if (!isNaN(scraped)) {
+        if (this.barAccountEmail && this.barAccountEmail !== cur) {
+          src = "scrape(anchored-out)";
+        } else {
+          pct = scraped;
+          src = "scrape";
+        }
+      }
     }
 
     const decide = (): string => {
@@ -1299,8 +1279,8 @@ export class AccountManager {
       }
       if (pct == null) {
         return src === "scrape(anchored-out)"
-          ? "no usable % — status bar shows another account and no fresh API reading"
-          : "no usage % available yet (status bar not scraped and no fresh API reading)";
+          ? "no usable % — no fresh API reading and the status bar shows another account"
+          : "no usage % available yet (no fresh API reading and status bar not scraped)";
       }
       // Destination that keeps the 10% margin: least-used eligible account still
       // BELOW the ceiling. Falls back to plain round-robin ONLY when we have no

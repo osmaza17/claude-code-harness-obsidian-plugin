@@ -349,6 +349,7 @@ xterm.js pinta la salida. Detalles de arquitectura en
 ```bash
 npm run dev     # build con watch
 npm run build   # build de producción
+npm test        # tests de la lógica pura (regexes, franjas horarias, parser de .jsonl)
 ```
 
 Tras compilar, recarga el plugin en Obsidian (desactivar/activar) o reinicia.

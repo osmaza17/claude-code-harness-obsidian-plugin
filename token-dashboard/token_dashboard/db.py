@@ -131,8 +131,9 @@ def _range_clause(since, until, col: str = "timestamp"):
 
 
 def _encode_slug(path: str) -> str:
-    """Claude Code's project-slug encoding: each of `:`, `\\`, `/`, space → one `-`."""
-    return re.sub(r"[:\\/ ]", "-", path)
+    """Claude Code's project-slug encoding: each of `:`, `\\`, `/`, space, `.` → one `-`
+    (dot verified against real ~/.claude/projects folders: ".ade" → "-ade")."""
+    return re.sub(r"[:\\/ .]", "-", path)
 
 
 def _walk_to_root(cwd: str, slug: str) -> Optional[str]:

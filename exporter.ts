@@ -11,14 +11,21 @@ import type ClaudeCodeHarnessPlugin from "./main";
 
 type ConvMessage = { role: "user" | "assistant"; text: string };
 
-/** Path to the conversation .jsonl Claude Code writes for this session.
- *  Slug encoding is Claude Code's own: each of `:`, `\`, `/`, space → one `-`
- *  (NOT collapsed — "SECOND BRAIN\.obsidian" gives a double dash). Mirrors
- *  token-dashboard/token_dashboard/db.py:_encode_slug. */
+/** Claude Code's project-slug encoding: each of `:`, `\`, `/`, space, `.` → one
+ *  `-` (NOT collapsed — "BRAIN\.obsidian" gives "BRAIN--obsidian"). The `.` was
+ *  verified against real ~/.claude/projects folders (".ade" → "-ade"); the full
+ *  charset the CLI replaces is unknown — extend if a path with other punctuation
+ *  ever resolves wrong. Mirrors token-dashboard/token_dashboard/db.py:_encode_slug. */
+export function encodeProjectSlug(cwd: string): string {
+  return cwd.replace(/[:\\/ .]/g, "-");
+}
+
+/** Path to the conversation .jsonl Claude Code writes for this session. */
 function conversationJsonlPath(cwd: string, sessionId: string): string {
   const os = nodeRequire("os");
-  const slug = cwd.replace(/[:\\/ ]/g, "-");
-  return path.join(os.homedir(), ".claude", "projects", slug, sessionId + ".jsonl");
+  return path.join(
+    os.homedir(), ".claude", "projects", encodeProjectSlug(cwd), sessionId + ".jsonl"
+  );
 }
 
 /** Text of a jsonl record's message.content: the string itself, or the joined
@@ -53,6 +60,11 @@ function readConversation(file: string): ConvMessage[] {
   } catch {
     return [];
   }
+  return parseConversation(raw);
+}
+
+/** Pure jsonl-text → messages parser (exported for test/tests.ts). */
+export function parseConversation(raw: string): ConvMessage[] {
   const msgs: ConvMessage[] = [];
   const byMsgId = new Map<string, number>(); // assistant message.id -> index in msgs
   for (const line of raw.split(/\r?\n/)) {

@@ -5,6 +5,44 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-07-17
 
+- **Auto-switch: fuente del % invertida — API primero, scraping de respaldo.**
+  Antes `maybeAutoSwitch` leía primero la regex de la barra de estado y caía a
+  la API; ahora consulta primero `usagePct()` (cabeceras de rate-limit, dato
+  autoritativo, refrescado cada 1 min y ya usado por el menú 👤 y
+  `pickNextAccount`) y solo si no hay lectura fresca (sondeo off, red caída,
+  token muerto) raspa la barra. Motivo: no colgar la decisión de una regex
+  frágil frente a cambios del CLI; coste extra cero (el sondeo ya corría).
+  Peor caso: lectura hasta ~1 min vieja, absorbida por el margen del 10 % del
+  techo. Sin cambios en la decisión en sí (techos, modos, cooldown, anclaje del
+  valor scrapeado). Test añadido con el texto real de la barra actual
+  (`5h: 5% (4h 54m)  7d: 12% …`). Actualizados settings-tab (desc. de "Live
+  usage") y README_TECNICO §"Fuente del %".
+- **CLAUDE.md adelgazado (93 KB → 16 KB).** Motivo: se carga entero en el
+  contexto de cada sesión de Claude (~25k tokens quemados por sesión). El
+  antiguo CLAUDE.md completo se movió ÍNTEGRO al final de `README_TECNICO.md`
+  ("APÉNDICE — Referencia exhaustiva del plugin"); el nuevo CLAUDE.md conserva
+  la versión operativa (arquitectura, reglas NO REGRESAR numeradas, inventario
+  de subsistemas condensado) y enlaza al apéndice para el detalle.
+- **Suite de tests para la lógica pura (`npm test`).** `test/tests.ts` (asserts
+  a pelo, sin framework) + `test/run.mjs` (compila con esbuild, alias
+  `obsidian` → `test/obsidian-stub.mjs`, ejecuta desde un temp que se borra).
+  Cubre: `looksLikePrompt`/`LIMIT_STOP_RE`/`AUTH_FAIL_RE`/`DEFAULT_USAGE_RE`
+  (incluido el caso de regresión "resets at" que provocaba switches en bucle),
+  franjas horarias, slug de proyecto y el parser del `.jsonl` del exporter
+  (dedupe por `message.id`, filtrado de meta/slash-commands). Refactor mínimo
+  para testear sin Obsidian: `parseHM` + `timeBlockedAt` movidos de accounts.ts
+  a utils.ts (accounts delega, misma lógica); `encodeProjectSlug` y
+  `parseConversation` exportadas de exporter.ts; `nodeRequire` ahora usa
+  `globalThis.window?.require` (importable desde Node sin window).
+- **Bug fix: el slug de proyecto no convertía `.` → `-`.** El CLI de Claude
+  Code sí lo hace (verificado contra `~/.claude/projects`: `.ade` → `-ade`,
+  `SECOND BRAIN\.obsidian\…` → `SECOND-BRAIN--obsidian-…`), así que
+  `conversationJsonlPath` habría construido una ruta errónea para cualquier
+  cwd con un punto (el vault actual no lo tiene → nunca se manifestó). Fix de
+  un carácter en el regex de `encodeProjectSlug` (exporter.ts) y en su espejo
+  `_encode_slug` (token-dashboard/token_dashboard/db.py). El charset completo
+  que reemplaza el CLI sigue sin verificarse (podría ser "todo lo no
+  alfanumérico"); ampliar si alguna ruta resuelve mal.
 - **Icono de dueño-activo movido a la izquierda de la etiqueta** (antes quedaba a
   la derecha de la fila, empujado por el `flex` de `.cch-acct-label`). Ahora se
   crea justo antes de la etiqueta, tras el toggle de elegibilidad, para leerse
