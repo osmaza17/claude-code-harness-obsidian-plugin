@@ -634,6 +634,26 @@
    caducado): mismo rojo de aviso que un bloqueo manual, pero la etiqueta sigue
    clicable (el cambio manual ignora los topes). No se redefine .cch-acct-label,
    así queda normal; si la fila también es cch-acct-blocked, ese estilo inerte gana. */
+/* Blinking person icon: the account's real owner is using it right now (its
+   5h % rose while inactive in this plugin) — visual "hands off" warning. */
+.cch-account-menu .cch-acct-owner {
+  display: flex;
+  align-items: center;
+  color: var(--color-red, #f85149);
+  animation: cch-owner-blink 1s steps(1, end) infinite;
+}
+.cch-account-menu .cch-acct-owner svg {
+  width: 14px;
+  height: 14px;
+}
+@keyframes cch-owner-blink {
+  0%, 50% {
+    opacity: 1;
+  }
+  50.01%, 100% {
+    opacity: 0.15;
+  }
+}
 .cch-account-menu .cch-acct-row.cch-acct-capped {
   background: rgba(220, 76, 76, 0.10);
   border-left: 3px solid var(--color-red, #e05252);

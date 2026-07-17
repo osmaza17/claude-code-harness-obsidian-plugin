@@ -747,10 +747,14 @@ llama dos veces por sesión (xterm no lo soporta).
   cuentas secuencialmente (~300 ms de desfase, guard `usageProbing`) y cachea en
   `accountUsage: Map<email, AccountUsage>`. Programación: todas al arrancar (~5 s)
   y al abrir el menú 👤 (en background; el menú es síncrono, muestra lo cacheado y
-  el siguiente abrir sale fresco; hay ítem "Refresh usage"); **cada 3 min**
-  (`registerInterval`) se hace `refreshUsage({refreshTokens:true})` sobre **todas**
-  las cuentas (keep-alive + sondeo, ver abajo) —3 min < 6 min = `USAGE_FRESH_MS`,
-  así `pickNextAccount` siempre tiene datos frescos—; y tras actividad solo la
+  el siguiente abrir sale fresco; hay ítem "Refresh usage"); **cada 1 min**
+  (`registerInterval`; era 3 min, se bajó para que la detección de dueño-activo
+  reaccione rápido — coste: una llamada Haiku de ~1 token por cuenta y tick,
+  despreciable; el keep-alive OAuth NO se acelera porque `refreshAccount` tiene
+  su propio throttle por caducidad) se hace `refreshUsage({refreshTokens:true})`
+  sobre **todas** las cuentas (keep-alive + sondeo, ver abajo) —1 min < 6 min =
+  `USAGE_FRESH_MS`, así `pickNextAccount` siempre tiene datos frescos—; y tras
+  actividad solo la
   activa (`maybeProbeOnActivity`, debounce 60 s). Al **activar** el auto-switch
   (toggle de cabecera o ajustes) se dispara un `refreshUsage({refreshTokens:true})`
   inmediato para revivir y calentar todas las cuentas sin esperar al siguiente tick. El menú 👤 renderiza con `accountMenuTitle()` un
@@ -760,7 +764,21 @@ llama dos veces por sesión (xterm no lo soporta).
   naranja, ≥90 rojo). Ambas cuentas atrás (hasta el reseteo de cada ventana) se
   formatean con `resetCountdown(epoch)` (días+horas para 7d, horas+minutos para
   5h; "" si falta/pasó). La lista de ajustes usa el texto plano `usageLabel(email)`
-  (`5h NN% (Hh Mm) · 7d NN% (Dd Hh)`, o `expired` si 401, `rate-limited` si 429). 401 → `error:"auth"`: `pickNextAccount`
+  (`5h NN% (Hh Mm) · 7d NN% (Dd Hh)`, o `expired` si 401, `rate-limited` si 429).
+  - **Detección de dueño-activo** (`ownerActiveAt` map + `ownerActive(email)`):
+    en `refreshUsage`, si el 5h % de una cuenta **inactiva** sube entre dos
+    sondeos de la **misma ventana** (mismo `reset5h`; un reset re-basea en vez de
+    comparar entre ventanas), solo puede estar gastándola su dueño real (el probe
+    propio es ~1 token Haiku y nunca mueve un punto redondeado), y se sella
+    `ownerActiveAt[email]=now`. `ownerActive` = sello hace < `OWNER_ACTIVE_MS`
+    (30 min). UI: el menú 👤 pinta un icono `user` **rojo parpadeante**
+    (`.cch-acct-owner`, keyframes `cch-owner-blink`) junto a la etiqueta =
+    "el dueño la está usando, no la toques". Solo aviso visual: NO capa el
+    auto-switch ni el cambio manual (decisión del usuario: el icono basta). En
+    memoria (se pierde al reiniciar Obsidian; se re-detecta en ≤2 ticks).
+    CAVEAT: resolución = el tick del sondeo (1 min) y solo detecta **consumo**,
+    no "sesión abierta sin gastar".
+  401 → `error:"auth"`: `pickNextAccount`
   la salta. OJO: 401 en la **cuenta activa** suele ser falso (su access token
   caducó pero `claude` lo refresca en la siguiente petición); por eso la etiqueta
   es `expired`, no "necesita login".
@@ -776,7 +794,7 @@ llama dos veces por sesión (xterm no lo soporta).
   (`https://platform.claude.com/v1/oauth/token`) con `{grant_type:"refresh_token",
   refresh_token, client_id: OAUTH_CLIENT_ID}` (endpoint y client_id verificados
   extrayéndolos del binario `claude.exe`; pueden cambiar con futuras versiones del
-  CLI). En cada tick de 3 min se **revisa** cada cuenta **inactiva** pero solo
+  CLI). En cada tick de 1 min se **revisa** cada cuenta **inactiva** pero solo
   se refresca de verdad si está caducada o le quedan <`REFRESH_SKEW_MS` (30 min);
   ese throttle mantiene el ritmo de refresco cercano al de `claude` (~1 por vida de
   token) y evita machacar el endpoint de tokens, que **limita por tasa con dureza
@@ -809,7 +827,7 @@ llama dos veces por sesión (xterm no lo soporta).
      dos snapshots con tokens vacíos). Ahora, si `claudeAiOauth` no trae ambos
      tokens, NO se escribe (warn en consola; Notice solo en guardado manual).
   2. **`maybeResnapshotActive(lower)`** (llamado desde la rama `isActive` de
-     `refreshAccount`, cada tick de 3 min): si `claude` rotó los tokens de la
+     `refreshAccount`, en cada tick del sondeo): si `claude` rotó los tokens de la
      cuenta ACTIVA (compara access+refresh de `.credentials.json` contra el
      snapshot), re-snapshotea con `saveCurrentAccount(false)`. Sin esto, salir de
      una cuenta con **`/login` dentro de la TUI** (en vez del selector del plugin,

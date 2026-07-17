@@ -174,7 +174,13 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   estuvieran desactivadas (pero el cambio **manual** a ellas sigue funcionando).
   Hace llamadas mínimas (modelo Haiku); se puede desactivar en ajustes
   ("Live usage (API)").
-- **Keep-alive de cuentas**: cada 3 min el plugin **refresca el token OAuth** de las
+- **Aviso "el dueño está usando su cuenta"**: si el % de 5 h de una cuenta que tú
+  NO estás usando sube entre dos sondeos, solo puede ser su dueño real gastándola.
+  El menú 👤 muestra entonces un **icono de persona rojo parpadeante** junto a esa
+  cuenta durante ~30 min desde la última subida detectada: señal de "no la uses
+  ahora para no pisarle el límite". Es solo un aviso visual (no bloquea nada).
+- **Keep-alive de cuentas**: cada minuto el plugin comprueba y **refresca el token
+  OAuth** de las
   cuentas cuyo token esté por caducar (el mismo flujo que usa Claude Code por
   dentro), para que las cuentas que no estás usando no se queden `expired` ni se
   excluyan del auto-switch. Solo refresca cuando hace falta (no machaca el servidor)

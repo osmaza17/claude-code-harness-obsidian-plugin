@@ -27,6 +27,7 @@ import {
   H_7D_UTIL,
   H_7D_RESET,
   USAGE_FRESH_MS,
+  OWNER_ACTIVE_MS,
   ACCOUNT_CACHE_MS,
   BROWSERS,
 } from "./constants";
@@ -69,6 +70,10 @@ export class AccountManager {
   };
   // Live usage probe cache + guards.
   accountUsage = new Map<string, AccountUsage>();
+  // Owner-activity: last time each INACTIVE account's 5h % was seen rising
+  // between probes — only its real owner can be spending it, so this flags
+  // "hands off, the owner is using it" (blinking person icon in the 👤 menu).
+  ownerActiveAt = new Map<string, number>();
   usageProbing = false;
   lastActiveProbe = 0;
   lastAutoSwitchDiag = 0; // throttle for the rotate/threshold console log
@@ -216,6 +221,17 @@ export class AccountManager {
           this.closeAccountMenu();
           this.switchToAccount(a.email);
         };
+
+        // Blinking person = the owner is using their account right now (its
+        // 5h % rose while inactive here) — don't spend it yourself.
+        if (this.ownerActive(a.email)) {
+          const owner = row.createDiv({ cls: "cch-acct-owner" });
+          setIcon(owner, "user");
+          owner.setAttr(
+            "title",
+            "Owner is using this account right now — avoid using it"
+          );
+        }
 
         // Right shortcut: open claude.ai in the browser mapped to THIS account
         // (where its SSO/cookie lives) so you can re-login it if it expired —
@@ -1049,6 +1065,20 @@ export class AccountManager {
           continue;
         }
         const usage = await this.probeUsage(token);
+        // Owner-activity detection: an INACTIVE account's 5h % can only rise
+        // if its real owner is spending it (our own probe is ~1 Haiku token,
+        // never a whole rounded point). Same 5h window only — a reset
+        // re-baselines instead of comparing across windows.
+        const prev = this.accountUsage.get(email);
+        if (
+          email !== cur &&
+          prev != null && !prev.error && prev.pct5h != null &&
+          !usage.error && usage.pct5h != null &&
+          prev.reset5h === usage.reset5h &&
+          usage.pct5h > prev.pct5h
+        ) {
+          this.ownerActiveAt.set(email, Date.now());
+        }
         this.accountUsage.set(email, usage);
         await new Promise((r) => setTimeout(r, 300)); // gentle spacing
       }
@@ -1056,6 +1086,13 @@ export class AccountManager {
     } finally {
       this.usageProbing = false;
     }
+  }
+
+  /** True if this account's 5h % rose recently while inactive here — i.e. its
+   *  real owner is (or just was) using it. */
+  ownerActive(email: string): boolean {
+    const at = this.ownerActiveAt.get(email.trim().toLowerCase());
+    return at != null && Date.now() - at < OWNER_ACTIVE_MS;
   }
 
   /** Fresh probed 5h % for an account, or null if missing/stale/errored. */

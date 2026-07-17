@@ -1674,14 +1674,17 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     // so restored tabs render at the right size without a garbled footer.
     if (!this.history.pendingOpen) this.ensureAtLeastOneSession();
 
-    // Token keep-alive + live usage (see refreshAccount()). Every 3 min we CHECK
-    // every account and refresh its OAuth token if it's expired/about to expire,
-    // then re-probe usage; also once shortly after start.
+    // Token keep-alive + live usage (see refreshAccount()). Every minute we
+    // CHECK every account and refresh its OAuth token if it's expired/about to
+    // expire (refreshAccount throttles the real refresh, so the OAuth endpoint
+    // is NOT hit more often), then re-probe usage; also once shortly after
+    // start. 1 min (was 3) so owner-activity detection reacts fast; each tick
+    // costs one ~1-token Haiku call per account — negligible.
     window.setTimeout(() => void this.accounts.refreshUsage({ refreshTokens: true }), 5000);
     this.registerInterval(
       window.setInterval(
         () => void this.accounts.refreshUsage({ refreshTokens: true }),
-        3 * 60 * 1000
+        60 * 1000
       )
     );
 

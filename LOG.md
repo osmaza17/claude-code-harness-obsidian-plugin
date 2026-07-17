@@ -3,6 +3,25 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-17
+
+- **Detección "el dueño está usando su cuenta" + icono parpadeante en el menú 👤.**
+  Motivo: el usuario usa cuentas prestadas y quiere saber cuándo su dueño real las
+  está usando para no pisarle el límite. Detección en `refreshUsage` (accounts.ts):
+  si el 5h % de una cuenta **inactiva** sube entre dos sondeos de la misma ventana
+  (mismo `reset5h`; un reset re-basea), solo puede ser el dueño gastándola (el
+  probe propio es ~1 token Haiku, nunca mueve un punto redondeado) → se sella
+  `ownerActiveAt[email]`. `ownerActive(email)` = sello < `OWNER_ACTIVE_MS`
+  (30 min, constants.ts). UI: icono `user` rojo parpadeante (`.cch-acct-owner`,
+  keyframes `cch-owner-blink` en styles.css) junto a la cuenta en el menú 👤, con
+  tooltip. Solo aviso visual: no capa auto-switch ni cambio manual. En memoria
+  (se re-detecta en ≤2 ticks tras reiniciar).
+- **Sondeo de uso: cada 1 min (era 3).** Para que la detección anterior reaccione
+  rápido. Coste extra: una llamada Haiku de ~1 token por cuenta y minuto
+  (despreciable). El refresh OAuth NO se acelera: `refreshAccount` ya solo
+  refresca cuando quedan <30 min de vida (`REFRESH_SKEW_MS`), así que el endpoint
+  de tokens recibe el mismo tráfico que antes.
+
 ## 2026-07-16
 
 - **Ficheros no-nota clicables en la salida de Claude (PDF, xlsx, docx…).**

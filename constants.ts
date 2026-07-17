@@ -152,6 +152,9 @@ export const H_7D_RESET = "anthropic-ratelimit-unified-7d-reset";
 export const OBSIDIAN_VIEWABLE_RE =
   /^(md|canvas|pdf|png|jpe?g|gif|svg|webp|avif|bmp|mp3|wav|ogg|oga|flac|m4a|3gp|mp4|webm|mov|mkv|ogv)$/i;
 export const USAGE_FRESH_MS = 6 * 60 * 1000; // a reading older than this is "stale"
+// How long an account keeps its "owner is using it" flag after its 5h % was
+// last seen rising while INACTIVE here (only its real owner can be spending).
+export const OWNER_ACTIVE_MS = 30 * 60 * 1000;
 // TTL for the cached currentAccountEmail()/listSavedAccounts() reads. Both are
 // called (several times) from maybeAutoSwitch on EVERY pty data chunk; without a
 // cache that meant re-reading ~/.claude.json (often huge) plus every account

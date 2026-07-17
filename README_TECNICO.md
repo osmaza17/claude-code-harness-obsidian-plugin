@@ -305,11 +305,20 @@ solapes) y guarda `AccountUsage` en `accountUsage: Map<email,…>`. Con
   `refreshUsage({refreshTokens:true})` sobre todas (revive + calienta).
 - **Al abrir el menú 👤**: todas (background; el menú es síncrono → pinta lo
   cacheado, el siguiente abrir sale fresco; ítem "Refresh usage").
-- **Cada 3 min** (`registerInterval`): `refreshUsage({refreshTokens:true})` sobre
+- **Cada 1 min** (`registerInterval`; era 3, bajado para que la detección de
+  dueño-activo reaccione rápido): `refreshUsage({refreshTokens:true})` sobre
   **todas** las cuentas. Mantiene los tokens vivos y los datos de las dormidas
-  frescos (3 min < `USAGE_FRESH_MS` = 6 min), de modo que `pickNextAccount` elige
-  la **menos gastada real** en vez de caer a round-robin.
+  frescos (1 min < `USAGE_FRESH_MS` = 6 min), de modo que `pickNextAccount` elige
+  la **menos gastada real** en vez de caer a round-robin. Coste por tick: una
+  llamada Haiku de ~1 token por cuenta (el refresh OAuth NO se acelera; ver
+  throttle abajo).
 - **Tras actividad** (`maybeProbeOnActivity`, debounce 60 s): solo la **activa**.
+
+**Detección de dueño-activo** (`ownerActiveAt` + `ownerActive`): si el 5h % de una
+cuenta **inactiva** sube entre dos sondeos de la misma ventana (mismo `reset5h`),
+solo puede ser su dueño real gastándola (el probe propio no mueve un punto
+redondeado) → icono `user` rojo parpadeante en el menú 👤 durante
+`OWNER_ACTIVE_MS` (30 min) desde la última subida. Solo aviso visual.
 
 `usagePct(email)` = % 5h fresco (`< USAGE_FRESH_MS` = 6 min) o null. `usageLabel`
 da el texto plano para ajustes (`5h NN% (Hh Mm) · 7d NN%`, `expired`,
@@ -367,11 +376,11 @@ y **fusiona** los tokens nuevos en el objeto guardado conservando los demás cam
 (`scopes`, `subscriptionType`…) y la unidad de `expiresAt` (ms). `oauthRefresh`
 resuelve a `null` en cualquier no-200/red/parse (nunca lanza).
 
-**Throttle por caducidad** (`REFRESH_SKEW_MS` = 30 min): cada tick de 3 min
+**Throttle por caducidad** (`REFRESH_SKEW_MS` = 30 min): cada tick del sondeo
 **revisa** todas las cuentas pero solo refresca las **caducadas o a punto de
 caducar**. Motivo: el endpoint de tokens **limita por tasa con dureza** (verificado:
 `POST` con refresh token falso → **HTTP 429** `rate_limit_error`), así que refrescar
-las 6 cada 3 min lo machacaría. El throttle deja el ritmo en ~1 refresco por vida de
+todas en cada tick lo machacaría. El throttle deja el ritmo en ~1 refresco por vida de
 token y cuenta (como `claude`).
 
 **Seguridad — rotación del refresh token.** Cada éxito devuelve un refresh token
@@ -386,7 +395,7 @@ token y cuenta (como `claude`).
    quedaba con un token muerto → 401 → `/login`). Ese era el antiguo "riesgo
    residual", ya eliminado.
 4. **Re-snapshot de la activa** (`maybeResnapshotActive`, 2026-07-06): en cada
-   tick de 3 min, si los tokens vivos de `.credentials.json` difieren del
+   tick del sondeo, si los tokens vivos de `.credentials.json` difieren del
    snapshot de la cuenta activa (= `claude` los rotó), se re-snapshotea
    (`saveCurrentAccount(false)`). Sin esto, salir de una cuenta con `/login`
    dentro de la TUI (en vez del selector del plugin, que sí re-snapshotea la
