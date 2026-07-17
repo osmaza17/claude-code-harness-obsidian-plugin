@@ -5,6 +5,11 @@ documentado aquí; el LOG arranca en esta entrada.
 
 ## 2026-07-17
 
+- **Icono de dueño-activo movido a la izquierda de la etiqueta** (antes quedaba a
+  la derecha de la fila, empujado por el `flex` de `.cch-acct-label`). Ahora se
+  crea justo antes de la etiqueta, tras el toggle de elegibilidad, para leerse
+  pegado al email. Solo cambia el orden del DOM en `openAccountMenu`; el CSS no
+  se tocó.
 - **Detección "el dueño está usando su cuenta" + icono parpadeante en el menú 👤.**
   Motivo: el usuario usa cuentas prestadas y quiere saber cuándo su dueño real las
   está usando para no pisarle el límite. Detección en `refreshUsage` (accounts.ts):

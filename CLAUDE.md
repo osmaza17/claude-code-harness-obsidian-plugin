@@ -772,7 +772,8 @@ llama dos veces por sesión (xterm no lo soporta).
     propio es ~1 token Haiku y nunca mueve un punto redondeado), y se sella
     `ownerActiveAt[email]=now`. `ownerActive` = sello hace < `OWNER_ACTIVE_MS`
     (30 min). UI: el menú 👤 pinta un icono `user` **rojo parpadeante**
-    (`.cch-acct-owner`, keyframes `cch-owner-blink`) junto a la etiqueta =
+    (`.cch-acct-owner`, keyframes `cch-owner-blink`) a la **izquierda de la
+    etiqueta**, justo antes del email (tras el toggle de elegibilidad) =
     "el dueño la está usando, no la toques". Solo aviso visual: NO capa el
     auto-switch ni el cambio manual (decisión del usuario: el icono basta). En
     memoria (se pierde al reiniciar Obsidian; se re-detecta en ≤2 ticks).

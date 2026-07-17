@@ -317,7 +317,8 @@ solapes) y guarda `AccountUsage` en `accountUsage: Map<email,…>`. Con
 **Detección de dueño-activo** (`ownerActiveAt` + `ownerActive`): si el 5h % de una
 cuenta **inactiva** sube entre dos sondeos de la misma ventana (mismo `reset5h`),
 solo puede ser su dueño real gastándola (el probe propio no mueve un punto
-redondeado) → icono `user` rojo parpadeante en el menú 👤 durante
+redondeado) → icono `user` rojo parpadeante en el menú 👤 (a la **izquierda de la
+etiqueta**, justo antes del email; tras el toggle de elegibilidad) durante
 `OWNER_ACTIVE_MS` (30 min) desde la última subida. Solo aviso visual.
 
 `usagePct(email)` = % 5h fresco (`< USAGE_FRESH_MS` = 6 min) o null. `usageLabel`

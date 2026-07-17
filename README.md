@@ -176,8 +176,8 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   ("Live usage (API)").
 - **Aviso "el dueño está usando su cuenta"**: si el % de 5 h de una cuenta que tú
   NO estás usando sube entre dos sondeos, solo puede ser su dueño real gastándola.
-  El menú 👤 muestra entonces un **icono de persona rojo parpadeante** junto a esa
-  cuenta durante ~30 min desde la última subida detectada: señal de "no la uses
+  El menú 👤 muestra entonces un **icono de persona rojo parpadeante** a la
+  izquierda del correo de esa cuenta durante ~30 min desde la última subida detectada: señal de "no la uses
   ahora para no pisarle el límite". Es solo un aviso visual (no bloquea nada).
 - **Keep-alive de cuentas**: cada minuto el plugin comprueba y **refresca el token
   OAuth** de las

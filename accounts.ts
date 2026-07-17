@@ -201,6 +201,18 @@ export class AccountManager {
           toggle.setAttr("aria-label", nowOn ? "Enabled" : "Disabled");
         };
 
+        // Blinking person = the owner is using their account right now (its
+        // 5h % rose while inactive here) — don't spend it yourself. Sits at the
+        // far left, right next to the email, so it reads with the account.
+        if (this.ownerActive(a.email)) {
+          const owner = row.createDiv({ cls: "cch-acct-owner" });
+          setIcon(owner, "user");
+          owner.setAttr(
+            "title",
+            "Owner is using this account right now — avoid using it"
+          );
+        }
+
         // Label: click to switch the live session to this account (unless
         // blocked, in which case it's inert — re-enable it with the toggle).
         const label = row.createDiv({ cls: "cch-acct-label" });
@@ -221,17 +233,6 @@ export class AccountManager {
           this.closeAccountMenu();
           this.switchToAccount(a.email);
         };
-
-        // Blinking person = the owner is using their account right now (its
-        // 5h % rose while inactive here) — don't spend it yourself.
-        if (this.ownerActive(a.email)) {
-          const owner = row.createDiv({ cls: "cch-acct-owner" });
-          setIcon(owner, "user");
-          owner.setAttr(
-            "title",
-            "Owner is using this account right now — avoid using it"
-          );
-        }
 
         // Right shortcut: open claude.ai in the browser mapped to THIS account
         // (where its SSO/cookie lives) so you can re-login it if it expired —
