@@ -3,8 +3,39 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-18
+
+- **Fix (definitivo): la skill seguía sin inyectarse de forma intermitente al
+  abrir pestañas nuevas.** Qué fallaba: pese al fix del 2026-07-16 (gate por
+  `bracketedPasteMode`), a veces la skill no se cargaba. Causa raíz, **medida**
+  con un probe standalone (claude real bajo node-pty, replicando el algoritmo
+  del plugin): claude activa el bracketed-paste a ~0,5 s del spawn, pero su
+  composer **descarta en silencio** todo input hasta ~2 s — un paste a ~0,95 s
+  (gate + 400 ms de asiento) se perdió en 6/6 corridas. El gate medía la señal
+  equivocada: "modo activado" ≠ "input vivo". La intermitencia en Obsidian venía
+  de que el timing del panel a veces retrasaba la inyección más allá de la
+  ventana muerta. Fix: `submit` en `maybeSendInitial` ahora **verifica el eco y
+  reintenta**: pastea, espera 400 ms, comprueba con `screenHasText` (escaneo del
+  viewport renderizado, mismo patrón que `screenShowsPrompt`, normalizando
+  espacios y bordes `│`) que el texto está en el composer, y solo entonces manda
+  Enter; si no está, `\x15` (limpia la línea, como `selectSkill`) + re-paste
+  cada 500 ms hasta el deadline de 60 s (al agotarse, envía a ciegas como
+  antes). Validado 7/7 con probes (siempre aterriza al 2.º intento en esta
+  máquina, composer con UNA sola copia; la 2.ª ocurrencia en el stream es el
+  menú de autocompletado, no un duplicado). El gate por bracketed-paste se
+  conserva solo como arranque temprano de los intentos.
+
 ## 2026-07-17
 
+- **Fix: skills enlazadas por symlink no aparecían en el selector.** `listSkills`
+  filtraba con `Dirent.isDirectory()`, que es `false` para un symlink (aunque
+  apunte a una carpeta) → una skill añadida como enlace (p.ej.
+  `socratiz-deck-engine -> …/Desktop/socratiz-deck-engine`) se caía de la lista.
+  Raíz: el Dirent de un symlink reporta `isSymbolicLink()`, no `isDirectory()`.
+  Fix: filtro `e.isDirectory() || e.isSymbolicLink()` (el `existsSync` del
+  `SKILL.md` de después ya sigue el enlace y valida que sea una skill real). El
+  menú ya releía disco en cada apertura, así que las carpetas normales sí se
+  auto-actualizaban; solo faltaban los enlaces.
 - **Auto-switch: fuente del % invertida — API primero, scraping de respaldo.**
   Antes `maybeAutoSwitch` leía primero la regex de la barra de estado y caía a
   la API; ahora consulta primero `usagePct()` (cabeceras de rate-limit, dato

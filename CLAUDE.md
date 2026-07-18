@@ -97,12 +97,16 @@ motivó el cambio.**
    inyección de la skill; 2 intentos fallidos en el historial de git). La guarda
    `this.child !== child` en los handlers de `startHost` se conserva (protege
    `reloadSession`, que sí es in-place).
-4. **Inyección inicial (`maybeSendInitial`): esperar a
-   `term.modes.bracketedPasteMode`**, no a un temporizador (el primer `data` es
-   conpty, no claude; con timer la skill se perdía de forma intermitente).
-   Poll 100 ms + 400 ms de asiento, tope 60 s. En tabs `resume:true` no se
-   inyecta nada. Envío con `pasteToPty()` (no `term.paste()`: exigía vista
-   montada). Logs `[cch initial]`.
+4. **Inyección inicial (`maybeSendInitial`): verificar el ECO en pantalla y
+   reintentar**, no confiar en ninguna señal previa. Medido (2026-07-18):
+   claude enciende bracketed-paste a ~0,5 s pero descarta TODO input hasta ~2 s
+   — ni timer fijo ni el gate por `bracketedPasteMode` (fix 2026-07-16) bastan;
+   ambos fallaban intermitentemente. `submit` pastea, comprueba con
+   `screenHasText` que el texto está en el composer y solo entonces manda Enter;
+   si no, `\x15` + re-paste cada 500 ms (tope 60 s → envío a ciegas). El gate
+   por bracketed-paste queda solo como arranque temprano de los intentos. En
+   tabs `resume:true` no se inyecta nada. Envío con `pasteToPty()` (no
+   `term.paste()`: exigía vista montada). Logs `[cch initial]`.
 5. **Resize**: la TUI repinta TODO en cada SIGWINCH y deja el frame viejo como
    scrollback → `fitNow(false)` por frame (solo xterm) + `fitNow(true)` con
    debounce ~120 ms (un solo resize al pty por gesto). Solo mandar resize si

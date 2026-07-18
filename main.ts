@@ -378,6 +378,23 @@ export class Session {
     return looksLikePrompt(text);
   }
 
+  /** True if the VISIBLE screen contains `text` (whitespace and composer box
+   *  borders stripped, so wrapping can't hide it). Verifies a startup paste
+   *  actually landed in the composer before we press Enter. */
+  private screenHasText(text: string): boolean {
+    const term = this.term;
+    if (!term) return false;
+    const buf = term.buffer.active;
+    const end = buf.baseY + term.rows;
+    let screen = "";
+    for (let y = Math.max(0, end - term.rows); y < end; y++) {
+      const line = buf.getLine(y);
+      if (line) screen += line.translateToString(true);
+    }
+    const norm = (s: string) => s.replace(/[\s│]/g, "");
+    return norm(screen).includes(norm(text));
+  }
+
   /** Reconcile the RED "awaiting your answer" flag with what's on screen. The red
    *  limit flag wins, so skip while it's set. */
   private maybeAwaitingInput() {
@@ -1161,17 +1178,38 @@ export class Session {
     console.log("[cch initial] tab", this.id, "armed:", steps.join(" · "), "(waiting for claude's input)");
 
     let i = 0;
+    const deadline = Date.now() + 60_000;
+    // Paste, VERIFY the echo on screen, THEN press Enter. Claude silently
+    // discards input received during its boot window — measured on this machine:
+    // bracketed-paste turns ON at ~0.5s but the composer doesn't accept text
+    // until ~2s — so any one-shot paste (timer or mode-gated) is a coin flip.
+    // Retrying with \x15 (clear line, same as selectSkill) until the text shows
+    // up in the composer is self-healing whatever claude's boot timing is.
     const submit = (text: string, then: () => void) => {
-      if (!this.child) {
-        console.log("[cch initial] tab", this.id, "ABORTED — pty gone before step:", text);
-        return;
-      }
-      console.log("[cch initial] tab", this.id, "sending:", text);
-      this.pasteToPty(text);
-      window.setTimeout(() => {
-        this.send({ t: "input", d: "\r" });
-        then();
-      }, 350);
+      const tryOnce = () => {
+        if (!this.child) {
+          console.log("[cch initial] tab", this.id, "ABORTED — pty gone before step:", text);
+          return;
+        }
+        console.log("[cch initial] tab", this.id, "sending:", text);
+        this.send({ t: "input", d: "\x15" }); // clear any half-landed earlier attempt
+        this.pasteToPty(text);
+        window.setTimeout(() => {
+          if (!this.child) return;
+          if (this.screenHasText(text)) {
+            this.send({ t: "input", d: "\r" });
+            then();
+          } else if (Date.now() < deadline) {
+            console.log("[cch initial] tab", this.id, "paste not echoed — retrying:", text);
+            window.setTimeout(tryOnce, 500);
+          } else {
+            console.log("[cch initial] tab", this.id, "echo never seen — submitting blind:", text);
+            this.send({ t: "input", d: "\r" });
+            then();
+          }
+        }, 400);
+      };
+      tryOnce();
     };
     const next = () => {
       if (i >= steps.length || !this.child) return;
@@ -1180,21 +1218,15 @@ export class Session {
         if (i < steps.length) window.setTimeout(next, 1800);
       });
     };
-    // WAIT FOR CLAUDE'S INPUT TO BE READY, don't guess with a fixed delay.
-    // The old code fired 1800ms after the FIRST pty output — but that first output
-    // is conpty's own repaint at spawn, milliseconds in, NOT claude. On a cold start
-    // (claude.exe boot, MCP servers) the prompt isn't up yet at 1.8s, so the paste
-    // lands in claude's raw-mode init and is swallowed → skill silently never sent.
-    // That's the intermittency: it depends on how fast claude boots that time.
-    // The gate is claude's TUI turning ON bracketed-paste mode (the same flag
-    // pasteToPty checks): its input is live exactly then. Cheap flag poll, NOT the
-    // screen-scan gate reverted in 2026-07 — it fires as soon as claude is up
-    // (usually FASTER than the old 1.8s), never on a slow fallback cap.
-    const deadline = Date.now() + 60_000;
+    // Bracketed-paste turning ON is only the EARLIEST hint to start trying — it
+    // is NOT proof the composer accepts input (measured: mode ON at ~0.5s, input
+    // live at ~2s; a paste in between is silently discarded). Correctness comes
+    // from submit()'s echo-verify + retry loop above; this gate just avoids
+    // pasting into conpty's pre-claude repaint.
     const whenReady = () => {
       if (!this.child) return;
       if ((this.term as any)?.modes?.bracketedPasteMode) {
-        console.log("[cch initial] tab", this.id, "claude input ready — injecting");
+        console.log("[cch initial] tab", this.id, "bracketed-paste on — starting paste attempts");
         window.setTimeout(next, 400); // let the prompt settle before typing
       } else if (Date.now() < deadline) {
         window.setTimeout(whenReady, 100);
@@ -1975,7 +2007,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
       const dir = this.skillsDir();
       return fs
         .readdirSync(dir, { withFileTypes: true })
-        .filter((e: any) => e.isDirectory())
+        // isDirectory() is false for symlinks; accept them too (the SKILL.md
+        // existsSync below follows the link and validates it's a real skill).
+        .filter((e: any) => e.isDirectory() || e.isSymbolicLink())
         .map((e: any) => e.name)
         .filter((name: string) =>
           fs.existsSync(path.join(dir, name, "SKILL.md"))
