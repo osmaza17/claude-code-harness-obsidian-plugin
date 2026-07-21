@@ -61,7 +61,10 @@ motivó el cambio.**
   `--resume <uuid>` al reabrir).
 - **Plugin** (gestor): `sessions[]` + `activeIndex`; solo la activa está montada
   en el panel (el host se mueve dentro/fuera del DOM; **`term.open()` una sola
-  vez por sesión**). Cerrar el panel no mata nada; la × de pestaña sí
+  vez por sesión**). **0 pestañas es estado válido** (2026-07-21): ni onload,
+  ni attachView, ni cerrar la última recrean sesión — panel vacío con el «+»;
+  `ensureAtLeastOneSession` solo lo usan las acciones de enviar notas. Cerrar
+  el panel no mata nada; la × de pestaña sí
   (`closeSession`, que archiva la config en `settings.closedSessions` si
   `hasActivity()`).
 - **Managers** (extraídos del Plugin, misma lógica): `plugin.accounts`

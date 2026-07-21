@@ -1701,10 +1701,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
 
     this.sweepTempImages(); // remove leftover paste PNGs from previous runs
 
-    // Start one blank background session now ONLY if there's nothing to restore.
-    // If there is, we wait for the panel (restorePendingOpenSessions in attachView)
-    // so restored tabs render at the right size without a garbled footer.
-    if (!this.history.pendingOpen) this.ensureAtLeastOneSession();
 
     // Token keep-alive + live usage (see refreshAccount()). Every minute we
     // CHECK every account and refresh its OAuth token if it's expired/about to
@@ -1760,6 +1756,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     return this.sessions[this.activeIndex] ?? null;
   }
 
+  /** Only for actions that NEED a live session (sending notes). The panel itself
+   *  may sit empty — no auto-created tabs on load, open or last-tab close. */
   private ensureAtLeastOneSession() {
     if (!this.sessions.length) this.newSession();
   }
@@ -1849,8 +1847,8 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.moveSession(this.sessions.length - 1, idx);
   }
 
-  /** Close a tab: kill that instance's claude process and drop it. Keeps at
-   *  least one session alive so the panel stays usable. */
+  /** Close a tab: kill that instance's claude process and drop it. Closing the
+   *  last tab leaves the panel empty (create a new one with the + button). */
   closeSession(sess: Session) {
     const idx = this.sessions.indexOf(sess);
     if (idx < 0) return;
@@ -1864,8 +1862,9 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
     this.sessions.splice(idx, 1);
     this.history.persistOpenSessions();
     if (!this.sessions.length) {
+      // Empty panel is a valid state: just the header with the + button.
       this.activeIndex = 0;
-      this.newSession(); // always keep one
+      this.header.rebuildHeader();
       return;
     }
     if (this.activeIndex > idx) this.activeIndex--;
@@ -1885,7 +1884,6 @@ export default class ClaudeCodeHarnessPlugin extends Plugin {
   attachView(root: HTMLElement) {
     this.viewRoot = root;
     this.history.restorePendingOpenSessions(); // re-create last session's tabs (once)
-    this.ensureAtLeastOneSession(); // blank fallback if there were none
     // rebuildHeader (remove-then-build), not buildHeader: the restore loop may have
     // left a header behind, and rebuildHeader is idempotent (no-op remove on first open).
     this.header.rebuildHeader();

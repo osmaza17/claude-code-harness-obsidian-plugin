@@ -3,6 +3,18 @@
 Registro de cambios del plugin. El historial anterior a esta fecha no quedó
 documentado aquí; el LOG arranca en esta entrada.
 
+## 2026-07-21
+
+- **El panel ya puede quedarse vacío (sin pestañas).** Antes el plugin forzaba
+  siempre al menos una sesión: al cargar Obsidian (`onload`), al abrir el panel
+  (`attachView`) y al cerrar la última pestaña (`closeSession` recreaba una).
+  Ahora los tres puntos dejan el panel vacío — solo la cabecera con el botón
+  «+» — y ninguna instancia de `claude` corre hasta que el usuario la pide.
+  `ensureAtLeastOneSession` queda solo para acciones que necesitan una sesión
+  viva (enviar notas con @ / drag-and-drop, que ya abrían el panel). La
+  cabecera ya toleraba 0 sesiones (todos los accesos van con `activeSession()?.`
+  y el strip itera `sessions`), así que no hizo falta tocar `header.ts`.
+
 ## 2026-07-18
 
 - **Fix (definitivo): la skill seguía sin inyectarse de forma intermitente al

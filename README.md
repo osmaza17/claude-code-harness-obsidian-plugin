@@ -95,10 +95,12 @@ pseudo-terminal y lo pinta con [xterm.js](https://xtermjs.org/).
   dependen del texto que imprime Claude, que puede cambiar.)
 - **Tema dinámico**: fondo, texto, cursor y paleta ANSI se ajustan al tema de
   Obsidian (claro/oscuro) y se reaplican al cambiarlo.
-- **Sesiones persistentes**: una sesión nueva arranca al abrir Obsidian aunque no
-  abras el panel; las que tenías abiertas antes se restauran al abrir el panel (ver
-  "Restaurar la sesión de trabajo"). No se cierran al cerrar el panel — siguen vivas
-  hasta que cierras su pestaña, cierras Obsidian o desactivas el plugin.
+- **Sesiones persistentes**: las pestañas que tenías abiertas antes se restauran
+  al abrir el panel (ver "Restaurar la sesión de trabajo"). No se cierran al cerrar
+  el panel — siguen vivas hasta que cierras su pestaña, cierras Obsidian o
+  desactivas el plugin. El panel puede quedarse **vacío**: si cierras todas las
+  pestañas (o no había nada que restaurar) no se crea ninguna sesión hasta que
+  pulses el botón **+**.
 - **Comandos de inicio + skill** configurables: al arrancar una sesión nueva se
   envían primero los comandos slash configurados (vacío por defecto) y por último
   la skill. **No** se envía `/model`: la pestaña se queda en el modelo por defecto
